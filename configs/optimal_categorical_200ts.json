@@ -172,10 +172,20 @@
       "tags": ["cvae", "abr", "signal-generation", "categorical", "optimized"]
     }
   },
-  "paths": {
-    "checkpoints": "checkpoints_optimal_categorical",
-    "outputs": "outputs_optimal_categorical",
-    "logs": "logs"
+  "checkpoints": {
+    "save_dir": "checkpoints_optimal_categorical",
+    "save_frequency": 15,
+    "save_best_only": false,
+    "monitor": "val_total_loss",
+    "mode": "min",
+    "filename_template": "epoch_{epoch:03d}_loss_{val_loss:.6f}.pth"
+  },
+  "outputs": {
+    "base_dir": "outputs_optimal_categorical",
+    "plots_dir": "outputs_optimal_categorical/plots",
+    "results_dir": "outputs_optimal_categorical/results",
+    "models_dir": "outputs_optimal_categorical/models",
+    "logs_dir": "logs"
   },
   "monitoring": {
     "log_interval": 100,

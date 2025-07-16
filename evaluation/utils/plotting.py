@@ -11,7 +11,11 @@ import os
 import warnings
 
 # Set style
-plt.style.use('seaborn-v0_8')
+try:
+    plt.style.use('seaborn-v0_8')
+except OSError:
+    # Fallback to available seaborn style
+    plt.style.use('seaborn')
 sns.set_palette("husl")
 
 
