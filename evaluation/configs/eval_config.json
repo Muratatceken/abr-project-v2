@@ -1,0 +1,57 @@
+{
+  "model": {
+    "checkpoint_path": "checkpoints/best_model.pth",
+    "device": "auto"
+  },
+  "data": {
+    "data_path": "data/processed/processed_data_clean.pkl",
+    "batch_size": 32,
+    "num_workers": 2,
+    "max_samples": 1000
+  },
+  "metrics": {
+    "reconstruction": {
+      "mse": true,
+      "mae": true,
+      "rmse": true,
+      "correlation": true
+    },
+    "peaks": {
+      "peak_mae": true,
+      "peak_accuracy": true,
+      "per_peak_metrics": true
+    },
+    "advanced": {
+      "dtw_distance": false,
+      "ssim": false
+    }
+  },
+  "visualization": {
+    "reconstruction": {
+      "enabled": true,
+      "num_samples": 8,
+      "save_individual": false
+    },
+    "latent_space": {
+      "enabled": true,
+      "method": "pca",
+      "num_samples": 500,
+      "color_by": "intensity"
+    },
+    "generation": {
+      "enabled": true,
+      "num_conditions": 5,
+      "samples_per_condition": 3
+    }
+  },
+  "output": {
+    "base_dir": "outputs/evaluation",
+    "save_plots": true,
+    "save_summary": true,
+    "timestamp": true
+  },
+  "logging": {
+    "level": "INFO",
+    "save_log": true
+  }
+} 

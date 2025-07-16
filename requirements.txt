@@ -1,0 +1,13 @@
+torch
+numpy
+matplotlib
+pandas
+scikit-learn
+jupyter
+openpyxl
+tensorboard
+seaborn
+scikit-image
+dtw-python
+pyyaml
+plotly 

@@ -1,0 +1,115 @@
+{
+  "metadata": {
+    "timestamp": "2025-07-15T17:07:08.784996",
+    "config": {
+      "model": {
+        "checkpoint_path": "checkpoints/best_model.pth",
+        "device": "auto"
+      },
+      "data": {
+        "data_path": "data/processed/processed_data_clean.pkl",
+        "batch_size": 32,
+        "num_workers": 2,
+        "max_samples": 1000
+      },
+      "metrics": {
+        "reconstruction": {
+          "mse": true,
+          "mae": true,
+          "rmse": true,
+          "correlation": true
+        },
+        "peaks": {
+          "peak_mae": true,
+          "peak_accuracy": true,
+          "per_peak_metrics": true
+        },
+        "advanced": {
+          "dtw_distance": false,
+          "ssim": false
+        }
+      },
+      "visualization": {
+        "reconstruction": {
+          "enabled": true,
+          "num_samples": 8,
+          "save_individual": false
+        },
+        "latent_space": {
+          "enabled": true,
+          "method": "pca",
+          "num_samples": 500,
+          "color_by": "intensity"
+        },
+        "generation": {
+          "enabled": true,
+          "num_conditions": 5,
+          "samples_per_condition": 3
+        }
+      },
+      "output": {
+        "base_dir": "outputs/evaluation",
+        "save_plots": true,
+        "save_summary": true,
+        "timestamp": true
+      },
+      "logging": {
+        "level": "INFO",
+        "save_log": true
+      }
+    },
+    "model_info": {
+      "signal_length": 467,
+      "static_params_dim": 10,
+      "latent_dim": 32,
+      "predict_peaks": true,
+      "num_peaks": 6,
+      "checkpoint_path": "checkpoints/best_model.pth",
+      "training_epoch": 38
+    }
+  },
+  "metrics": {
+    "reconstruction": {
+      "mae_mean": 0.5254201563075185,
+      "mae_std": 0.05944774568660392,
+      "mae_min": 0.3511870205402374,
+      "mae_max": 0.660224199295044,
+      "mae_count": 32,
+      "rmse_mean": 0.8814669498065812,
+      "rmse_std": 0.04470341084420097,
+      "rmse_min": 0.7589629181534824,
+      "rmse_max": 0.9731238286887821,
+      "rmse_count": 32,
+      "correlation_mean": 0.48771150177625955,
+      "correlation_std": 0.10087058850094989,
+      "correlation_min": 0.2518129808450647,
+      "correlation_max": 0.7012726307851326,
+      "correlation_count": 32,
+      "mse_mean": 0.7789823785424232,
+      "mse_std": 0.07833647947995612,
+      "mse_min": 0.5760247111320496,
+      "mse_max": 0.9469699859619141,
+      "mse_count": 32
+    },
+    "peaks": {
+      "peak_mae": 0.2845129072666168,
+      "peak_latency_mae": 0.2845129072666168,
+      "peak_amplitude_mae": NaN,
+      "peak_accuracy": 0.8247941445562672
+    },
+    "latent": {
+      "latent_mean": 2.5873392587527633e-05,
+      "latent_std": 0.001111248042434454,
+      "latent_var": 1.2348721156740794e-06,
+      "latent_dim": 32,
+      "effective_dim": 13
+    }
+  },
+  "visualizations": {
+    "reconstruction_comparison": "outputs/evaluation/eval_20250715_170708/plots/reconstruction_comparison.png",
+    "latent_space": "outputs/evaluation/eval_20250715_170708/latent_space/latent_space_2d.png",
+    "generation_samples": "outputs/evaluation/eval_20250715_170708/generated_samples/generation_samples.png",
+    "peak_analysis": "outputs/evaluation/eval_20250715_170708/plots/peak_analysis.png",
+    "metrics_summary": "outputs/evaluation/eval_20250715_170708/plots/metrics_summary.png"
+  }
+}

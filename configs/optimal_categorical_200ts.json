@@ -1,0 +1,195 @@
+{
+  "project": {
+    "name": "ABR_CVAE_Optimal_Categorical_200ts",
+    "description": "Optimized Conditional Variational Autoencoder for ABR Signal Generation - Categorical Encoding - 200 timestamps",
+    "version": "1.0.0"
+  },
+  "data": {
+    "raw_data_path": "data/abr_dataset.xlsx",
+    "processed_data_path": "data/processed/processed_data_categorical_200ts.pkl",
+    "preprocessing": {
+      "save_transformers": true,
+      "scaler_path": "data/processed/scaler.pkl",
+      "encoder_path": "data/processed/label_encoder.pkl",
+      "verbose": true
+    },
+    "dataloader": {
+      "batch_size": 64,
+      "val_split": 0.15,
+      "test_split": 0.1,
+      "num_workers": 6,
+      "shuffle": true,
+      "pin_memory": true,
+      "drop_last": false
+    }
+  },
+  "model": {
+    "architecture": {
+      "latent_dim": 64,
+      "predict_peaks": true,
+      "num_peaks": 6,
+      "static_params_dim": 6,
+      "encoder": {
+        "hidden_dims": [1024, 512, 256, 128],
+        "dropout": 0.15,
+        "activation": "leaky_relu",
+        "batch_norm": true
+      },
+      "decoder": {
+        "hidden_dims": [128, 256, 512, 1024, 2048],
+        "dropout": 0.15,
+        "activation": "leaky_relu",
+        "batch_norm": true
+      }
+    },
+    "initialization": {
+      "type": "xavier_uniform",
+      "gain": 0.02
+    }
+  },
+  "training": {
+    "optimizer": {
+      "type": "adamw",
+      "learning_rate": 2e-4,
+      "weight_decay": 1e-4,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "amsgrad": true
+    },
+    "scheduler": {
+      "type": "cosine_annealing_warm_restarts",
+      "T_0": 20,
+      "T_mult": 2,
+      "eta_min": 1e-7,
+      "verbose": true
+    },
+    "loss": {
+      "beta_scheduler": {
+        "type": "cosine",
+        "max_beta": 1.0,
+        "warmup_epochs": 25,
+        "decay_rate": 0.05
+      },
+      "peak_loss_weight": 0.8,
+      "use_peak_loss": true,
+      "gradient_clip": 0.5,
+      "reconstruction_loss": "mse",
+      "kl_loss_weight": 1.0
+    },
+    "epochs": 150,
+    "early_stopping": {
+      "patience": 25,
+      "min_delta": 1e-5,
+      "restore_best_weights": true
+    },
+    "validation": {
+      "frequency": 1,
+      "compute_metrics": true
+    }
+  },
+  "evaluation": {
+    "checkpoint_path": "checkpoints_optimal_categorical/best_model.pth",
+    "metrics": {
+      "reconstruction": {
+        "mse": true,
+        "mae": true,
+        "rmse": true,
+        "correlation": true,
+        "r_squared": true,
+        "ssim": true
+      },
+      "peaks": {
+        "peak_mae": true,
+        "peak_correlation": true,
+        "peak_presence_accuracy": true,
+        "per_peak_metrics": true,
+        "peak_timing_accuracy": true
+      },
+      "advanced": {
+        "dtw_distance": true,
+        "latent_space_quality": true,
+        "generation_diversity": true,
+        "interpolation_quality": true
+      }
+    },
+    "visualization": {
+      "signal_reconstruction": {
+        "enabled": true,
+        "num_samples": 12,
+        "save_individual": true,
+        "save_grid": true,
+        "show_peaks": true
+      },
+      "latent_space": {
+        "enabled": true,
+        "method": "both",
+        "color_by": ["intensity", "age", "hear_loss"],
+        "num_samples": 2000,
+        "perplexity": 50,
+        "random_state": 42
+      },
+      "sample_generation": {
+        "enabled": true,
+        "num_parameter_sets": 10,
+        "samples_per_set": 15,
+        "show_variability": true,
+        "interpolation_steps": 20
+      }
+    }
+  },
+  "inference": {
+    "checkpoint_path": "checkpoints_optimal_categorical/best_model.pth",
+    "output_dir": "outputs_optimal_categorical",
+    "generation": {
+      "num_samples": 100,
+      "batch_size": 20,
+      "save_signals": true,
+      "save_peaks": true,
+      "save_format": "both"
+    },
+    "static_params": {
+      "age_range": [18, 85],
+      "intensity_range": [55, 95],
+      "stimulus_rate_range": [11, 91],
+      "fmp_range": [0.05, 2.5],
+      "res_no_range": [5, 250],
+      "hear_loss_categories": [1, 2, 3, 4, 5],
+      "hear_loss_labels": ["Normal", "Nöropati̇", "Sni̇k", "Total", "İti̇k"]
+    }
+  },
+  "logging": {
+    "level": "INFO",
+    "log_file": "logs/training_optimal_categorical.log",
+    "tensorboard": {
+      "enabled": true,
+      "log_dir": "runs_optimal_categorical",
+      "comment": "CVAE_ABR_Optimal_Categorical_Training"
+    },
+    "wandb": {
+      "enabled": false,
+      "project": "abr-cvae-optimal-categorical",
+      "entity": null,
+      "tags": ["cvae", "abr", "signal-generation", "categorical", "optimized"]
+    }
+  },
+  "paths": {
+    "checkpoints": "checkpoints_optimal_categorical",
+    "outputs": "outputs_optimal_categorical",
+    "logs": "logs"
+  },
+  "monitoring": {
+    "log_interval": 100,
+    "save_frequency": 15,
+    "plot_frequency": 10,
+    "metric_frequency": 5
+  },
+  "device": {
+    "type": "auto",
+    "cuda_deterministic": false,
+    "cuda_benchmark": true
+  },
+  "reproducibility": {
+    "seed": 42,
+    "deterministic": false
+  }
+} 

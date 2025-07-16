@@ -1,0 +1,88 @@
+{
+  "model": {
+    "checkpoint_path": "checkpoints/best_model.pth",
+    "device": "auto"
+  },
+  "data": {
+    "data_path": "data/processed/processed_data_clean.pkl",
+    "batch_size": 32,
+    "num_workers": 4,
+    "split": "validation"
+  },
+  "sampling": {
+    "strategies": ["reconstruction", "random"],
+    "num_samples": 1000
+  },
+  "evaluation": {
+    "output_dir": "outputs/evaluation_current",
+    "timestamp_outputs": true,
+    "compute_reconstruction_metrics": true,
+    "compute_peak_metrics": true,
+    "compute_advanced_metrics": true,
+    "num_visualization_samples": 10,
+    "num_generation_samples": 5,
+    "save_results": true,
+    "batch_evaluation": true
+  },
+  "logging": {
+    "level": "INFO",
+    "format": "%(asctime)s - %(levelname)s - %(message)s",
+    "save_log": true
+  },
+  "metrics": {
+    "reconstruction": {
+      "mse": true,
+      "mae": true,
+      "rmse": true,
+      "correlation": true,
+      "r_squared": true
+    },
+    "peaks": {
+      "peak_mae": true,
+      "peak_correlation": true,
+      "peak_presence_accuracy": true,
+      "per_peak_metrics": true
+    },
+    "advanced": {
+      "dtw_distance": true,
+      "ssim": true,
+      "latent_space_quality": true
+    }
+  },
+  "visualization": {
+    "signal_reconstruction": {
+      "enabled": true,
+      "num_samples": 8,
+      "save_individual": true,
+      "save_grid": true
+    },
+    "latent_space": {
+      "enabled": true,
+      "method": "tsne",
+      "color_by": ["intensity", "age", "hear_loss"],
+      "num_samples": 1000,
+      "perplexity": 30,
+      "random_state": 42
+    },
+    "sample_generation": {
+      "enabled": true,
+      "num_parameter_sets": 6,
+      "samples_per_set": 10,
+      "show_variability": true
+    }
+  },
+  "outputs": {
+    "base_dir": "outputs/evaluation_current",
+    "plots_dir": "outputs/evaluation_current/plots",
+    "latent_space_dir": "outputs/evaluation_current/latent_space",
+    "generated_samples_dir": "outputs/evaluation_current/generated_samples",
+    "summary_file": "outputs/evaluation_current/summary.json"
+  },
+  "plotting": {
+    "figure_size": [12, 8],
+    "dpi": 300,
+    "format": "png",
+    "style": "seaborn-v0_8",
+    "color_palette": "husl"
+  }
+} 
