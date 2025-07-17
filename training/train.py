@@ -444,19 +444,38 @@ class CVAETrainer:
             # Forward pass
             model_outputs = self.model(signal, static_params)
             
-            if self.model.predict_peaks:
-                if len(model_outputs) == 5:  # includes recon_static_from_z
-                    recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
-                else:  # standard 4 outputs
-                    recon_signal, mu, logvar, predicted_peaks = model_outputs
+            # Handle different model architectures
+            if isinstance(model_outputs, dict):  # Hierarchical CVAE
+                recon_signal = model_outputs['recon_signal']
+                mu_global = model_outputs['mu_global']
+                logvar_global = model_outputs['logvar_global'] 
+                mu_local = model_outputs['mu_local']
+                logvar_local = model_outputs['logvar_local']
+                predicted_peaks = model_outputs.get('predicted_peaks', None)
+                recon_static_from_z = model_outputs.get('recon_static_from_z', None)
+                # For compatibility with existing code
+                mu = torch.cat([mu_global, mu_local], dim=1)
+                logvar = torch.cat([logvar_global, logvar_local], dim=1)
+            else:  # Standard CVAE
+                if self.model.predict_peaks:
+                    if len(model_outputs) == 5:  # includes recon_static_from_z
+                        recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
+                    else:  # standard 4 outputs
+                        recon_signal, mu, logvar, predicted_peaks = model_outputs
+                        recon_static_from_z = None
+                else:
+                    if len(model_outputs) == 4:  # includes recon_static_from_z
+                        recon_signal, mu, logvar, recon_static_from_z = model_outputs
+                    else:  # standard 3 outputs
+                        recon_signal, mu, logvar = model_outputs
+                        recon_static_from_z = None
+                    predicted_peaks = None
+                
+            # Set target data based on model configuration
+            if self.model.predict_peaks and predicted_peaks is not None:
                 target_peaks = val_batch['peaks'][:4].to(self.device)
                 peak_mask = val_batch['peak_mask'][:4].to(self.device)
             else:
-                if len(model_outputs) == 4:  # includes recon_static_from_z
-                    recon_signal, mu, logvar, recon_static_from_z = model_outputs
-                else:  # standard 3 outputs
-                    recon_signal, mu, logvar = model_outputs
-                predicted_peaks = None
                 target_peaks = None
                 peak_mask = None
             
