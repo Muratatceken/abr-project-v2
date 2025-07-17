@@ -65,7 +65,7 @@ class CVAEEvaluator:
         self.device = self._setup_device()
         self.logger = self._setup_logging()
         
-        # Create output directories
+        # Create output directories (this will also set up file logging)
         self.output_dir = self._create_output_directories()
         
         # Initialize model and data
@@ -113,6 +113,15 @@ class CVAEEvaluator:
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         
+        # File handler (if save_log is enabled)
+        if logging_config.get('save_log', False):
+            # Create log file path (will be set after output directory is created)
+            self._log_file_path = None
+            self._file_handler = None
+            self._should_save_log = True
+        else:
+            self._should_save_log = False
+        
         return logger
     
     def _create_output_directories(self) -> str:
@@ -129,6 +138,19 @@ class CVAEEvaluator:
         subdirs = ['plots', 'latent_space', 'generated_samples', 'logs']
         for subdir in subdirs:
             os.makedirs(os.path.join(output_dir, subdir), exist_ok=True)
+        
+        # Set up file logging if enabled
+        if hasattr(self, '_should_save_log') and self._should_save_log:
+            log_file_path = os.path.join(output_dir, 'logs', 'evaluation.log')
+            self._log_file_path = log_file_path
+            
+            # Create file handler
+            file_handler = logging.FileHandler(log_file_path)
+            file_handler.setLevel(self.logger.level)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            self.logger.addHandler(file_handler)
+            self._file_handler = file_handler
         
         self.logger.info(f"Created output directory: {output_dir}")
         return output_dir
@@ -151,8 +173,11 @@ class CVAEEvaluator:
         # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # Get model configuration
-        model_config = checkpoint.get('config', {})
+        # Get model configuration from the evaluation config (preferred) or checkpoint
+        if 'architecture' in self.config['model']:
+            model_config = self.config['model']['architecture']
+        else:
+            model_config = checkpoint.get('config', {})
         
         # Create temporary dataset to get dimensions
         temp_dataset = ABRDataset(
@@ -167,7 +192,9 @@ class CVAEEvaluator:
             static_dim=sample_info['static_params_dim'],
             latent_dim=model_config.get('latent_dim', 32),
             predict_peaks=model_config.get('predict_peaks', True),
-            num_peaks=sample_info.get('num_peaks', 6)
+            num_peaks=sample_info.get('num_peaks', 6),
+            joint_generation=model_config.get('joint_generation', False),
+            use_film=model_config.get('use_film', False)
         ).to(self.device)
         
         # Load model weights
@@ -442,18 +469,21 @@ class CVAEEvaluator:
             latent_vectors = self.results['data']['latent']
             static_params = self.results['data']['static_params']
             
-            # Limit samples for visualization
-            max_samples = viz_config['latent_space']['num_samples']
-            if len(latent_vectors) > max_samples:
-                indices = torch.randperm(len(latent_vectors))[:max_samples]
-                latent_vectors = latent_vectors[indices]
-                static_params = static_params[indices]
-            
             save_path = os.path.join(self.output_dir, 'latent_space', 'latent_space_2d.png')
+            
+            # Get max_samples from config, with fallback
+            max_samples = viz_config['latent_space'].get('num_samples', 5000)
+            
+            # Handle color_by parameter (could be string or list)
+            color_by = viz_config['latent_space'].get('color_by', 'intensity')
+            if isinstance(color_by, list):
+                color_by = color_by[0]  # Use first color option
+            
             plot_latent_space_2d(
                 latent_vectors, static_params, save_path,
                 method=viz_config['latent_space']['method'],
-                color_by=viz_config['latent_space']['color_by']
+                color_by=color_by,
+                max_samples=max_samples
             )
             
             self.results['visualizations']['latent_space'] = save_path

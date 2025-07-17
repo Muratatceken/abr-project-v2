@@ -122,10 +122,18 @@ class CVAETrainer:
             static_params = batch['static_params'].to(self.device)
             
             # Forward pass
+            model_outputs = self.model(signal, static_params)
+            
             if self.model.predict_peaks:
-                recon_signal, mu, logvar, predicted_peaks = self.model(signal, static_params)
+                if len(model_outputs) == 5:  # includes recon_static_from_z
+                    recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
+                else:  # standard 4 outputs
+                    recon_signal, mu, logvar, predicted_peaks = model_outputs
             else:
-                recon_signal, mu, logvar = self.model(signal, static_params)
+                if len(model_outputs) == 4:  # includes recon_static_from_z
+                    recon_signal, mu, logvar, recon_static_from_z = model_outputs
+                else:  # standard 3 outputs
+                    recon_signal, mu, logvar = model_outputs
             
             # Calculate CVAE loss with annealed beta
             cvae_total_loss, recon_loss, kl_loss = cvae_loss(
@@ -207,10 +215,18 @@ class CVAETrainer:
                 static_params = batch['static_params'].to(self.device)
                 
                 # Forward pass
+                model_outputs = self.model(signal, static_params)
+                
                 if self.model.predict_peaks:
-                    recon_signal, mu, logvar, predicted_peaks = self.model(signal, static_params)
+                    if len(model_outputs) == 5:  # includes recon_static_from_z
+                        recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
+                    else:  # standard 4 outputs
+                        recon_signal, mu, logvar, predicted_peaks = model_outputs
                 else:
-                    recon_signal, mu, logvar = self.model(signal, static_params)
+                    if len(model_outputs) == 4:  # includes recon_static_from_z
+                        recon_signal, mu, logvar, recon_static_from_z = model_outputs
+                    else:  # standard 3 outputs
+                        recon_signal, mu, logvar = model_outputs
                 
                 # Calculate CVAE loss (use max_beta for validation)
                 cvae_total_loss, recon_loss, kl_loss = cvae_loss(
@@ -385,12 +401,20 @@ class CVAETrainer:
             static_params = val_batch['static_params'][:4].to(self.device)
             
             # Forward pass
+            model_outputs = self.model(signal, static_params)
+            
             if self.model.predict_peaks:
-                recon_signal, mu, logvar, predicted_peaks = self.model(signal, static_params)
+                if len(model_outputs) == 5:  # includes recon_static_from_z
+                    recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
+                else:  # standard 4 outputs
+                    recon_signal, mu, logvar, predicted_peaks = model_outputs
                 target_peaks = val_batch['peaks'][:4].to(self.device)
                 peak_mask = val_batch['peak_mask'][:4].to(self.device)
             else:
-                recon_signal, mu, logvar = self.model(signal, static_params)
+                if len(model_outputs) == 4:  # includes recon_static_from_z
+                    recon_signal, mu, logvar, recon_static_from_z = model_outputs
+                else:  # standard 3 outputs
+                    recon_signal, mu, logvar = model_outputs
                 predicted_peaks = None
                 target_peaks = None
                 peak_mask = None

@@ -1,0 +1,54 @@
+CVAE Model Evaluation Summary
+==================================================
+
+Model Information:
+--------------------
+  signal_length: 200
+  static_params_dim: 6
+  latent_dim: 64
+  predict_peaks: True
+  num_peaks: 6
+  checkpoint_path: checkpoints_optimal_categorical/best_model.pth
+  training_epoch: 141
+
+Reconstruction Metrics:
+--------------------
+  mae_mean: 0.412693
+  mae_std: 0.183851
+  mae_min: 0.052080
+  mae_max: 0.800893
+  rmse_mean: 0.571353
+  rmse_std: 0.241351
+  rmse_min: 0.080864
+  rmse_max: 0.991310
+  mse_mean: 0.384695
+  mse_std: 0.236476
+  mse_min: 0.006539
+  mse_max: 0.982695
+  correlation_mean: 0.358048
+  correlation_std: 0.258162
+  correlation_min: 0.000000
+  correlation_max: 0.801229
+
+Peak Prediction Metrics:
+--------------------
+  peak_mae: 0.239465
+  peak_latency_mae: 0.239465
+  peak_amplitude_mae: nan
+  peak_accuracy: 0.870351
+
+Latent Space Metrics:
+--------------------
+  latent_mean: 0.00010165201820200309
+  latent_std: 0.0013080304488539696
+  latent_var: 1.710943706711987e-06
+  latent_dim: 64
+  effective_dim: 20
+
+Generated Visualizations:
+--------------------
+  reconstruction_comparison: outputs_optimal_categorical/results/evaluation/eval_20250716_231301/plots/reconstruction_comparison.png
+  latent_space: outputs_optimal_categorical/results/evaluation/eval_20250716_231301/latent_space/latent_space_2d.png
+  generation_samples: outputs_optimal_categorical/results/evaluation/eval_20250716_231301/generated_samples/generation_samples.png
+  peak_analysis: outputs_optimal_categorical/results/evaluation/eval_20250716_231301/plots/peak_analysis.png
+  metrics_summary: outputs_optimal_categorical/results/evaluation/eval_20250716_231301/plots/metrics_summary.png

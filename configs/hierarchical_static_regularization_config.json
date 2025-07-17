@@ -1,0 +1,92 @@
+{
+    "model": {
+        "signal_length": 200,
+        "static_dim": 8,
+        "global_latent_dim": 32,
+        "local_latent_dim": 32,
+        "predict_peaks": true,
+        "num_peaks": 6,
+        "use_film": true,
+        "early_signal_ratio": 0.3,
+        "use_hierarchical_model": true
+    },
+    "training": {
+        "batch_size": 32,
+        "num_epochs": 100,
+        "learning_rate": 0.001,
+        "warmup_epochs": 10,
+        "gradient_clip": 1.0,
+        "log_interval": 50
+    },
+    "static_regularization": {
+        "use_static_regularization": true,
+        "static_regularization_weight": 0.5,
+        "use_infonce_loss": true,
+        "infonce_weight": 0.1,
+        "infonce_temperature": 0.07
+    },
+    "enhanced_loss": {
+        "use_enhanced_loss": true,
+        "loss_weights": {
+            "reconstruction": 1.0,
+            "static_params_reconstruction": 1.0,
+            "global_kl": 1.0,
+            "local_kl": 1.0,
+            "peak_loss": 1.0,
+            "alignment_loss": 0.1,
+            "static_regularization": 0.5,
+            "hierarchical_infonce": 0.1
+        },
+        "loss_config": {
+            "peak_loss_type": "mae",
+            "alignment_loss_type": "warped_mse",
+            "use_hierarchical_static_loss": true,
+            "use_hierarchical_infonce": true,
+            "infonce_temperature": 0.07,
+            "static_loss_weights": {
+                "global": 0.3,
+                "local": 0.3,
+                "combined": 0.4
+            },
+            "infonce_weights": {
+                "global": 0.5,
+                "local": 0.5
+            }
+        }
+    },
+    "hierarchical_beta_config": {
+        "global_scheduler": {
+            "type": "cosine",
+            "max_beta": 0.01,
+            "warmup_epochs": 10,
+            "num_cycles": 2,
+            "min_beta": 0.0
+        },
+        "local_scheduler": {
+            "type": "cosine", 
+            "max_beta": 0.01,
+            "warmup_epochs": 15,
+            "num_cycles": 1,
+            "min_beta": 0.0
+        }
+    },
+    "early_stopping": {
+        "patience": 20,
+        "min_delta": 0.001,
+        "restore_best_weights": true
+    },
+    "data": {
+        "data_file": "data/processed/processed_data_categorical_200ts.pkl",
+        "validation_split": 0.2,
+        "test_split": 0.1,
+        "shuffle": true,
+        "normalize_signals": true,
+        "normalize_static": true
+    },
+    "logging": {
+        "log_dir": "logs/hierarchical_static_regularization",
+        "save_model_every": 10,
+        "save_best_model": true,
+        "tensorboard_log": true
+    }
+} 

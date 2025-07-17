@@ -1,0 +1,30 @@
+{
+  "data_path": "data/processed/processed_data.pkl",
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "num_epochs": 100,
+  "latent_dim": 32,
+  "predict_peaks": true,
+  "use_peak_loss": true,
+  "peak_loss_weight": 1.0,
+  "max_beta": 1.0,
+  "warmup_epochs": 15,
+  "gradient_clip": 1.0,
+  "log_interval": 50,
+  "save_interval": 10,
+  "save_dir": "checkpoints",
+  "val_split": 0.2,
+  "early_stopping_patience": 15,
+  "early_stopping_delta": 0.0001,
+  "beta_scheduler_type": "linear",
+  "beta_scheduler_params": {
+    "max_beta": 1.0,
+    "warmup_epochs": 15
+  },
+  "lr_scheduler": true,
+  "lr_scheduler_patience": 5,
+  "lr_scheduler_factor": 0.5,
+  "min_lr": 1e-06,
+  "joint_generation": false,
+  "use_film": true
+}

@@ -190,7 +190,9 @@ def create_model(config: Dict[str, Any], dataset_info: Dict[str, Any], device: t
         static_dim=dataset_info['static_params_dim'],
         latent_dim=model_config['latent_dim'],
         predict_peaks=model_config['predict_peaks'],
-        num_peaks=dataset_info.get('num_peaks', 6)
+        num_peaks=dataset_info.get('num_peaks', 6),
+        joint_generation=model_config.get('joint_generation', False),
+        use_film=model_config.get('use_film', False)
     ).to(device)
     
     # Initialize model weights
@@ -392,7 +394,8 @@ def evaluate_mode(config: Dict[str, Any], checkpoint_path: Optional[str] = None)
     eval_config = {
         'model': {
             'checkpoint_path': checkpoint_path,
-            'device': config['device']['type']
+            'device': config['device']['type'],
+            'architecture': config['model']['architecture']
         },
         'data': {
             'data_path': config['data']['processed_data_path'],
@@ -406,12 +409,17 @@ def evaluate_mode(config: Dict[str, Any], checkpoint_path: Optional[str] = None)
         },
         'metrics': config['evaluation']['metrics'],
         'visualization': config['evaluation']['visualization'],
-        'outputs': {
+        'viz_config': config['evaluation']['visualization'],
+        'output': {
             'base_dir': os.path.join(config['outputs']['results_dir'], 'evaluation'),
             'plots_dir': os.path.join(config['outputs']['results_dir'], 'evaluation', 'plots'),
             'latent_space_dir': os.path.join(config['outputs']['results_dir'], 'evaluation', 'latent_space'),
             'generated_samples_dir': os.path.join(config['outputs']['results_dir'], 'evaluation', 'generated_samples'),
-            'summary_file': os.path.join(config['outputs']['results_dir'], 'evaluation', 'summary.json')
+            'summary_file': os.path.join(config['outputs']['results_dir'], 'evaluation', 'summary.json'),
+            'timestamp': True,
+            'save_plots': config.get('output', {}).get('save_plots', True),
+            'save_results': config.get('output', {}).get('save_results', True),
+            'save_summary': config.get('output', {}).get('save_summary', True)
         },
         'plotting': {
             'figure_size': [12, 8],
@@ -419,7 +427,8 @@ def evaluate_mode(config: Dict[str, Any], checkpoint_path: Optional[str] = None)
             'format': 'png',
             'style': 'seaborn-v0_8',
             'color_palette': 'husl'
-        }
+        },
+        'logging': config.get('logging', {})
     }
     
     # Create evaluator
@@ -429,7 +438,7 @@ def evaluate_mode(config: Dict[str, Any], checkpoint_path: Optional[str] = None)
     evaluator.run_evaluation()
     
     logging.info("Evaluation completed successfully")
-    logging.info(f"Results saved to: {eval_config['outputs']['base_dir']}")
+    logging.info(f"Results saved to: {eval_config['output']['base_dir']}")
 
 
 def inference_mode(config: Dict[str, Any], checkpoint_path: Optional[str] = None) -> None:

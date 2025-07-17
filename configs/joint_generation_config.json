@@ -1,0 +1,207 @@
+{
+  "project": {
+    "name": "ABR_CVAE_Joint_Generation",
+    "description": "Joint generation of ABR signals and static parameters using CVAE",
+    "version": "1.0.0"
+  },
+  "data": {
+    "raw_data_path": "data/abr_dataset.xlsx",
+    "processed_data_path": "data/processed/processed_data_categorical_200ts.pkl",
+    "preprocessing": {
+      "save_transformers": true,
+      "scaler_path": "data/processed/scaler.pkl",
+      "encoder_path": "data/processed/label_encoder.pkl",
+      "verbose": true
+    },
+    "dataloader": {
+      "batch_size": 64,
+      "val_split": 0.15,
+      "test_split": 0.1,
+      "num_workers": 6,
+      "shuffle": true,
+      "pin_memory": true,
+      "drop_last": false
+    }
+  },
+  "model": {
+    "architecture": {
+      "latent_dim": 64,
+      "predict_peaks": true,
+      "num_peaks": 6,
+      "static_params_dim": 6,
+      "joint_generation": true,
+      "encoder": {
+        "hidden_dims": [1024, 512, 256, 128],
+        "dropout": 0.15,
+        "activation": "leaky_relu",
+        "batch_norm": true
+      },
+      "decoder": {
+        "hidden_dims": [128, 256, 512, 1024, 2048],
+        "dropout": 0.15,
+        "activation": "leaky_relu",
+        "batch_norm": true
+      }
+    },
+    "initialization": {
+      "type": "xavier_uniform",
+      "gain": 0.02
+    }
+  },
+  "training": {
+    "optimizer": {
+      "type": "adamw",
+      "learning_rate": 2e-4,
+      "weight_decay": 1e-4,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8
+    },
+    "scheduler": {
+      "type": "cosine_annealing",
+      "T_max": 150,
+      "eta_min": 1e-6,
+      "warmup_epochs": 10,
+      "warmup_lr": 1e-5
+    },
+    "loss": {
+      "beta_scheduler": {
+        "type": "linear",
+        "max_beta": 0.5,
+        "warmup_epochs": 20,
+        "decay_rate": 0.1
+      },
+      "peak_loss_weight": 0.8,
+      "static_loss_weight": 1.0,
+      "use_peak_loss": true,
+      "gradient_clip": 1.0
+    },
+    "epochs": 150,
+    "joint_generation": true,
+    "early_stopping": {
+      "patience": 20,
+      "min_delta": 1e-4,
+      "restore_best_weights": true
+    },
+    "validation": {
+      "frequency": 1,
+      "compute_metrics": true
+    }
+  },
+  "evaluation": {
+    "checkpoint_path": "checkpoints_joint_generation/best_model.pth",
+    "metrics": {
+      "reconstruction": {
+        "mse": true,
+        "mae": true,
+        "rmse": true,
+        "correlation": true,
+        "r_squared": true,
+        "ssim": true
+      },
+      "peaks": {
+        "peak_mae": true,
+        "peak_correlation": true,
+        "peak_presence_accuracy": true,
+        "per_peak_metrics": true,
+        "peak_timing_accuracy": true
+      },
+      "static_params": {
+        "static_mse": true,
+        "static_mae": true,
+        "static_correlation": true,
+        "per_param_metrics": true
+      },
+      "advanced": {
+        "dtw_distance": true,
+        "latent_space_quality": true,
+        "generation_diversity": true,
+        "interpolation_quality": true
+      }
+    },
+    "visualization": {
+      "reconstruction": {
+        "enabled": true,
+        "num_samples": 8,
+        "save_individual": true,
+        "save_grid": true,
+        "show_peaks": true,
+        "show_static_params": true
+      },
+      "latent_space": {
+        "enabled": true,
+        "method": "pca",
+        "color_by": ["intensity", "age", "hear_loss"],
+        "num_samples": 2000,
+        "perplexity": 50,
+        "random_state": 42
+      },
+      "generation": {
+        "enabled": true,
+        "num_conditions": 10,
+        "samples_per_condition": 15,
+        "show_variability": true,
+        "interpolation_steps": 20,
+        "joint_generation": true
+      }
+    }
+  },
+  "inference": {
+    "checkpoint_path": "checkpoints_joint_generation/best_model.pth",
+    "output_dir": "outputs_joint_generation",
+    "generation": {
+      "num_samples": 100,
+      "batch_size": 20,
+      "save_signals": true,
+      "save_peaks": true,
+      "save_static_params": true,
+      "save_format": "both",
+      "joint_generation": true
+    }
+  },
+  "checkpoints": {
+    "save_dir": "checkpoints_joint_generation",
+    "save_frequency": 10,
+    "save_best_only": false,
+    "monitor": "val_total_loss",
+    "mode": "min",
+    "filename_template": "epoch_{epoch:03d}_loss_{val_loss:.6f}.pth"
+  },
+  "outputs": {
+    "base_dir": "outputs_joint_generation",
+    "plots_dir": "outputs_joint_generation/plots",
+    "results_dir": "outputs_joint_generation/results",
+    "models_dir": "outputs_joint_generation/models",
+    "logs_dir": "logs"
+  },
+  "output": {
+    "save_plots": true,
+    "save_results": true,
+    "save_summary": true,
+    "timestamp": true
+  },
+  "logging": {
+    "level": "INFO",
+    "log_file": "logs/training_joint_generation.log",
+    "save_log": true,
+    "tensorboard": {
+      "enabled": true,
+      "log_dir": "runs_joint_generation",
+      "comment": "CVAE_ABR_Joint_Generation"
+    }
+  },
+  "monitoring": {
+    "log_interval": 50,
+    "save_interval": 10,
+    "plot_interval": 10,
+    "eval_interval": 5
+  },
+  "device": {
+    "type": "auto",
+    "cuda_deterministic": false,
+    "cuda_benchmark": true
+  },
+  "reproducibility": {
+    "seed": 42,
+    "deterministic": false
+  }
+} 
