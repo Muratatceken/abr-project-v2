@@ -28,7 +28,7 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 
 # Project imports
-from models.cvae import CVAE
+from models.cvae import CVAE, HierarchicalCVAE
 from training.train import CVAETrainer
 from training.dataset import ABRDataset
 from utils.data_utils import (
@@ -185,15 +185,28 @@ def create_model(config: Dict[str, Any], dataset_info: Dict[str, Any], device: t
     """
     model_config = config['model']['architecture']
     
-    model = CVAE(
-        signal_length=dataset_info['signal_length'],
-        static_dim=dataset_info['static_params_dim'],
-        latent_dim=model_config['latent_dim'],
-        predict_peaks=model_config['predict_peaks'],
-        num_peaks=dataset_info.get('num_peaks', 6),
-        joint_generation=model_config.get('joint_generation', False),
-        use_film=model_config.get('use_film', False)
-    ).to(device)
+    # Check if hierarchical model is requested
+    if model_config.get('use_hierarchical_model', False):
+        model = HierarchicalCVAE(
+            signal_length=dataset_info['signal_length'],
+            static_dim=dataset_info['static_params_dim'],
+            global_latent_dim=model_config.get('global_latent_dim', 32),
+            local_latent_dim=model_config.get('local_latent_dim', 32),
+            predict_peaks=model_config['predict_peaks'],
+            num_peaks=dataset_info.get('num_peaks', 6),
+            use_film=model_config.get('use_film', False),
+            early_signal_ratio=model_config.get('early_signal_ratio', 0.3)
+        ).to(device)
+    else:
+        model = CVAE(
+            signal_length=dataset_info['signal_length'],
+            static_dim=dataset_info['static_params_dim'],
+            latent_dim=model_config['latent_dim'],
+            predict_peaks=model_config['predict_peaks'],
+            num_peaks=dataset_info.get('num_peaks', 6),
+            joint_generation=model_config.get('joint_generation', False),
+            use_film=model_config.get('use_film', False)
+        ).to(device)
     
     # Initialize model weights
     init_config = config['model'].get('initialization', {})
