@@ -193,6 +193,25 @@
     "use_self_attention": false,
     "use_gradient_penalty": false
   },
+      "inference": {
+    "checkpoint_path": "checkpoints_ultimate_optimal_v2/best_model.pth",
+    "output_dir": "outputs_ultimate_optimal_v2",
+    "generation": {
+      "num_samples": 100,
+      "batch_size": 20,
+      "save_signals": true,
+      "save_peaks": true,
+      "save_format": "both"
+    },
+    "static_params": {
+      "age_range": [18, 85],
+      "intensity_range": [55, 95],
+      "stimulus_rate_range": [11, 91],
+      "fmp_range": [0.05, 2.5],
+      "res_no_range": [5, 250],
+      "hear_loss_categories": [1, 2, 3, 4, 5, 6]
+    }
+  },
   "evaluation": {
     "checkpoint_path": "checkpoints_ultimate_optimal_v2/best_model.pth",
     "metrics": {
@@ -261,13 +280,26 @@
     "track_gradients": true,
     "track_weights": true
   },
-  "output": {
-    "checkpoint_dir": "checkpoints_ultimate_optimal_v2",
-    "output_dir": "outputs_ultimate_optimal_v2",
-    "save_every_n_epochs": 10,
-    "save_best_model": true,
-    "save_final_model": true,
-    "export_onnx": false
+  "checkpoints": {
+    "save_dir": "checkpoints_ultimate_optimal_v2",
+    "save_frequency": 10,
+    "save_best_only": false,
+    "monitor": "val_total_loss",
+    "mode": "min",
+    "filename_template": "epoch_{epoch:03d}_loss_{val_loss:.6f}.pth"
+  },
+  "outputs": {
+    "base_dir": "outputs_ultimate_optimal_v2",
+    "plots_dir": "outputs_ultimate_optimal_v2/plots",
+    "results_dir": "outputs_ultimate_optimal_v2/results",
+    "models_dir": "outputs_ultimate_optimal_v2/models",
+    "logs_dir": "logs"
+  },
+  "monitoring": {
+    "log_interval": 100,
+    "save_frequency": 10,
+    "plot_frequency": 5,
+    "metric_frequency": 5
   },
   "reproducibility": {
     "seed": 42,
