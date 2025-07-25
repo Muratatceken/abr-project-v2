@@ -804,24 +804,36 @@ class ABRTrainer:
                 dummy_signal = torch.randn(1, 1, 200).to(self.device)
                 dummy_static = torch.randn(1, 4).to(self.device)
                 
-                torch.onnx.export(
-                    self.model,
-                    (dummy_signal, dummy_static),
-                    onnx_path,
-                    export_params=True,
-                    opset_version=11,
-                    do_constant_folding=True,
-                    input_names=['signal', 'static_params'],
-                    output_names=['output'],
-                    dynamic_axes={
-                        'signal': {0: 'batch_size'},
-                        'static_params': {0: 'batch_size'},
-                        'output': {0: 'batch_size'}
-                    }
-                )
+                # Set model to eval mode for export
+                self.model.eval()
+                
+                with torch.no_grad():
+                    torch.onnx.export(
+                        self.model,
+                        (dummy_signal, dummy_static),
+                        onnx_path,
+                        export_params=True,
+                        opset_version=16,  # Updated to version 16 for better compatibility
+                        do_constant_folding=True,
+                        input_names=['signal', 'static_params'],
+                        output_names=['output'],
+                        dynamic_axes={
+                            'signal': {0: 'batch_size'},
+                            'static_params': {0: 'batch_size'},
+                            'output': {0: 'batch_size'}
+                        },
+                        verbose=False  # Reduce verbose output
+                    )
+                
+                # Restore training mode
+                self.model.train()
                 self.logger.info(f"Saved ONNX model: {onnx_path}")
+                
             except Exception as e:
+                # Restore training mode even if export fails
+                self.model.train()
                 self.logger.warning(f"Failed to save ONNX model: {str(e)}")
+                self.logger.info("Continuing training without ONNX export...")
         
         # Save model summary
         summary_filename = filename.replace('.pth', '_summary.txt')

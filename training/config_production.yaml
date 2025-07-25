@@ -77,7 +77,7 @@ min_delta: 1e-6
 save_best_only: false  # Save both best and regular checkpoints
 save_every: 10  # Save checkpoint every 10 epochs
 checkpoint_dir: "checkpoints/production"
-save_formats: ["pytorch", "onnx"]  # Save in multiple formats
+save_formats: ["pytorch"]  # Save in PyTorch format (ONNX disabled for stability)
 
 # Model saving criteria
 save_criteria:
