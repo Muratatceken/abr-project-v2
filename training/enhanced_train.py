@@ -365,6 +365,7 @@ class ABRTrainer:
         
         # Apply curriculum learning weights
         curriculum_weights = self.get_curriculum_weights(self.epoch)
+        self.curriculum_weights = curriculum_weights  # Store for logging
         self.loss_fn.update_loss_weights(curriculum_weights)
         
         # Log curriculum weights
@@ -545,10 +546,14 @@ class ABRTrainer:
             # Validate epoch
             val_metrics = self.validate_epoch()
             
+            # Extract key metrics with fallbacks
+            val_loss = val_metrics.get('gen_total_loss', val_metrics.get('direct_total_loss', float('inf')))
+            val_f1 = val_metrics.get('gen_f1_macro', val_metrics.get('direct_f1_macro', 0.0))
+            
             # Learning rate scheduling
             if self.scheduler is not None:
                 if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(val_metrics['total_loss'])
+                    self.scheduler.step(val_loss)
                 else:
                     self.scheduler.step()
             
@@ -557,15 +562,15 @@ class ABRTrainer:
             self.log_metrics(train_metrics, val_metrics, epoch_time)
             
             # Save best model
-            if val_metrics['f1_macro'] > self.best_val_f1:
-                self.best_val_f1 = val_metrics['f1_macro']
+            if val_f1 > self.best_val_f1:
+                self.best_val_f1 = val_f1
                 self.save_checkpoint('best_f1.pth', val_metrics)
                 self.patience_counter = 0
             else:
                 self.patience_counter += 1
             
-            if val_metrics['total_loss'] < self.best_val_loss:
-                self.best_val_loss = val_metrics['total_loss']
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
                 self.save_checkpoint('best_loss.pth', val_metrics)
             
             # Early stopping
@@ -586,19 +591,23 @@ class ABRTrainer:
     def log_metrics(self, train_metrics: Dict, val_metrics: Dict, epoch_time: float):
         """Log training metrics."""
         # Console logging
+        val_loss = val_metrics.get('gen_total_loss', val_metrics.get('direct_total_loss', 0.0))
+        val_f1 = val_metrics.get('gen_f1_macro', val_metrics.get('direct_f1_macro', 0.0))
+        
         self.logger.info(
             f"Epoch {self.epoch + 1:3d} | "
             f"Train Loss: {train_metrics['total_loss']:.4f} | "
-            f"Val Loss: {val_metrics['total_loss']:.4f} | "
-            f"Val F1: {val_metrics['f1_macro']:.4f} | "
+            f"Val Loss: {val_loss:.4f} | "
+            f"Val F1: {val_f1:.4f} | "
             f"Time: {epoch_time:.1f}s"
         )
         
         # TensorBoard logging with enhanced diagnostics
         if self.writer:
             # Log curriculum weights
-            for weight_name, weight_value in curriculum_weights.items():
-                self.writer.add_scalar(f'curriculum/{weight_name}', weight_value, self.epoch)
+            if hasattr(self, 'curriculum_weights'):
+                for weight_name, weight_value in self.curriculum_weights.items():
+                    self.writer.add_scalar(f'curriculum/{weight_name}', weight_value, self.epoch)
             
             # Log training metrics
             for key, value in train_metrics.items():
@@ -620,6 +629,8 @@ class ABRTrainer:
         
         # Weights & Biases logging
         if self.config.get('use_wandb', False) and WANDB_AVAILABLE:
+            curriculum_dict = {f'curriculum_{k}': v for k, v in self.curriculum_weights.items()} if hasattr(self, 'curriculum_weights') else {}
+            
             log_dict = {
                 'epoch': self.epoch,
                 'train_loss': train_metrics.get('total_loss', 0),
@@ -627,7 +638,7 @@ class ABRTrainer:
                 'learning_rate': self.optimizer.param_groups[0]['lr'],
                 **{f'train_{k}': v for k, v in train_metrics.items()},
                 **{f'val_{k}': v for k, v in val_metrics.items()},
-                **{f'curriculum_{k}': v for k, v in curriculum_weights.items()}
+                **curriculum_dict
             }
             
             # Add diagnostic visualizations to wandb
