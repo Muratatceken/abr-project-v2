@@ -241,7 +241,9 @@ class ConditionalEmbedding(nn.Module):
             # Return zero tensor if no inputs
             batch_size = (categorical_inputs.shape[0] if categorical_inputs is not None
                          else continuous_inputs.shape[0])
-            x = torch.zeros(batch_size, self.output_dim, device=self.device)
+            # Get device from model parameters
+            device = next(self.parameters()).device if len(list(self.parameters())) > 0 else 'cpu'
+            x = torch.zeros(batch_size, self.output_dim, device=device)
         
         # Apply output projection and dropout
         x = self.output_proj(x)

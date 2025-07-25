@@ -90,10 +90,13 @@ class SinusoidalEmbedding(nn.Module):
     
     def _extend_positional_encoding(self, new_max_len: int):
         """Extend positional encoding for longer sequences."""
-        pe = torch.zeros(new_max_len, self.d_model)
-        position = torch.arange(0, new_max_len, dtype=torch.float).unsqueeze(1)
+        # Get device from existing pe buffer
+        device = self.pe.device
+        
+        pe = torch.zeros(new_max_len, self.d_model, device=device)
+        position = torch.arange(0, new_max_len, dtype=torch.float, device=device).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, self.d_model, 2).float() *
+            torch.arange(0, self.d_model, 2, device=device).float() *
             -(math.log(self.temperature) / self.d_model)
         )
         pe[:, 0::2] = torch.sin(position * div_term)
@@ -225,17 +228,18 @@ class RelativePositionalEmbedding(nn.Module):
         """Initialize relative position embeddings."""
         nn.init.normal_(self.relative_position_embeddings.weight, mean=0.0, std=0.02)
     
-    def _get_relative_positions(self, seq_len: int) -> torch.Tensor:
+    def _get_relative_positions(self, seq_len: int, device: torch.device = None) -> torch.Tensor:
         """
         Generate relative position indices.
         
         Args:
             seq_len: Sequence length
+            device: Device to create tensors on
             
         Returns:
             Relative position indices [seq_len, seq_len]
         """
-        range_vec = torch.arange(seq_len)
+        range_vec = torch.arange(seq_len, device=device)
         range_mat = range_vec.unsqueeze(0).expand(seq_len, seq_len)
         distance_mat = range_mat - range_mat.transpose(0, 1)
         
@@ -266,7 +270,7 @@ class RelativePositionalEmbedding(nn.Module):
             Relative position bias [num_heads, seq_len, seq_len]
         """
         # Get relative position indices
-        relative_positions = self._get_relative_positions(seq_len).to(device)
+        relative_positions = self._get_relative_positions(seq_len, device)
         
         # Get relative position embeddings
         relative_embeddings = self.relative_position_embeddings(relative_positions)
@@ -320,7 +324,7 @@ class RotaryPositionalEmbedding(nn.Module):
     
     def _precompute_rotary_embeddings(self, max_len: int):
         """Precompute rotary embeddings for efficiency."""
-        positions = torch.arange(max_len, dtype=torch.float)
+        positions = torch.arange(max_len, dtype=torch.float, device=self.inv_freq.device)
         freqs = torch.outer(positions, self.inv_freq)
         
         # Create rotation matrices
