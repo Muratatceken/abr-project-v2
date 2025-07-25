@@ -1,0 +1,127 @@
+2025-07-25 18:53:53,448 - ABR_Production_Training - INFO - Starting production training: abr_production_100epochs_test
+2025-07-25 18:53:53,448 - ABR_Production_Training - INFO - Log file: logs/production/abr_production_100epochs_test.log
+2025-07-25 18:53:53,449 - ABR_Production_Training - INFO - Starting production training...
+2025-07-25 18:54:01,837 - root - INFO - Loaded 51961 samples from data/processed/ultimate_dataset.pkl
+2025-07-25 18:54:01,838 - root - INFO - Data validation passed
+2025-07-25 18:54:02,050 - root - INFO - Found 2038 unique patients
+2025-07-25 18:54:02,051 - root - INFO - Patient-level target distribution: {0: 1643, 2: 180, 4: 92, 3: 104, 1: 19}
+2025-07-25 18:54:02,051 - root - INFO - ABRDataset initialized with 51961 samples from 51961 patients
+2025-07-25 18:54:02,051 - root - INFO - Signal shape: (200,)
+2025-07-25 18:54:02,051 - root - INFO - Static params shape: (4,)
+2025-07-25 18:54:02,059 - root - INFO - Target distribution: {0: 41391, 3: 1715, 2: 5513, 4: 2925, 1: 417}
+2025-07-25 18:54:02,866 - root - INFO - Train: 36507 samples, 1426 patients
+2025-07-25 18:54:02,871 - root - INFO -   Class distribution: {0: 29096, 3: 1218, 2: 3847, 4: 2019, 1: 327}
+2025-07-25 18:54:02,874 - root - INFO - Validation: 7685 samples, 306 patients
+2025-07-25 18:54:02,875 - root - INFO -   Class distribution: {0: 6050, 2: 863, 3: 244, 4: 477, 1: 51}
+2025-07-25 18:54:02,877 - root - INFO - Test: 7769 samples, 306 patients
+2025-07-25 18:54:02,878 - root - INFO -   Class distribution: {2: 803, 0: 6245, 3: 253, 4: 429, 1: 39}
+2025-07-25 18:54:02,887 - root - INFO - ✅ Patient-stratified split completed successfully - no patient overlap
+2025-07-25 18:54:02,887 - root - INFO - ============================================================
+2025-07-25 18:54:02,887 - root - INFO - DATASET LOADING COMPLETE
+2025-07-25 18:54:02,887 - root - INFO - ============================================================
+2025-07-25 18:54:02,887 - root - INFO - Total samples: 51961
+2025-07-25 18:54:02,887 - root - INFO - Unique patients: 2038
+2025-07-25 18:54:02,887 - root - INFO - Training samples: 36507
+2025-07-25 18:54:02,887 - root - INFO - Validation samples: 7685
+2025-07-25 18:54:02,887 - root - INFO - Test samples: 7769
+2025-07-25 18:54:07,771 - ABR_Production_Training - ERROR - Training failed: '<=' not supported between instances of 'float' and 'str'
+Traceback (most recent call last):
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/run_production_training.py", line 271, in main
+    train_main(config_args)
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/enhanced_train.py", line 1066, in main
+    trainer = ABRTrainer(model, train_loader, val_loader, config, device)
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/enhanced_train.py", line 201, in __init__
+    self.setup_optimizer()
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/enhanced_train.py", line 274, in setup_optimizer
+    self.optimizer = optim.AdamW(
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/torch/optim/adamw.py", line 37, in __init__
+    super().__init__(
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/torch/optim/adam.py", line 59, in __init__
+    if not 0.0 <= eps:
+TypeError: '<=' not supported between instances of 'float' and 'str'
+2025-07-25 18:55:38,240 - ABR_Production_Training - INFO - Starting production training: abr_production_100epochs_test
+2025-07-25 18:55:38,240 - ABR_Production_Training - INFO - Log file: logs/production/abr_production_100epochs_test.log
+2025-07-25 18:55:38,240 - ABR_Production_Training - INFO - Starting production training...
+2025-07-25 18:55:45,378 - root - INFO - Loaded 51961 samples from data/processed/ultimate_dataset.pkl
+2025-07-25 18:55:45,379 - root - INFO - Data validation passed
+2025-07-25 18:55:45,570 - root - INFO - Found 2038 unique patients
+2025-07-25 18:55:45,571 - root - INFO - Patient-level target distribution: {0: 1643, 2: 180, 4: 92, 3: 104, 1: 19}
+2025-07-25 18:55:45,571 - root - INFO - ABRDataset initialized with 51961 samples from 51961 patients
+2025-07-25 18:55:45,571 - root - INFO - Signal shape: (200,)
+2025-07-25 18:55:45,571 - root - INFO - Static params shape: (4,)
+2025-07-25 18:55:45,579 - root - INFO - Target distribution: {0: 41391, 3: 1715, 2: 5513, 4: 2925, 1: 417}
+2025-07-25 18:55:46,390 - root - INFO - Train: 36507 samples, 1426 patients
+2025-07-25 18:55:46,396 - root - INFO -   Class distribution: {0: 29096, 3: 1218, 2: 3847, 4: 2019, 1: 327}
+2025-07-25 18:55:46,399 - root - INFO - Validation: 7685 samples, 306 patients
+2025-07-25 18:55:46,401 - root - INFO -   Class distribution: {0: 6050, 2: 863, 3: 244, 4: 477, 1: 51}
+2025-07-25 18:55:46,403 - root - INFO - Test: 7769 samples, 306 patients
+2025-07-25 18:55:46,404 - root - INFO -   Class distribution: {2: 803, 0: 6245, 3: 253, 4: 429, 1: 39}
+2025-07-25 18:55:46,415 - root - INFO - ✅ Patient-stratified split completed successfully - no patient overlap
+2025-07-25 18:55:46,415 - root - INFO - ============================================================
+2025-07-25 18:55:46,415 - root - INFO - DATASET LOADING COMPLETE
+2025-07-25 18:55:46,415 - root - INFO - ============================================================
+2025-07-25 18:55:46,415 - root - INFO - Total samples: 51961
+2025-07-25 18:55:46,415 - root - INFO - Unique patients: 2038
+2025-07-25 18:55:46,415 - root - INFO - Training samples: 36507
+2025-07-25 18:55:46,415 - root - INFO - Validation samples: 7685
+2025-07-25 18:55:46,415 - root - INFO - Test samples: 7769
+2025-07-25 18:55:51,726 - ABR_Production_Training - ERROR - Training failed: 'seaborn-v0_8' not found in the style library and input is not a valid URL or path; see `style.available` for list of available styles
+Traceback (most recent call last):
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/matplotlib/style/core.py", line 127, in use
+    rc = rc_params_from_file(style, use_default_template=False)
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/matplotlib/__init__.py", line 852, in rc_params_from_file
+    config_from_file = _rc_params_in_file(fname, fail_on_error=fail_on_error)
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/matplotlib/__init__.py", line 778, in _rc_params_in_file
+    with _open_file_or_url(fname) as fd:
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/contextlib.py", line 119, in __enter__
+    return next(self.gen)
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/matplotlib/__init__.py", line 755, in _open_file_or_url
+    with open(fname, encoding=encoding) as f:
+FileNotFoundError: [Errno 2] No such file or directory: 'seaborn-v0_8'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/run_production_training.py", line 271, in main
+    train_main(config_args)
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/enhanced_train.py", line 1073, in main
+    trainer = ABRTrainer(model, train_loader, val_loader, config, device)
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/enhanced_train.py", line 232, in __init__
+    self.setup_visualization()
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/enhanced_train.py", line 388, in setup_visualization
+    self.visualizer = TrainingVisualizer(
+  File "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/training/visualization.py", line 38, in __init__
+    plt.style.use('seaborn-v0_8')
+  File "/Users/muratatceken/opt/anaconda3/lib/python3.9/site-packages/matplotlib/style/core.py", line 130, in use
+    raise IOError(
+OSError: 'seaborn-v0_8' not found in the style library and input is not a valid URL or path; see `style.available` for list of available styles
+2025-07-25 18:56:13,698 - ABR_Production_Training - INFO - Starting production training: abr_production_100epochs_test
+2025-07-25 18:56:13,698 - ABR_Production_Training - INFO - Log file: logs/production/abr_production_100epochs_test.log
+2025-07-25 18:56:13,698 - ABR_Production_Training - INFO - Starting production training...
+2025-07-25 18:56:21,152 - root - INFO - Loaded 51961 samples from data/processed/ultimate_dataset.pkl
+2025-07-25 18:56:21,153 - root - INFO - Data validation passed
+2025-07-25 18:56:21,669 - root - INFO - Found 2038 unique patients
+2025-07-25 18:56:21,670 - root - INFO - Patient-level target distribution: {0: 1643, 2: 180, 4: 92, 3: 104, 1: 19}
+2025-07-25 18:56:21,670 - root - INFO - ABRDataset initialized with 51961 samples from 51961 patients
+2025-07-25 18:56:21,670 - root - INFO - Signal shape: (200,)
+2025-07-25 18:56:21,670 - root - INFO - Static params shape: (4,)
+2025-07-25 18:56:21,682 - root - INFO - Target distribution: {0: 41391, 3: 1715, 2: 5513, 4: 2925, 1: 417}
+2025-07-25 18:56:22,529 - root - INFO - Train: 36507 samples, 1426 patients
+2025-07-25 18:56:22,534 - root - INFO -   Class distribution: {0: 29096, 3: 1218, 2: 3847, 4: 2019, 1: 327}
+2025-07-25 18:56:22,536 - root - INFO - Validation: 7685 samples, 306 patients
+2025-07-25 18:56:22,537 - root - INFO -   Class distribution: {0: 6050, 2: 863, 3: 244, 4: 477, 1: 51}
+2025-07-25 18:56:22,539 - root - INFO - Test: 7769 samples, 306 patients
+2025-07-25 18:56:22,540 - root - INFO -   Class distribution: {2: 803, 0: 6245, 3: 253, 4: 429, 1: 39}
+2025-07-25 18:56:22,548 - root - INFO - ✅ Patient-stratified split completed successfully - no patient overlap
+2025-07-25 18:56:22,549 - root - INFO - ============================================================
+2025-07-25 18:56:22,549 - root - INFO - DATASET LOADING COMPLETE
+2025-07-25 18:56:22,549 - root - INFO - ============================================================
+2025-07-25 18:56:22,549 - root - INFO - Total samples: 51961
+2025-07-25 18:56:22,549 - root - INFO - Unique patients: 2038
+2025-07-25 18:56:22,549 - root - INFO - Training samples: 36507
+2025-07-25 18:56:22,549 - root - INFO - Validation samples: 7685
+2025-07-25 18:56:22,549 - root - INFO - Test samples: 7769
+2025-07-25 18:56:27,781 - training.enhanced_train - INFO - Visualization enabled: plots will be saved to plots/production
+2025-07-25 18:56:27,781 - training.enhanced_train - INFO - Starting training...
+2025-07-25 18:56:27,783 - training.enhanced_train - INFO - Model parameters: 46,371,139
+2025-07-25 18:56:27,786 - training.enhanced_train - INFO - Epoch 0 curriculum weights: {'signal': 1.0, 'peak_exist': 0.5, 'peak_latency': 1.0, 'peak_amplitude': 1.0, 'classification': 1.5, 'threshold': 0.8}

@@ -199,6 +199,13 @@ validation:
   val_augment: false  # Disable validation augmentation for speed
   test_split: 0.0
 
+# Fast validation settings
+validation:
+  fast_mode: true  # Skip expensive DDIM sampling during training
+  ddim_steps: 10   # Reduce from 50 to 10 steps when sampling is needed
+  skip_generation: true  # Only do direct forward pass during training
+  full_validation_every: 10  # Do full validation (with sampling) every N epochs
+
 # ============== CLINICAL CONSTRAINTS ==============
 clinical:
   peak_latency_range: [1.0, 8.0]

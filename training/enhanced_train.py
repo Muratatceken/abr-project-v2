@@ -43,6 +43,16 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+try:
+    from .visualization import TrainingVisualizer
+    VISUALIZATION_AVAILABLE = True
+except ImportError:
+    try:
+        from training.visualization import TrainingVisualizer
+        VISUALIZATION_AVAILABLE = True
+    except ImportError:
+        VISUALIZATION_AVAILABLE = False
+
 # Import model and components
 from models.hierarchical_unet import ProfessionalHierarchicalUNet
 from models.blocks.film import CFGWrapper
@@ -217,6 +227,9 @@ class ABRTrainer:
             self.cfg_wrapper = model.cfg_wrapper
         else:
             self.cfg_wrapper = None
+            
+        # Setup visualization
+        self.setup_visualization()
     
     def setup_loss_function(self):
         """Setup loss function with class weights."""
@@ -258,24 +271,31 @@ class ABRTrainer:
         """Setup optimizer and learning rate scheduler."""
         # Optimizer with configurable parameters
         optimizer_config = self.config.get('optimizer', {})
+        
+        # Ensure parameters are correct types
+        learning_rate = float(self.config.get('learning_rate', 1e-4))
+        weight_decay = float(self.config.get('weight_decay', 0.01))
+        betas = optimizer_config.get('betas', [0.9, 0.999])
+        eps = float(optimizer_config.get('eps', 1e-8))
+        
         self.optimizer = optim.AdamW(
             self.model.parameters(),
-            lr=self.config.get('learning_rate', 1e-4),
-            weight_decay=self.config.get('weight_decay', 0.01),
-            betas=optimizer_config.get('betas', [0.9, 0.999]),
-            eps=optimizer_config.get('eps', 1e-8)
+            lr=learning_rate,
+            weight_decay=weight_decay,
+            betas=betas,
+            eps=eps
         )
         
         # Learning rate scheduler with configurable parameters
         scheduler_config = self.config.get('scheduler', {})
         scheduler_type = scheduler_config.get('type', 'cosine_warm_restarts')
         
-        if scheduler_type == 'cosine_warm_restarts':
+        if scheduler_type == 'cosine_warm_restarts' or scheduler_type == 'cosine_annealing_warm_restarts':
             self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 self.optimizer,
-                T_0=scheduler_config.get('T_0', 10),
-                T_mult=scheduler_config.get('T_mult', 2),
-                eta_min=scheduler_config.get('eta_min', 1e-6)
+                T_0=int(scheduler_config.get('T_0', 10)),
+                T_mult=int(scheduler_config.get('T_mult', 2)),
+                eta_min=float(scheduler_config.get('eta_min', 1e-6))
             )
         elif scheduler_type == 'reduce_on_plateau':
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -356,6 +376,28 @@ class ABRTrainer:
         # Save config
         with open(os.path.join(self.output_dir, 'config.json'), 'w') as f:
             json.dump(self.config, f, indent=2)
+    
+    def setup_visualization(self):
+        """Setup training visualization."""
+        visualization_config = self.config.get('visualization', {})
+        
+        if VISUALIZATION_AVAILABLE and visualization_config.get('enabled', False):
+            plot_dir = visualization_config.get('plot_dir', 'plots')
+            experiment_name = self.config.get('experiment_name', 'abr_training')
+            
+            self.visualizer = TrainingVisualizer(
+                plot_dir=plot_dir,
+                experiment_name=experiment_name
+            )
+            
+            self.plot_every = visualization_config.get('plot_every', 5)
+            self.logger.info(f"Visualization enabled: plots will be saved to {plot_dir}")
+        else:
+            self.visualizer = None
+            if not VISUALIZATION_AVAILABLE:
+                self.logger.warning("Visualization not available - missing dependencies")
+            else:
+                self.logger.info("Visualization disabled")
     
     def train_epoch(self) -> Dict[str, float]:
         """Train for one epoch."""
@@ -449,23 +491,37 @@ class ABRTrainer:
         return dict(epoch_metrics)
     
     def validate_epoch(self) -> Dict[str, float]:
-        """Validate for one epoch with DDIM sampling."""
+        """Validate for one epoch with optional DDIM sampling."""
         self.model.eval()
         epoch_metrics = defaultdict(float)
         num_batches = 0
         
-        # Initialize DDIM sampler for validation
-        from diffusion.sampling import DDIMSampler
-        from diffusion.schedule import get_noise_schedule
+        # Check if we should do fast validation
+        validation_config = self.config.get('validation', {})
+        fast_mode = validation_config.get('fast_mode', False)
+        skip_generation = validation_config.get('skip_generation', False)
+        full_validation_every = validation_config.get('full_validation_every', 10)
+        ddim_steps = validation_config.get('ddim_steps', 50)
         
-        # Create noise schedule for DDIM sampling
-        noise_schedule = get_noise_schedule('cosine', num_timesteps=1000)
-        ddim_sampler = DDIMSampler(noise_schedule, eta=0.0)  # Deterministic sampling
+        # Decide whether to do full validation with sampling
+        do_full_validation = not fast_mode or (self.epoch % full_validation_every == 0)
+        do_generation = do_full_validation and not skip_generation
+        
+        ddim_sampler = None
+        if do_generation:
+            # Initialize DDIM sampler for validation
+            from diffusion.sampling import DDIMSampler
+            from diffusion.schedule import get_noise_schedule
+            
+            # Create noise schedule for DDIM sampling
+            noise_schedule = get_noise_schedule('cosine', num_timesteps=1000)
+            ddim_sampler = DDIMSampler(noise_schedule, eta=0.0)  # Deterministic sampling
         
         # Set deterministic seed for reproducible validation
         torch.manual_seed(42)
         
-        progress_bar = tqdm(self.val_loader, desc=f'Validation {self.epoch}')
+        val_type = "Full" if do_generation else "Fast"
+        progress_bar = tqdm(self.val_loader, desc=f'{val_type} Validation {self.epoch}')
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(progress_bar):
@@ -477,48 +533,55 @@ class ABRTrainer:
                 batch_size = batch['signal'].size(0)
                 signal_length = batch['signal'].size(-1)
                 
-                # Generate samples using DDIM for realistic evaluation
-                generated_signals = ddim_sampler.sample(
-                    model=self.model,
-                    shape=(batch_size, 1, signal_length),
-                    static_params=batch['static_params'],
-                    device=self.device,
-                    num_steps=50,  # Faster sampling with fewer steps
-                    progress=False
-                )
-                
-                # Get predictions from generated signals
-                outputs = self.model(generated_signals, batch['static_params'])
-                
-                # Also evaluate direct forward pass for comparison
+                # Always do direct forward pass
                 direct_outputs = self.model(batch['signal'], batch['static_params'])
-                
-                # Compute loss on both generated and direct outputs
-                gen_loss, gen_loss_dict = self.loss_fn(outputs, batch)
                 direct_loss, direct_loss_dict = self.loss_fn(direct_outputs, batch)
                 
-                # Update metrics with both types
-                for key, value in gen_loss_dict.items():
-                    epoch_metrics[f'gen_{key}'] += value.item()
-                
+                # Update metrics with direct outputs
                 for key, value in direct_loss_dict.items():
                     epoch_metrics[f'direct_{key}'] += value.item()
                 
-                # Store generated signals for evaluation
-                if hasattr(self, 'evaluator'):
+                # Conditionally do generation-based evaluation
+                if do_generation and ddim_sampler is not None:
+                    # Generate samples using DDIM for realistic evaluation
+                    generated_signals = ddim_sampler.sample(
+                        model=self.model,
+                        shape=(batch_size, 1, signal_length),
+                        static_params=batch['static_params'],
+                        device=self.device,
+                        num_steps=ddim_steps,  # Use configurable steps
+                        progress=False
+                    )
+                    
+                    # Get predictions from generated signals
+                    outputs = self.model(generated_signals, batch['static_params'])
+                    gen_loss, gen_loss_dict = self.loss_fn(outputs, batch)
+                    
+                    # Update metrics with generated outputs
+                    for key, value in gen_loss_dict.items():
+                        epoch_metrics[f'gen_{key}'] += value.item()
+                    
+                    # Update progress bar with both metrics
+                    progress_bar.set_postfix({
+                        'gen_loss': f'{gen_loss.item():.4f}',
+                        'direct_loss': f'{direct_loss.item():.4f}',
+                        'signal_diff': f'{torch.mean((generated_signals - batch["signal"])**2).item():.4f}'
+                    })
+                else:
+                    # Update progress bar with only direct metrics
+                    progress_bar.set_postfix({
+                        'direct_loss': f'{direct_loss.item():.4f}',
+                        'mode': 'fast'
+                    })
+                
+                # Store generated signals for evaluation (only if we generated them)
+                if hasattr(self, 'evaluator') and do_generation and 'generated_signals' in locals():
                     # Create batch with generated signals for evaluation
                     eval_batch = batch.copy()
                     eval_batch['signal'] = generated_signals
                     self.evaluator.evaluate_batch(eval_batch, compute_loss=False)
                 
                 num_batches += 1
-                
-                # Update progress bar with key metrics
-                progress_bar.set_postfix({
-                    'gen_loss': f'{gen_loss.item():.4f}',
-                    'direct_loss': f'{direct_loss.item():.4f}',
-                    'signal_diff': f'{torch.mean((generated_signals - batch["signal"])**2).item():.4f}'
-                })
         
         # Average metrics
         for key in epoch_metrics:
@@ -561,6 +624,21 @@ class ABRTrainer:
             epoch_time = time.time() - start_time
             self.log_metrics(train_metrics, val_metrics, epoch_time)
             
+            # Create visualization plots
+            if hasattr(self, 'visualizer') and self.visualizer is not None:
+                # Update metrics in visualizer
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.visualizer.update_metrics(self.epoch, train_metrics, val_metrics, current_lr)
+                
+                # Create plots periodically
+                if (self.epoch + 1) % getattr(self, 'plot_every', 5) == 0:
+                    try:
+                        created_plots = self.visualizer.create_all_plots(save=True)
+                        if created_plots:
+                            self.logger.info(f"Created {len(created_plots)} visualization plots")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to create visualization plots: {str(e)}")
+            
             # Save best model
             if val_f1 > self.best_val_f1:
                 self.best_val_f1 = val_f1
@@ -573,16 +651,46 @@ class ABRTrainer:
                 self.best_val_loss = val_loss
                 self.save_checkpoint('best_loss.pth', val_metrics)
             
+            # Save milestone checkpoints
+            milestone_epochs = self.config.get('save_criteria', {}).get('milestone_epochs', [])
+            if (epoch + 1) in milestone_epochs:
+                milestone_filename = f'milestone_epoch_{epoch + 1}.pth'
+                self.save_checkpoint(milestone_filename, val_metrics)
+                self.logger.info(f"Saved milestone checkpoint at epoch {epoch + 1}")
+            
+            # Save regular checkpoints
+            save_every = self.config.get('save_every', 10)
+            if (epoch + 1) % save_every == 0:
+                regular_filename = f'checkpoint_epoch_{epoch + 1}.pth'
+                self.save_checkpoint(regular_filename, val_metrics)
+            
             # Early stopping
             if self.patience_counter >= self.patience:
                 self.logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
-            
-            # Save periodic checkpoint
-            if (epoch + 1) % self.config.get('save_every', 10) == 0:
-                self.save_checkpoint(f'checkpoint_epoch_{epoch + 1}.pth', val_metrics)
         
+        # Training completed - final saves and visualization
         self.logger.info("Training completed!")
+        
+        # Save final model
+        final_metrics = {'final_val_loss': val_loss, 'final_val_f1': val_f1}
+        self.save_checkpoint('final_model.pth', final_metrics)
+        
+        # Create final visualization
+        if hasattr(self, 'visualizer') and self.visualizer is not None:
+            try:
+                created_plots = self.visualizer.create_all_plots(save=True)
+                self.logger.info(f"Created final visualization with {len(created_plots)} plots")
+            except Exception as e:
+                self.logger.warning(f"Failed to create final visualization: {str(e)}")
+        
+        # Log final statistics
+        self.logger.info(f"Final Statistics:")
+        self.logger.info(f"  Best Validation Loss: {self.best_val_loss:.6f}")
+        self.logger.info(f"  Best Validation F1: {self.best_val_f1:.6f}")
+        self.logger.info(f"  Total Epochs: {epoch + 1}")
+        self.logger.info(f"  Output Directory: {self.output_dir}")
+        
         self.writer.close()
         
         if self.config.get('use_wandb', False) and WANDB_AVAILABLE:
@@ -658,22 +766,98 @@ class ABRTrainer:
             
             wandb.log(log_dict)
     
-    def save_checkpoint(self, filename: str, metrics: Dict):
-        """Save model checkpoint."""
+    def save_checkpoint(self, filename: str, metrics: Dict, save_formats: list = None):
+        """Save model checkpoint in multiple formats."""
+        if save_formats is None:
+            save_formats = self.config.get('save_formats', ['pytorch'])
+        
         checkpoint = {
             'epoch': self.epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,
             'scaler_state_dict': self.scaler.state_dict() if self.scaler else None,
-            'best_val_f1': self.best_val_f1,
             'best_val_loss': self.best_val_loss,
+            'best_val_f1': self.best_val_f1,
             'config': self.config,
-            'metrics': metrics
+            'metrics': metrics,
+            'training_time': getattr(self, 'training_start_time', None)
         }
         
-        torch.save(checkpoint, os.path.join(self.output_dir, filename))
-        self.logger.info(f"Checkpoint saved: {filename}")
+        # Create checkpoint directory
+        checkpoint_dir = self.config.get('checkpoint_dir', self.output_dir)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        # Save in PyTorch format
+        if 'pytorch' in save_formats:
+            pytorch_path = os.path.join(checkpoint_dir, filename)
+            torch.save(checkpoint, pytorch_path)
+            self.logger.info(f"Saved PyTorch checkpoint: {pytorch_path}")
+        
+        # Save in ONNX format (model only)
+        if 'onnx' in save_formats:
+            try:
+                onnx_filename = filename.replace('.pth', '.onnx')
+                onnx_path = os.path.join(checkpoint_dir, onnx_filename)
+                
+                # Create dummy input for ONNX export
+                dummy_signal = torch.randn(1, 1, 200).to(self.device)
+                dummy_static = torch.randn(1, 4).to(self.device)
+                
+                torch.onnx.export(
+                    self.model,
+                    (dummy_signal, dummy_static),
+                    onnx_path,
+                    export_params=True,
+                    opset_version=11,
+                    do_constant_folding=True,
+                    input_names=['signal', 'static_params'],
+                    output_names=['output'],
+                    dynamic_axes={
+                        'signal': {0: 'batch_size'},
+                        'static_params': {0: 'batch_size'},
+                        'output': {0: 'batch_size'}
+                    }
+                )
+                self.logger.info(f"Saved ONNX model: {onnx_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to save ONNX model: {str(e)}")
+        
+        # Save model summary
+        summary_filename = filename.replace('.pth', '_summary.txt')
+        summary_path = os.path.join(checkpoint_dir, summary_filename)
+        self.save_model_summary(summary_path, metrics)
+    
+    def save_model_summary(self, filepath: str, metrics: Dict = None):
+        """Save a human-readable model summary."""
+        with open(filepath, 'w') as f:
+            f.write("=" * 80 + "\n")
+            f.write("ABR MODEL SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            
+            # Model info
+            f.write(f"Epoch: {self.epoch + 1}\n")
+            f.write(f"Model Parameters: {sum(p.numel() for p in self.model.parameters()):,}\n")
+            f.write(f"Trainable Parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,}\n")
+            
+            # Training metrics
+            if metrics:
+                f.write(f"\nValidation Metrics:\n")
+                for key, value in metrics.items():
+                    f.write(f"  {key}: {value:.6f}\n")
+            
+            f.write(f"\nBest Metrics:\n")
+            f.write(f"  Best Val Loss: {self.best_val_loss:.6f}\n")
+            f.write(f"  Best Val F1: {self.best_val_f1:.6f}\n")
+            
+            # Configuration
+            f.write(f"\nTraining Configuration:\n")
+            f.write(f"  Learning Rate: {self.config.get('learning_rate', 'N/A')}\n")
+            f.write(f"  Batch Size: {self.config.get('batch_size', 'N/A')}\n")
+            f.write(f"  Optimizer: {self.config.get('optimizer', {}).get('type', 'N/A')}\n")
+            f.write(f"  Scheduler: {self.config.get('scheduler', {}).get('type', 'N/A')}\n")
+            
+        self.logger.info(f"Saved model summary: {filepath}")
 
     def get_curriculum_weights(self, epoch: int) -> Dict[str, float]:
         """

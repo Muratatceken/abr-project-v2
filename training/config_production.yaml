@@ -1,0 +1,146 @@
+# ABR Production Training Configuration
+# Full training setup for 150 epochs with comprehensive model saving and visualization
+
+# ============== CORE TRAINING PARAMETERS ==============
+num_epochs: 150
+learning_rate: 0.0001  # Slightly lower for stable long training
+gradient_accumulation_steps: 2
+batch_size: 32  # Balanced for memory and training speed
+num_workers: 6
+prefetch_factor: 4
+persistent_workers: true
+
+# ============== DATA CONFIGURATION ==============
+data_path: "data/processed/ultimate_dataset.pkl"
+train_split: 0.7
+val_split: 0.15
+test_split: 0.15
+
+# Fast validation settings
+validation:
+  fast_mode: true  # Skip expensive DDIM sampling during training
+  ddim_steps: 10   # Reduce from 50 to 10 steps when sampling is needed
+  skip_generation: true  # Only do direct forward pass during training
+  full_validation_every: 10  # Do full validation (with sampling) every N epochs
+  validate_every: 1  # Validate every epoch
+
+# ============== MODEL ARCHITECTURE ==============
+model:
+  base_channels: 64
+  n_levels: 4
+  n_classes: 5
+  dropout: 0.1
+  use_attention: true
+  use_film: true
+
+# ============== OPTIMIZER SETTINGS ==============
+optimizer:
+  type: "adamw"
+  weight_decay: 1e-5
+  betas: [0.9, 0.999]
+  eps: 1e-8
+
+# ============== LEARNING RATE SCHEDULER ==============
+scheduler:
+  type: "cosine_annealing_warm_restarts"
+  T_0: 25  # Restart every 25 epochs
+  T_mult: 2
+  eta_min: 1e-7
+  warmup_epochs: 5
+
+# ============== LOSS CONFIGURATION ==============
+loss_weights:
+  signal: 1.0
+  peak_exist: 0.5
+  peak_latency: 1.0
+  peak_amplitude: 1.0
+  classification: 1.0
+  threshold: 0.8
+
+use_class_weights: true
+label_smoothing: 0.1
+
+# ============== CURRICULUM LEARNING ==============
+curriculum:
+  enabled: true
+  ramp_epochs: 30
+  weights:
+    signal: [0.5, 1.0]
+    classification: [2.0, 1.0]
+    peak_exist: [0.2, 0.5]
+
+# ============== EARLY STOPPING ==============
+patience: 25  # Stop if no improvement for 25 epochs
+min_delta: 1e-6
+
+# ============== MODEL SAVING ==============
+save_best_only: false  # Save both best and regular checkpoints
+save_every: 10  # Save checkpoint every 10 epochs
+checkpoint_dir: "checkpoints/production"
+save_formats: ["pytorch", "onnx"]  # Save in multiple formats
+
+# Model saving criteria
+save_criteria:
+  best_loss: true
+  best_f1: true
+  best_accuracy: true
+  latest: true
+  milestone_epochs: [50, 100, 150]  # Save at specific epochs
+
+# ============== VISUALIZATION AND LOGGING ==============
+visualization:
+  enabled: true
+  save_plots: true
+  plot_dir: "plots/production"
+  plot_every: 5  # Create plots every 5 epochs
+  
+  # What to visualize
+  plot_types:
+    - "training_curves"
+    - "validation_metrics"
+    - "learning_rate"
+    - "loss_components"
+    - "sample_reconstructions"
+    - "confusion_matrix"
+    - "peak_predictions"
+
+# Logging configuration
+logging:
+  level: "INFO"
+  log_dir: "logs/production"
+  use_tensorboard: true
+  tensorboard_dir: "runs/production"
+  save_training_log: true
+  
+  # Log frequency
+  log_every: 50  # Log every 50 batches
+  log_metrics_every: 1  # Log metrics every epoch
+
+# ============== PERFORMANCE OPTIMIZATIONS ==============
+use_amp: true  # Mixed precision training
+use_memory_efficient_attention: true
+clear_cache_every: 100  # Clear CUDA cache every 100 batches
+pin_memory: true
+use_balanced_sampler: false
+
+# ============== REPRODUCIBILITY ==============
+random_seed: 42
+deterministic: false  # Set to true for full reproducibility (slower)
+benchmark: true  # Enable cudnn benchmark for faster training
+
+# ============== CLINICAL CONSTRAINTS ==============
+clinical:
+  apply_constraints: true
+  peak_latency_range: [1.0, 8.0]  # ms
+  amplitude_range: [-0.5, 0.5]   # μV
+  
+# ============== OUTPUT DIRECTORIES ==============
+output_dir: "outputs/production"
+experiment_name: "abr_production_150epochs"
+
+# ============== EVALUATION SETTINGS ==============
+evaluation:
+  enabled: true
+  eval_every: 10  # Comprehensive evaluation every 10 epochs
+  save_predictions: true
+  compute_clinical_metrics: true 
