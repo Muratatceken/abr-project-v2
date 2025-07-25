@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 
@@ -147,34 +147,7 @@ class ABRDataset(Dataset):
         return static_params
 
 
-def collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
-    """
-    Custom collate function for ABR data.
-    
-    Args:
-        batch: List of samples from dataset
-        
-    Returns:
-        Batched data dictionary
-    """
-    # Stack all tensors
-    patient_ids = [sample['patient_id'] for sample in batch]
-    static_params = torch.stack([sample['static_params'] for sample in batch])      # [B, 4]
-    signals = torch.stack([sample['signal'] for sample in batch])                   # [B, 1, 200]
-    v_peaks = torch.stack([sample['v_peak'] for sample in batch])                   # [B, 2]
-    v_peak_masks = torch.stack([sample['v_peak_mask'] for sample in batch])         # [B, 2]
-    targets = torch.stack([sample['target'] for sample in batch])                   # [B]
-    force_uncond = torch.tensor([sample['force_uncond'] for sample in batch])       # [B]
-    
-    return {
-        'patient_ids': patient_ids,
-        'static_params': static_params,
-        'signal': signals,
-        'v_peak': v_peaks,
-        'v_peak_mask': v_peak_masks,
-        'target': targets,
-        'force_uncond': force_uncond
-    }
+# Removed: collate_fn is now in data.dataset.py
 
 
 class EnhancedABRLoss(nn.Module):
@@ -221,6 +194,9 @@ class ABRTrainer:
         self.use_amp = config.get('use_amp', True)
         self.scaler = GradScaler() if self.use_amp else None
         
+        # Setup memory optimization
+        self.setup_memory_optimization()
+        
         # Setup logging
         self.setup_logging()
         
@@ -246,7 +222,25 @@ class ABRTrainer:
         """Setup loss function with class weights."""
         # Create loss function with class weights
         if self.config.get('use_class_weights', True):
-            targets = [sample['target'] for sample in self.train_loader.dataset.data]
+            # Handle both Subset and regular dataset objects
+            dataset = self.train_loader.dataset
+            if hasattr(dataset, 'dataset'):
+                # This is a Subset, get the underlying dataset
+                base_dataset = dataset.dataset
+                indices = dataset.indices
+                targets = [base_dataset[i]['target'].item() if torch.is_tensor(base_dataset[i]['target']) 
+                          else base_dataset[i]['target'] for i in indices]
+            elif hasattr(dataset, 'data'):
+                # This is a regular dataset with data attribute
+                targets = [sample['target'] for sample in dataset.data]
+            else:
+                # Fallback: iterate through the dataset
+                targets = []
+                for i in range(len(dataset)):
+                    sample = dataset[i]
+                    target = sample['target'].item() if torch.is_tensor(sample['target']) else sample['target']
+                    targets.append(target)
+            
             class_weights = create_class_weights(targets, self.config.get('num_classes', 5), self.device)
         else:
             class_weights = None
@@ -262,24 +256,26 @@ class ABRTrainer:
     
     def setup_optimizer(self):
         """Setup optimizer and learning rate scheduler."""
-        # Optimizer
+        # Optimizer with configurable parameters
+        optimizer_config = self.config.get('optimizer', {})
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.config.get('learning_rate', 1e-4),
             weight_decay=self.config.get('weight_decay', 0.01),
-            betas=(0.9, 0.999),
-            eps=1e-8
+            betas=optimizer_config.get('betas', [0.9, 0.999]),
+            eps=optimizer_config.get('eps', 1e-8)
         )
         
-        # Learning rate scheduler
-        scheduler_type = self.config.get('scheduler', 'cosine_warm_restarts')
+        # Learning rate scheduler with configurable parameters
+        scheduler_config = self.config.get('scheduler', {})
+        scheduler_type = scheduler_config.get('type', 'cosine_warm_restarts')
         
         if scheduler_type == 'cosine_warm_restarts':
             self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 self.optimizer,
-                T_0=self.config.get('T_0', 10),
-                T_mult=self.config.get('T_mult', 2),
-                eta_min=self.config.get('eta_min', 1e-6)
+                T_0=scheduler_config.get('T_0', 10),
+                T_mult=scheduler_config.get('T_mult', 2),
+                eta_min=scheduler_config.get('eta_min', 1e-6)
             )
         elif scheduler_type == 'reduce_on_plateau':
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -299,10 +295,37 @@ class ABRTrainer:
         else:
             self.scheduler = None
     
+    def setup_memory_optimization(self):
+        """Setup memory optimization features."""
+        memory_config = self.config.get('memory', {})
+        
+        # Enable memory efficient attention if available
+        if memory_config.get('use_memory_efficient_attention', False):
+            try:
+                torch.backends.cuda.enable_flash_sdp(True)
+                print("✓ Enabled Flash Attention for memory efficiency")
+            except:
+                print("⚠️ Flash Attention not available")
+        
+        # Set memory management options
+        if torch.cuda.is_available():
+            # Enable memory pool for faster allocation
+            torch.cuda.empty_cache()
+            # Set memory fraction if specified
+            if 'memory_fraction' in memory_config:
+                torch.cuda.set_per_process_memory_fraction(memory_config['memory_fraction'])
+        
+        # Store memory optimization settings
+        self.clear_cache_every = memory_config.get('clear_cache_every', 100)
+        self.memory_efficient = memory_config.get('use_memory_efficient_attention', False)
+    
     def setup_logging(self):
         """Setup logging and monitoring."""
         # Create output directory
-        self.output_dir = self.config.get('output_dir', f'runs/abr_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        output_dir = self.config.get('output_dir')
+        if output_dir is None:
+            output_dir = f'runs/abr_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+        self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         
         # Setup logging
@@ -350,50 +373,63 @@ class ABRTrainer:
         
         progress_bar = tqdm(self.train_loader, desc=f'Epoch {self.epoch}')
         
+        # Gradient accumulation setup
+        accumulation_steps = self.config.get('gradient_accumulation_steps', 1)
+        
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
             for key in ['static_params', 'signal', 'v_peak', 'v_peak_mask', 'target']:
                 if key in batch:
                     batch[key] = batch[key].to(self.device)
             
-            # Zero gradients
-            self.optimizer.zero_grad()
-            
             # Forward pass with mixed precision
             with autocast(enabled=self.config.get('use_amp', False)):
                 outputs = self.model(batch['signal'], batch['static_params'])
                 loss, loss_dict = self.loss_fn(outputs, batch)
+                
+                # Scale loss for gradient accumulation
+                loss = loss / accumulation_steps
             
             # Backward pass
             if self.config.get('use_amp', False):
                 self.scaler.scale(loss).backward()
-                
-                # Gradient clipping
-                if self.config.get('gradient_clip_norm', 0) > 0:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), 
-                        self.config.get('gradient_clip_norm', 1.0)
-                    )
-                
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
             else:
                 loss.backward()
+            
+            # Optimizer step only after accumulation_steps
+            if (batch_idx + 1) % accumulation_steps == 0:
+                if self.config.get('use_amp', False):
+                    # Gradient clipping
+                    if self.config.get('gradient_clip_norm', 0) > 0:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), 
+                            self.config.get('gradient_clip_norm', 1.0)
+                        )
+                    
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    # Gradient clipping
+                    if self.config.get('gradient_clip_norm', 0) > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            self.model.parameters(), 
+                            self.config.get('gradient_clip_norm', 1.0)
+                        )
+                    
+                    self.optimizer.step()
                 
-                # Gradient clipping
-                if self.config.get('gradient_clip_norm', 0) > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), 
-                        self.config.get('gradient_clip_norm', 1.0)
-                    )
-                
-                self.optimizer.step()
+                # Zero gradients after optimizer step
+                self.optimizer.zero_grad()
             
             # Update metrics
             for key, value in loss_dict.items():
                 epoch_metrics[key] += value.item()
             num_batches += 1
+            
+            # Memory optimization: clear cache periodically
+            if batch_idx % self.clear_cache_every == 0 and torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
             # Update progress bar
             if batch_idx % self.config.get('log_every', 10) == 0:
@@ -711,68 +747,7 @@ def load_dataset(data_path: str, valid_peaks_only: bool = False) -> Tuple[List[D
     return processed_data, scaler, label_encoder
 
 
-def create_data_loaders(
-    data: List[Dict], 
-    config: Dict[str, Any]
-) -> Tuple[DataLoader, DataLoader]:
-    """Create train and validation data loaders."""
-    
-    # Stratified train-val split
-    targets = [sample['target'] for sample in data]
-    train_indices, val_indices = train_test_split(
-        range(len(data)),
-        test_size=config.get('val_split', 0.2),
-        stratify=targets,
-        random_state=config.get('random_seed', 42)
-    )
-    
-    train_data = [data[i] for i in train_indices]
-    val_data = [data[i] for i in val_indices]
-    
-    # Create datasets
-    train_dataset = ABRDataset(
-        train_data, 
-        mode='train', 
-        augment=config.get('augment', True),
-        cfg_dropout_prob=config.get('cfg_dropout_prob', 0.1)
-    )
-    val_dataset = ABRDataset(val_data, mode='val', augment=False)
-    
-    # Create samplers for balanced training (optional)
-    train_sampler = None
-    if config.get('use_balanced_sampler', False):
-        train_targets = [sample['target'] for sample in train_data]
-        class_counts = np.bincount(train_targets)
-        class_weights = 1.0 / class_counts
-        sample_weights = [class_weights[target] for target in train_targets]
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.get('batch_size', 32),
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        collate_fn=collate_fn,
-        num_workers=config.get('num_workers', 4),
-        pin_memory=True,
-        drop_last=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.get('batch_size', 32),
-        shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=config.get('num_workers', 4),
-        pin_memory=True
-    )
-    
-    return train_loader, val_loader
+# Removed: Use create_optimized_dataloaders from data.dataset instead
 
 
 def create_model(config: Dict[str, Any]) -> nn.Module:
@@ -884,14 +859,14 @@ def main(args=None):
     # Convert args to config dict
     config = vars(args)
     
-    # Load dataset
-    data, scaler, label_encoder = load_dataset(
-        config['data_path'], 
-        config['valid_peaks_only']
-    )
+    # Import optimized dataloader from dataset.py
+    from data.dataset import create_optimized_dataloaders
     
-    # Create data loaders
-    train_loader, val_loader = create_data_loaders(data, config)
+    # Create optimized data loaders directly from dataset.py
+    train_loader, val_loader, _, _ = create_optimized_dataloaders(
+        data_path=config['data_path'],
+        config=config
+    )
     
     # Create model
     model = create_model(config)
@@ -969,8 +944,24 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
         print(f"Training samples: {len(train_data)}")
         print(f"Validation samples: {len(val_data)}")
         
-        # Create data loaders for this fold
-        train_loader, val_loader = create_data_loaders_from_data(train_data, val_data, config)
+        # For cross-validation, we need to create temporary datasets and use the optimized loader
+        # TODO: Update this to work with the new optimized dataloader when CV is needed
+        from torch.utils.data import DataLoader
+        from data.dataset import ABRDataset
+        
+        # Create datasets for this fold
+        train_dataset = ABRDataset(train_data, mode='train', augment=config.get('augment', True))
+        val_dataset = ABRDataset(val_data, mode='val', augment=False)
+        
+        # Create simple data loaders (can be optimized later)
+        train_loader = DataLoader(
+            train_dataset, batch_size=config.get('batch_size', 32), 
+            shuffle=True, num_workers=config.get('num_workers', 4), drop_last=True
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=config.get('batch_size', 32), 
+            shuffle=False, num_workers=config.get('num_workers', 4)
+        )
         
         # Create model for this fold
         model = create_model(config)
@@ -1062,68 +1053,7 @@ def run_cross_validation(config: Dict[str, Any]) -> Dict[str, Any]:
     return cv_results
 
 
-def create_data_loaders_from_data(
-    train_data: List[Dict], 
-    val_data: List[Dict], 
-    config: Dict[str, Any]
-) -> Tuple[DataLoader, DataLoader]:
-    """
-    Create data loaders from pre-split data (used in cross-validation).
-    
-    Args:
-        train_data: Training data samples
-        val_data: Validation data samples
-        config: Configuration dictionary
-        
-    Returns:
-        Tuple of (train_loader, val_loader)
-    """
-    from torch.utils.data import DataLoader, WeightedRandomSampler
-    
-    # Create datasets
-    train_dataset = ABRDataset(
-        train_data, 
-        mode='train', 
-        augment=config.get('augment', True),
-        cfg_dropout_prob=config.get('cfg_dropout_prob', 0.1)
-    )
-    val_dataset = ABRDataset(val_data, mode='val', augment=False)
-    
-    # Create samplers for balanced training (optional)
-    train_sampler = None
-    if config.get('use_balanced_sampler', False):
-        train_targets = [sample['target'] for sample in train_data]
-        class_counts = np.bincount(train_targets)
-        class_weights = 1.0 / class_counts
-        sample_weights = [class_weights[target] for target in train_targets]
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True
-        )
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.get('batch_size', 32),
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=config.get('num_workers', 4),
-        pin_memory=config.get('pin_memory', True),
-        collate_fn=collate_fn,
-        drop_last=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.get('batch_size', 32),
-        shuffle=False,
-        num_workers=config.get('num_workers', 4),
-        pin_memory=config.get('pin_memory', True),
-        collate_fn=collate_fn
-    )
-    
-    return train_loader, val_loader
+# Removed: Use create_optimized_dataloaders from data.dataset instead
 
 
 if __name__ == '__main__':

@@ -104,6 +104,24 @@ class ABRDiffusionLoss(nn.Module):
     
     def compute_signal_loss(self, pred_signal: torch.Tensor, true_signal: torch.Tensor) -> torch.Tensor:
         """Compute signal reconstruction loss."""
+        # Ensure shape compatibility
+        if pred_signal.shape != true_signal.shape:
+            # Handle common shape mismatches
+            if pred_signal.dim() == 2 and true_signal.dim() == 3:
+                # pred_signal: [batch, seq_len], true_signal: [batch, 1, seq_len]
+                if true_signal.size(1) == 1:
+                    true_signal = true_signal.squeeze(1)  # [batch, seq_len]
+            elif pred_signal.dim() == 3 and true_signal.dim() == 2:
+                # pred_signal: [batch, 1, seq_len], true_signal: [batch, seq_len]
+                if pred_signal.size(1) == 1:
+                    pred_signal = pred_signal.squeeze(1)  # [batch, seq_len]
+            elif pred_signal.dim() == 3 and true_signal.dim() == 3:
+                # Both are 3D, ensure they have the same shape
+                if pred_signal.size(1) == 1 and true_signal.size(1) != 1:
+                    pred_signal = pred_signal.squeeze(1)
+                elif true_signal.size(1) == 1 and pred_signal.size(1) != 1:
+                    true_signal = true_signal.squeeze(1)
+        
         if self.peak_loss_type == 'huber':
             return F.huber_loss(pred_signal, true_signal, delta=self.huber_delta)
         elif self.peak_loss_type == 'mae':

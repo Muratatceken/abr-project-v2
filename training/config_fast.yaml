@@ -1,0 +1,220 @@
+# Fast Training Configuration for ABR Model
+# Optimized for speed while maintaining model complexity
+
+# ============== EXPERIMENT SETTINGS ==============
+experiment:
+  name: "fast_abr_training"
+  description: "Speed-optimized ABR training with full model complexity"
+  tags: ["abr", "fast-training", "optimized"]
+  random_seed: 42
+
+# ============== DATA SETTINGS ==============
+data:
+  data_path: "data/processed/ultimate_dataset.pkl"
+  valid_peaks_only: false
+  val_split: 0.15  # Reduced validation split for faster epochs
+  augment: true
+  cfg_dropout_prob: 0.1
+
+# ============== MODEL ARCHITECTURE (FULL COMPLEXITY) ==============
+model:
+  # Keep full model complexity
+  input_channels: 1
+  static_dim: 4
+  base_channels: 64
+  n_levels: 4
+  sequence_length: 200
+  signal_length: 200
+  num_classes: 5
+  
+  # Enhanced features (keep all)
+  num_transformer_layers: 3
+  num_heads: 8
+  use_cross_attention: true
+  use_positional_encoding: true
+  positional_type: "sinusoidal"
+  
+  # Conditioning and regularization
+  film_dropout: 0.15
+  dropout: 0.1
+  use_cfg: true
+  use_multi_film: true
+  
+  # Advanced features (keep all)
+  use_attention_heads: true
+  predict_uncertainty: false
+  channel_multiplier: 2.0
+  use_enhanced_s4: true
+  use_learnable_timescales: true
+
+# ============== TRAINING SETTINGS (OPTIMIZED FOR SPEED) ==============
+training:
+  # Larger batch size for better GPU utilization
+  batch_size: 64  # Increased from 32
+  num_epochs: 50  # Reduced from 100 for faster convergence
+  learning_rate: 0.0002  # Slightly higher for faster convergence
+  weight_decay: 0.01
+  
+  # Mixed precision and optimization
+  use_amp: true
+  gradient_clip_norm: 1.0
+  
+  # Gradient accumulation for effective larger batch size
+  gradient_accumulation_steps: 2  # Effective batch size = 64 * 2 = 128
+  
+  # Early stopping and patience (more aggressive)
+  patience: 8  # Reduced from 15
+  save_every: 5  # Save less frequently
+  
+  # Optimized data loading
+  num_workers: 8  # Increased for faster data loading
+  pin_memory: true
+  prefetch_factor: 4  # Prefetch more batches
+  persistent_workers: true  # Keep workers alive between epochs
+  
+  # Sampling strategy
+  use_balanced_sampler: false
+
+# ============== LOSS FUNCTION SETTINGS ==============
+loss:
+  # Simplified loss weights for faster convergence
+  loss_weights:
+    signal: 1.0
+    peak_exist: 0.3  # Reduced
+    peak_latency: 0.8  # Reduced
+    peak_amplitude: 0.8  # Reduced
+    classification: 2.0  # Increased focus on main task
+    threshold: 0.6  # Reduced
+  
+  # Classification loss settings
+  use_focal_loss: false
+  focal_alpha: 1.0
+  focal_gamma: 2.0
+  use_class_weights: true
+  
+  # Peak loss settings
+  peak_loss_type: "huber"  # Faster than MSE
+  huber_delta: 1.0
+
+# ============== OPTIMIZER AND SCHEDULER (OPTIMIZED) ==============
+optimizer:
+  type: "adamw"
+  betas: [0.9, 0.95]  # Slightly more aggressive
+  eps: 1e-8
+
+scheduler:
+  type: "cosine_warm_restarts"
+  # Faster warm restarts
+  T_0: 5  # Reduced from 10
+  T_mult: 1.5  # Reduced from 2
+  eta_min: 1e-6
+  # Warm-up for stable start
+  warmup_epochs: 2  # Reduced from default
+
+# ============== EVALUATION SETTINGS ==============
+evaluation:
+  metrics:
+    - "f1_macro"
+    - "f1_weighted"
+    - "balanced_accuracy"
+  
+  # Validation settings (optimized)
+  validate_every: 2  # Less frequent validation
+  save_best_metric: "f1_macro"
+
+# ============== LOGGING AND MONITORING ==============
+logging:
+  output_dir: null
+  use_tensorboard: true
+  use_wandb: false
+  log_level: "INFO"
+  log_every: 20  # Less frequent logging
+
+# ============== INFERENCE AND CFG SETTINGS ==============
+inference:
+  cfg_guidance_scale: 1.5
+  task_specific_scales:
+    recon: 1.0
+    peak: 0.8
+    class: 1.2
+    threshold: 0.9
+  temperature: 1.0
+  apply_clinical_constraints: true
+  inference_batch_size: 128  # Larger for faster inference
+
+# ============== CHECKPOINT AND RESUMING ==============
+checkpoint:
+  resume_from: null
+  save_best_only: true  # Save only best model
+  save_last: false  # Don't save last to save disk space
+  save_optimizer_state: false  # Faster saving
+  save_scheduler_state: false
+
+# ============== HARDWARE AND PERFORMANCE ==============
+hardware:
+  gpu_ids: [0]
+  distributed: false
+  dataloader_pin_memory: true
+  benchmark: true  # Enable cudnn benchmark for consistent input sizes
+  deterministic: false  # Allow non-deterministic for speed
+
+# ============== ADVANCED TRAINING TECHNIQUES ==============
+advanced:
+  # Gradient accumulation
+  gradient_accumulation_steps: 2
+
+  # Label smoothing for better generalization
+  label_smoothing: 0.05
+
+  # Mixup disabled for speed
+  use_mixup: false
+  mixup_alpha: 0.2
+
+  # Test time augmentation disabled for speed
+  use_tta: false
+  tta_steps: 5
+
+  # Faster curriculum learning
+  curriculum:
+    enabled: true
+    peak_start: 2        # Start earlier
+    threshold_start: 4   # Start earlier
+    class_start: 1       # Start earlier
+    ramp_epochs: 3       # Faster ramp
+
+# ============== CLASS-SPECIFIC SETTINGS ==============
+classes:
+  names: ["NORMAL", "NÖROPATİ", "SNİK", "TOTAL", "İTİK"]
+  class_weights: null  # Computed automatically
+  oversample_minority: false
+  undersample_majority: false
+  adjust_thresholds: false
+
+# ============== VALIDATION AND TESTING ==============
+validation:
+  use_cv: false  # Disable CV for speed
+  cv_folds: 5
+  cv_strategy: "StratifiedGroupKFold"
+  cv_group_column: "patient_id"
+  val_augment: false  # Disable validation augmentation for speed
+  test_split: 0.0
+
+# ============== CLINICAL CONSTRAINTS ==============
+clinical:
+  peak_latency_range: [1.0, 8.0]
+  peak_amplitude_range: [-2.0, 2.0]
+  threshold_range: [0.0, 120.0]
+  signal_amplitude_range: [-1.0, 1.0]
+  apply_during_training: false  # Disable for speed
+  apply_during_inference: true
+
+# ============== MEMORY OPTIMIZATION ==============
+memory:
+  # Enable memory efficient attention
+  use_memory_efficient_attention: true
+  # Enable gradient checkpointing for large models
+  gradient_checkpointing: false  # Disabled for speed
+  # Clear cache frequently
+  clear_cache_every: 100
+  # Use smaller precision for intermediate computations
+  use_half_precision_intermediates: true 

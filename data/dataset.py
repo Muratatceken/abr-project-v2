@@ -451,7 +451,183 @@ def load_ultimate_dataset(
     return full_dataset, train_dataset, val_dataset, test_dataset
 
 
-# Backward compatibility function
+def abr_collate_fn(batch):
+    """Custom collate function for ABR data."""
+    # Stack signals and add channel dimension: [batch, 200] -> [batch, 1, 200]
+    signals = torch.stack([item['signal'] for item in batch]).unsqueeze(1)
+    static_params = torch.stack([item['static'] for item in batch])  # Note: key is 'static', not 'static_params'
+    targets = torch.stack([item['target'] for item in batch])
+    
+    # Handle optional fields
+    batch_dict = {
+        'signal': signals,
+        'static_params': static_params,  # Rename to expected key
+        'target': targets
+    }
+    
+    # Add V peak data if available
+    if 'v_peak' in batch[0]:
+        v_peaks = torch.stack([item['v_peak'] for item in batch])
+        v_peak_masks = torch.stack([item['v_peak_mask'] for item in batch])
+        batch_dict.update({
+            'v_peak': v_peaks,
+            'v_peak_mask': v_peak_masks
+        })
+    
+    # Add patient IDs if needed
+    if 'patient_id' in batch[0]:
+        patient_ids = [item['patient_id'] for item in batch]
+        batch_dict['patient_ids'] = patient_ids
+    
+    return batch_dict
+
+
+def create_optimized_dataloaders(
+    data_path: str = "data/processed/ultimate_dataset.pkl",
+    config: Dict[str, Any] = None,
+    batch_size: int = 32,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    prefetch_factor: int = 2,
+    persistent_workers: bool = False,
+    use_balanced_sampler: bool = False,
+    augment: bool = True,
+    cfg_dropout_prob: float = 0.1,
+    random_state: int = 42,
+    **kwargs
+):
+    """
+    Create optimized DataLoaders with all performance enhancements.
+    
+    Args:
+        data_path: Path to dataset file
+        config: Configuration dictionary (takes precedence over individual args)
+        batch_size: Batch size for training
+        train_ratio: Training set proportion
+        val_ratio: Validation set proportion
+        test_ratio: Test set proportion
+        num_workers: Number of data loading workers
+        pin_memory: Pin memory for faster GPU transfer
+        prefetch_factor: Number of batches to prefetch
+        persistent_workers: Keep workers alive between epochs
+        use_balanced_sampler: Use weighted sampling for class balance
+        augment: Enable data augmentation for training
+        cfg_dropout_prob: CFG dropout probability
+        random_state: Random seed
+        **kwargs: Additional arguments
+    
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader, full_dataset)
+    """
+    from torch.utils.data import DataLoader, WeightedRandomSampler
+    import numpy as np
+    
+    # Use config values if provided, otherwise use function arguments
+    if config is not None:
+        batch_size = config.get('batch_size', batch_size)
+        train_ratio = config.get('data', {}).get('train_ratio', train_ratio)
+        val_ratio = config.get('data', {}).get('val_ratio', val_ratio) or config.get('val_split', val_ratio)
+        test_ratio = config.get('data', {}).get('test_ratio', test_ratio)
+        num_workers = config.get('num_workers', num_workers)
+        pin_memory = config.get('pin_memory', pin_memory)
+        prefetch_factor = config.get('prefetch_factor', prefetch_factor)
+        persistent_workers = config.get('persistent_workers', persistent_workers)
+        use_balanced_sampler = config.get('use_balanced_sampler', use_balanced_sampler)
+        augment = config.get('augment', augment)
+        cfg_dropout_prob = config.get('cfg_dropout_prob', cfg_dropout_prob)
+        random_state = config.get('random_seed', random_state)
+    
+    # Load dataset with stratified splits
+    full_dataset, train_dataset, val_dataset, test_dataset = load_ultimate_dataset(
+        data_path=data_path,
+        train_ratio=train_ratio,
+        val_ratio=val_ratio,
+        test_ratio=test_ratio,
+        random_state=random_state
+    )
+    
+    # Use module-level collate function for multiprocessing compatibility
+    
+    # Create balanced sampler for training if requested
+    train_sampler = None
+    if use_balanced_sampler and train_dataset is not None:
+        # Get targets from training dataset
+        train_targets = []
+        for idx in range(len(train_dataset)):
+            sample = train_dataset[idx]
+            train_targets.append(sample['target'].item() if torch.is_tensor(sample['target']) else sample['target'])
+        
+        # Calculate class weights
+        class_counts = np.bincount(train_targets)
+        class_weights = 1.0 / (class_counts + 1e-8)  # Add small epsilon to avoid division by zero
+        sample_weights = [class_weights[target] for target in train_targets]
+        
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+        print(f"✓ Created balanced sampler with class weights: {class_weights}")
+    
+    # Create optimized data loaders
+    train_loader = None
+    if train_dataset is not None:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=(train_sampler is None),
+            sampler=train_sampler,
+            collate_fn=abr_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=True,
+            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            persistent_workers=persistent_workers and num_workers > 0
+        )
+    
+    val_loader = None
+    if val_dataset is not None:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=abr_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            persistent_workers=persistent_workers and num_workers > 0
+        )
+    
+    test_loader = None
+    if test_dataset is not None:
+        test_loader = DataLoader(
+            test_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=abr_collate_fn,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=False,
+            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            persistent_workers=persistent_workers and num_workers > 0
+        )
+    
+    print(f"✓ Created optimized dataloaders:")
+    print(f"  - Batch size: {batch_size}")
+    print(f"  - Workers: {num_workers}")
+    print(f"  - Prefetch factor: {prefetch_factor}")
+    print(f"  - Persistent workers: {persistent_workers}")
+    print(f"  - Balanced sampling: {use_balanced_sampler}")
+    print(f"  - Pin memory: {pin_memory}")
+    
+    return train_loader, val_loader, test_loader, full_dataset
+
+
+# Backward compatibility function (simplified)
 def create_dataloaders_compatible(
     data_path: str = "data/processed/ultimate_dataset.pkl",
     batch_size: int = 32,
@@ -463,44 +639,16 @@ def create_dataloaders_compatible(
     random_state: int = 42
 ):
     """
-    Create DataLoaders with the new stratified dataset.
-    Maintains compatibility with existing code.
+    Backward compatibility wrapper for create_optimized_dataloaders.
     """
-    from torch.utils.data import DataLoader
-    
-    full_dataset, train_dataset, val_dataset, test_dataset = load_ultimate_dataset(
+    train_loader, val_loader, test_loader, _ = create_optimized_dataloaders(
         data_path=data_path,
+        batch_size=batch_size,
         train_ratio=train_ratio,
-        val_ratio=val_ratio, 
+        val_ratio=val_ratio,
         test_ratio=test_ratio,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
         random_state=random_state
     )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True
-    ) if train_dataset else None
-    
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False
-    ) if val_dataset else None
-    
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False
-    ) if test_dataset else None
-    
     return train_loader, val_loader, test_loader 
