@@ -1,0 +1,243 @@
+# ABR Hierarchical U-Net Configuration
+# Denoising Diffusion Model for ABR Signal Generation
+
+project:
+  name: "ABR_HierarchicalUNet_Diffusion"
+  description: "Hierarchical U-Net with S4 Encoder and Transformer Decoder for ABR Signal Generation"
+  version: "1.0.0"
+  author: "AI Assistant"
+
+# Data Configuration
+data:
+  dataset_path: "data/processed/ultimate_dataset.pkl"
+  signal_length: 200
+  static_dim: 4  # age, intensity, stimulus_rate, fmp
+  n_classes: 5   # hearing loss types
+  
+  # Data splits (patient-stratified)
+  splits:
+    train_ratio: 0.7
+    val_ratio: 0.15
+    test_ratio: 0.15
+    random_seed: 42
+  
+  # Data loading
+  dataloader:
+    batch_size: 32
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    shuffle_train: true
+
+# Model Architecture
+model:
+  type: "hierarchical_unet"
+  
+  # Architecture parameters
+  architecture:
+    signal_length: 200
+    static_dim: 4
+    base_channels: 64
+    n_levels: 4
+    n_classes: 5
+    dropout: 0.1
+    
+    # S4 Encoder settings
+    encoder:
+      n_s4_layers: 2
+      d_state: 64
+      
+    # Transformer Decoder settings
+    decoder:
+      n_transformer_layers: 2
+      n_heads: 8
+      
+    # FiLM conditioning
+    film:
+      hidden_dim: 64
+      
+    # Output heads
+    outputs:
+      signal_activation: "tanh"
+      peak_head_dim: 128
+      class_head_dim: 128
+      threshold_head_dim: 128
+
+# Diffusion Configuration
+diffusion:
+  # Noise schedule
+  noise_schedule:
+    type: "abr_optimized"  # linear, cosine, abr_optimized
+    num_timesteps: 1000
+    peak_preserve_ratio: 0.3
+    beta_start: 5e-5
+    beta_end: 0.015
+  
+  # Sampling
+  sampling:
+    type: "ddpm"  # ddpm, ddim
+    ddim_eta: 0.0
+    num_sampling_steps: 50
+    temperature: 1.0
+    clip_denoised: true
+    
+    # Clinical constraints
+    constraints:
+      apply_constraints: true
+      peak_latency_range: [1.0, 8.0]  # ms
+      amplitude_range: [-0.5, 0.5]   # μV
+      smooth_kernel_size: 5
+
+# Training Configuration
+training:
+  # Optimizer
+  optimizer:
+    type: "adamw"
+    learning_rate: 1e-4
+    weight_decay: 1e-5
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    amsgrad: true
+  
+  # Learning rate scheduler
+  scheduler:
+    type: "cosine_annealing_warm_restarts"
+    T_0: 50
+    T_mult: 2
+    eta_min: 1e-7
+    warmup_epochs: 10
+  
+  # Training parameters
+  epochs: 200
+  gradient_clip: 1.0
+  accumulation_steps: 1
+  
+  # Validation and checkpointing
+  validation:
+    frequency: 1
+    compute_metrics: true
+  
+  checkpointing:
+    save_frequency: 10
+    save_best: true
+    save_last: true
+    save_dir: "checkpoints"
+  
+  # Early stopping
+  early_stopping:
+    patience: 30
+    min_delta: 1e-6
+    monitor: "val_total_loss"
+    mode: "min"
+
+# Loss Configuration
+loss:
+  type: "abr_diffusion"
+  
+  # Loss weights
+  weights:
+    diffusion: 1.0
+    peak_exist: 0.5
+    peak_latency: 1.0
+    peak_amplitude: 1.0
+    classification: 1.0
+    threshold: 0.8
+  
+  # Loss settings
+  peak_loss_type: "huber"  # mse, mae, huber, smooth_l1
+  huber_delta: 1.0
+  
+  # Class imbalance handling
+  class_weights: "balanced"  # "balanced", "inverse_freq", or specific weights
+  focal_loss:
+    use_focal: false
+    alpha: 1.0
+    gamma: 2.0
+  
+  # Perceptual loss
+  perceptual:
+    use_perceptual: false
+    feature_weights:
+      peak_preservation: 2.0
+      morphology: 1.0
+      spectral: 0.5
+      temporal: 1.0
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    # Signal quality metrics
+    signal_metrics: ["mse", "mae", "correlation", "dtw_distance"]
+    
+    # Peak prediction metrics
+    peak_metrics: ["peak_mae", "peak_accuracy", "existence_f1"]
+    
+    # Classification metrics
+    classification_metrics: ["accuracy", "f1_macro", "f1_weighted", "confusion_matrix"]
+    
+    # Threshold metrics
+    threshold_metrics: ["threshold_mae", "threshold_r2"]
+  
+  # Visualization
+  visualization:
+    save_plots: true
+    plot_types: ["reconstruction", "peaks", "latent_space", "generation_samples"]
+    n_samples_plot: 10
+    
+  # Output
+  output_dir: "outputs/evaluation"
+  save_detailed_results: true
+
+# Inference Configuration
+inference:
+  # Generation parameters
+  generation:
+    num_samples: 100
+    batch_size: 16
+    temperature: 1.0
+    guidance_scale: 1.0
+    
+  # Conditional generation
+  conditioning:
+    age_range: [20, 80]
+    intensity_range: [60, 100]
+    rate_range: [10, 80]
+    fmp_range: [0.5, 1.0]
+    
+  # Output
+  output_dir: "outputs/inference"
+  save_formats: ["signals", "peaks", "predictions", "metadata"]
+
+# Logging and Monitoring
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  use_tensorboard: true
+  use_wandb: false
+  
+  # Weights & Biases configuration (if enabled)
+  wandb:
+    project: "abr-hierarchical-unet"
+    entity: null
+    tags: ["diffusion", "abr", "s4", "transformer"]
+
+# Reproducibility
+reproducibility:
+  seed: 42
+  deterministic: false
+  benchmark: true
+
+# Hardware Configuration
+hardware:
+  device: "auto"  # auto, cuda, cpu
+  gpu_id: 0
+  mixed_precision: true
+  compile_model: false  # PyTorch 2.0 compilation
+
+# Paths
+paths:
+  data_dir: "data"
+  model_dir: "models"
+  checkpoint_dir: "checkpoints"
+  output_dir: "outputs"
+  log_dir: "logs" 

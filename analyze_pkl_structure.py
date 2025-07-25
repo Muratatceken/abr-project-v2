@@ -1,279 +1,409 @@
 #!/usr/bin/env python3
 """
-Detailed analysis of the processed_data_categorical_200ts.pkl file structure.
+PKL Structure Analysis Module
+
+This module contains all analysis functions for examining PKL file structures,
+denoising effectiveness, and dataset statistics. These functions are separated
+from preprocessing.py to maintain clean separation of concerns.
+
+Functions:
+- analyze_complete_dataset_denoising(): Complete dataset denoising analysis
+- estimate_fmp_before_denoising(): FMP estimation for original signals
+- print_analysis_summary(): Results reporting
+- create_comprehensive_plots(): Visual analysis generation
 """
 
-import joblib
 import numpy as np
-import pandas as pd
-from collections import Counter
-from typing import Dict, Any, List
+import matplotlib.pyplot as plt
+import joblib
+from collections import defaultdict
+import warnings
+import os
+from utils.preprocessing import denoise, estimate_fmp_after_denoising
 
-def analyze_pkl_structure():
-    """Analyze the structure of the categorical encoded pkl file in detail."""
-    print("🔍 Detailed Analysis of processed_data_categorical_200ts.pkl")
-    print("=" * 60)
+warnings.filterwarnings('ignore')
+
+def analyze_complete_dataset_denoising(
+    input_file: str = "data/processed/processed_data.pkl",
+    sample_size: int = 1000,
+    verbose: bool = True
+) -> dict:
+    """
+    Analyze denoising effectiveness on the complete categorical dataset without FMP filtering.
     
-    # Load the data
-    data_path = "data/processed/processed_data_categorical_200ts.pkl"
+    Args:
+        input_file (str): Path to complete categorical dataset
+        sample_size (int): Number of samples to analyze (default: 1000)
+        verbose (bool): If True, print detailed information
+        
+    Returns:
+        dict: Comprehensive analysis results
+    """
+    if verbose:
+        print(f"🔄 Analyzing denoising on complete categorical dataset...")
+        print(f"   Input: {input_file}")
+        print(f"   Sample size: {sample_size}")
+        print()
     
+    # Load complete categorical dataset
     try:
-        data = joblib.load(data_path)
-        print(f"✅ Successfully loaded data from {data_path}")
-        print(f"📊 File size: {len(data)} samples")
-        print()
+        data = joblib.load(input_file)
+        label_encoder = joblib.load('data/processed/label_encoder.pkl')
+        if verbose:
+            print(f"✅ Loaded {len(data)} samples from complete categorical dataset")
+            print(f"✅ Loaded label encoder with categories: {label_encoder.classes_}")
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Required file not found: {e}")
+    
+    # Analyze dataset composition
+    samples_by_type = defaultdict(list)
+    for i, sample in enumerate(data):
+        hearing_loss_type = int(sample['static_params'][5])
+        samples_by_type[hearing_loss_type].append((i, sample))
+    
+    if verbose:
+        print(f"\n📊 Dataset composition (complete, no FMP filtering):")
+        for category_id in sorted(samples_by_type.keys()):
+            category_name = label_encoder.classes_[category_id - 1]
+            count = len(samples_by_type[category_id])
+            print(f"   {category_name}: {count:,} samples")
+    
+    # Sample for analysis
+    np.random.seed(42)
+    total_samples = len(data)
+    actual_sample_size = min(sample_size, total_samples)
+    indices = np.random.choice(total_samples, actual_sample_size, replace=False)
+    
+    if verbose:
+        print(f"\n🔬 Analyzing {actual_sample_size} samples for denoising effectiveness...")
+    
+    # Initialize analysis containers
+    analysis_data = defaultdict(lambda: {
+        'fmp_before': [],
+        'fmp_after': [],
+        'improvement_ratio': [],
+        'correlation': [],
+        'snr_improvement': [],
+        'energy_retention': [],
+        'noise_reduction': [],
+        'patient_ids': []
+    })
+    
+    all_data = {
+        'fmp_before': [],
+        'fmp_after': [],
+        'improvement_ratio': [],
+        'correlation': [],
+        'snr_improvement': [],
+        'energy_retention': [],
+        'noise_reduction': [],
+        'hearing_loss_type': []
+    }
+    
+    # Process samples
+    for i, idx in enumerate(indices):
+        if verbose and i % 100 == 0:
+            print(f"   Processing {i}/{actual_sample_size}...")
         
-        # 1. Top-level structure
-        print("1️⃣ TOP-LEVEL STRUCTURE")
-        print("-" * 30)
-        print(f"Data type: {type(data)}")
-        print(f"Length: {len(data)} samples")
-        print(f"First element type: {type(data[0])}")
-        print()
+        sample = data[idx]
+        original_signal = sample['signal']
+        hearing_loss_type = int(sample['static_params'][5])
+        patient_id = sample['patient_id']
         
-        # 2. Sample structure
-        print("2️⃣ SAMPLE STRUCTURE")
-        print("-" * 30)
-        sample = data[0]
-        print(f"Sample keys: {list(sample.keys())}")
-        print()
-        
-        for key in sample.keys():
-            value = sample[key]
-            print(f"Key: '{key}'")
-            print(f"  Type: {type(value)}")
-            print(f"  Shape: {value.shape if hasattr(value, 'shape') else 'N/A'}")
-            print(f"  Data type: {value.dtype if hasattr(value, 'dtype') else 'N/A'}")
-            if hasattr(value, 'shape') and len(value.shape) == 1:
-                print(f"  Min: {np.min(value):.6f}")
-                print(f"  Max: {np.max(value):.6f}")
-                print(f"  Mean: {np.mean(value):.6f}")
-                print(f"  Std: {np.std(value):.6f}")
-                print(f"  Sample values: {value[:5] if len(value) > 5 else value}")
-            elif key == 'patient_id':
-                print(f"  Sample value: {value}")
-            print()
-        
-        # 3. Signal analysis
-        print("3️⃣ SIGNAL ANALYSIS")
-        print("-" * 30)
-        all_signals = np.array([sample['signal'] for sample in data])
-        print(f"All signals shape: {all_signals.shape}")
-        print(f"Signal length: {all_signals.shape[1]} timestamps")
-        print(f"Number of samples: {all_signals.shape[0]}")
-        print(f"Global signal statistics:")
-        print(f"  Min: {np.min(all_signals):.6f}")
-        print(f"  Max: {np.max(all_signals):.6f}")
-        print(f"  Mean: {np.mean(all_signals):.6f}")
-        print(f"  Std: {np.std(all_signals):.6f}")
-        print(f"  NaN count: {np.isnan(all_signals).sum()}")
-        print(f"  Inf count: {np.isinf(all_signals).sum()}")
-        print()
-        
-        # 4. Static parameters analysis (UPDATED FOR CATEGORICAL)
-        print("4️⃣ STATIC PARAMETERS ANALYSIS (CATEGORICAL ENCODING)")
-        print("-" * 30)
-        all_static = np.array([sample['static_params'] for sample in data])
-        print(f"All static params shape: {all_static.shape}")
-        print(f"Number of static parameters: {all_static.shape[1]} (reduced from 10)")
-        print(f"Parameter breakdown:")
-        print(f"  Dimensions 0-4: Continuous parameters (normalized)")
-        print(f"  Dimension 5: Categorical hearing loss (1-5)")
-        print()
-        
-        # Detailed parameter analysis
-        print(f"Parameter statistics (per dimension):")
-        param_names = ['Age', 'Intensity', 'Stimulus Rate', 'FMP', 'ResNo', 'Hearing Loss (Categorical)']
-        for i in range(all_static.shape[1]):
-            param_values = all_static[:, i]
-            param_name = param_names[i] if i < len(param_names) else f"Param {i}"
-            print(f"  {i}: {param_name}")
-            print(f"     Min: {np.min(param_values):.4f}")
-            print(f"     Max: {np.max(param_values):.4f}")
-            print(f"     Mean: {np.mean(param_values):.4f}")
-            print(f"     Std: {np.std(param_values):.4f}")
+        try:
+            # Estimate FMP before denoising
+            fmp_before = estimate_fmp_before_denoising(original_signal)
             
-            # Special handling for categorical parameter (dimension 5)
-            if i == 5:
-                unique_values = sorted(np.unique(param_values))
-                value_counts = Counter(param_values)
-                print(f"     Unique values: {unique_values}")
-                print(f"     Value distribution:")
-                
-                # Load label encoder for category names
-                try:
-                    label_encoder = joblib.load("data/processed/label_encoder.pkl")
-                    categories = label_encoder.classes_
-                    for j, category in enumerate(categories):
-                        count = value_counts.get(j + 1, 0)
-                        percentage = (count / len(data)) * 100
-                        print(f"       {j+1} ({category}): {count:,} samples ({percentage:.1f}%)")
-                except:
-                    print(f"     ⚠️  Could not load label encoder for category names")
-                    for value in unique_values:
-                        count = value_counts[value]
-                        percentage = (count / len(data)) * 100
-                        print(f"       {value}: {count:,} samples ({percentage:.1f}%)")
-            print()
-        
-        # 5. Peak data analysis
-        print("5️⃣ PEAK DATA ANALYSIS")
-        print("-" * 30)
-        all_peaks = np.array([sample['peaks'] for sample in data])
-        all_peak_masks = np.array([sample['peak_mask'] for sample in data])
-        
-        print(f"All peaks shape: {all_peaks.shape}")
-        print(f"All peak masks shape: {all_peak_masks.shape}")
-        print(f"Number of peak types: {all_peaks.shape[1]}")
-        
-        # Peak labels (from preprocessing)
-        peak_labels = ['I Latency', 'III Latency', 'V Latency', 'I Amplitude', 'III Amplitude', 'V Amplitude']
-        
-        print(f"Peak analysis:")
-        for i, label in enumerate(peak_labels):
-            peak_values = all_peaks[:, i]
-            peak_mask = all_peak_masks[:, i]
-            valid_peaks = peak_values[peak_mask]
+            # Apply denoising
+            denoised_signal = denoise(original_signal, fs=20000, wavelet='db4', level=3)
             
-            print(f"  {label}:")
-            print(f"    Valid samples: {np.sum(peak_mask)} / {len(peak_mask)} ({np.sum(peak_mask)/len(peak_mask)*100:.1f}%)")
-            if len(valid_peaks) > 0:
-                print(f"    Min: {np.min(valid_peaks):.4f}")
-                print(f"    Max: {np.max(valid_peaks):.4f}")
-                print(f"    Mean: {np.mean(valid_peaks):.4f}")
-                print(f"    Std: {np.std(valid_peaks):.4f}")
-            else:
-                print(f"    No valid peaks")
-        print()
-        
-        # 6. Patient ID analysis
-        print("6️⃣ PATIENT ID ANALYSIS")
-        print("-" * 30)
-        patient_ids = [sample['patient_id'] for sample in data]
-        unique_patients = list(set(patient_ids))
-        patient_counts = Counter(patient_ids)
-        
-        print(f"Total samples: {len(patient_ids)}")
-        print(f"Unique patients: {len(unique_patients)}")
-        print(f"Samples per patient statistics:")
-        counts = list(patient_counts.values())
-        print(f"  Min samples per patient: {min(counts)}")
-        print(f"  Max samples per patient: {max(counts)}")
-        print(f"  Mean samples per patient: {np.mean(counts):.2f}")
-        print(f"  Median samples per patient: {np.median(counts):.2f}")
-        
-        # Top 10 patients by sample count
-        print(f"Top 10 patients by sample count:")
-        for i, (patient_id, count) in enumerate(patient_counts.most_common(10)):
-            print(f"  {i+1}. Patient {patient_id}: {count} samples")
-        print()
-        
-        # 7. Data consistency checks
-        print("7️⃣ DATA CONSISTENCY CHECKS")
-        print("-" * 30)
-        
-        # Check signal lengths
-        signal_lengths = [len(sample['signal']) for sample in data]
-        unique_lengths = set(signal_lengths)
-        print(f"Signal length consistency: {len(unique_lengths)} unique length(s)")
-        if len(unique_lengths) == 1:
-            print(f"  ✅ All signals have length: {list(unique_lengths)[0]}")
-        else:
-            print(f"  ❌ Multiple lengths found: {unique_lengths}")
-        
-        # Check static parameter dimensions
-        static_dims = [len(sample['static_params']) for sample in data]
-        unique_dims = set(static_dims)
-        print(f"Static parameter dimension consistency: {len(unique_dims)} unique dimension(s)")
-        if len(unique_dims) == 1:
-            print(f"  ✅ All static params have dimension: {list(unique_dims)[0]}")
-        else:
-            print(f"  ❌ Multiple dimensions found: {unique_dims}")
-        
-        # Check peak dimensions
-        peak_dims = [len(sample['peaks']) for sample in data]
-        unique_peak_dims = set(peak_dims)
-        print(f"Peak dimension consistency: {len(unique_peak_dims)} unique dimension(s)")
-        if len(unique_peak_dims) == 1:
-            print(f"  ✅ All peaks have dimension: {list(unique_peak_dims)[0]}")
-        else:
-            print(f"  ❌ Multiple peak dimensions found: {unique_peak_dims}")
-        
-        # Check for NaN/Inf values
-        print(f"Data quality checks:")
-        total_nan = 0
-        total_inf = 0
-        
-        for sample in data:
-            # Check signals
-            signal_nan = np.isnan(sample['signal']).sum()
-            signal_inf = np.isinf(sample['signal']).sum()
+            # Calculate FMP after denoising
+            fmp_after = estimate_fmp_after_denoising(original_signal, denoised_signal)
             
-            # Check static params
-            static_nan = np.isnan(sample['static_params']).sum()
-            static_inf = np.isinf(sample['static_params']).sum()
+            # Handle invalid values
+            if np.isnan(fmp_after) or np.isinf(fmp_after):
+                fmp_after = 0.0
+            if np.isnan(fmp_before) or np.isinf(fmp_before):
+                fmp_before = 0.1
             
-            total_nan += signal_nan + static_nan
-            total_inf += signal_inf + static_inf
+            # Calculate correlation
+            correlation = np.corrcoef(original_signal, denoised_signal)[0, 1]
+            if np.isnan(correlation):
+                correlation = 0.0
+            
+            # Calculate SNR improvement
+            noise_estimate = original_signal - denoised_signal
+            signal_power = np.var(denoised_signal)
+            noise_power = np.var(noise_estimate)
+            snr_improvement = 10 * np.log10(signal_power / noise_power) if noise_power > 0 else 0
+            
+            # Calculate energy retention
+            orig_energy = np.sum(original_signal**2)
+            den_energy = np.sum(denoised_signal**2)
+            energy_retention = den_energy / orig_energy if orig_energy > 0 else 0
+            
+            # Calculate noise reduction percentage
+            orig_noise_level = np.std(original_signal)
+            remaining_noise_level = np.std(noise_estimate)
+            noise_reduction = (1 - remaining_noise_level / orig_noise_level) * 100 if orig_noise_level > 0 else 0
+            
+            # Calculate improvement ratio
+            improvement_ratio = fmp_after / fmp_before if fmp_before > 0 else 1.0
+            
+            # Store data by category
+            analysis_data[hearing_loss_type]['fmp_before'].append(fmp_before)
+            analysis_data[hearing_loss_type]['fmp_after'].append(fmp_after)
+            analysis_data[hearing_loss_type]['improvement_ratio'].append(improvement_ratio)
+            analysis_data[hearing_loss_type]['correlation'].append(correlation)
+            analysis_data[hearing_loss_type]['snr_improvement'].append(snr_improvement)
+            analysis_data[hearing_loss_type]['energy_retention'].append(energy_retention)
+            analysis_data[hearing_loss_type]['noise_reduction'].append(noise_reduction)
+            analysis_data[hearing_loss_type]['patient_ids'].append(patient_id)
+            
+            # Store overall data
+            all_data['fmp_before'].append(fmp_before)
+            all_data['fmp_after'].append(fmp_after)
+            all_data['improvement_ratio'].append(improvement_ratio)
+            all_data['correlation'].append(correlation)
+            all_data['snr_improvement'].append(snr_improvement)
+            all_data['energy_retention'].append(energy_retention)
+            all_data['noise_reduction'].append(noise_reduction)
+            all_data['hearing_loss_type'].append(hearing_loss_type)
+            
+        except Exception as e:
+            if verbose:
+                print(f"     Warning: Error processing sample {idx}: {e}")
+            continue
+    
+    # Calculate comprehensive statistics
+    results = {
+        'dataset_info': {
+            'total_samples': total_samples,
+            'analyzed_samples': len(all_data['fmp_before']),
+            'sample_percentage': len(all_data['fmp_before']) / total_samples * 100,
+            'no_fmp_filtering': True,
+            'categories': {cat_id: len(samples_by_type[cat_id]) for cat_id in samples_by_type.keys()}
+        },
+        'overall_stats': {
+            'fmp_before_mean': np.mean(all_data['fmp_before']),
+            'fmp_before_std': np.std(all_data['fmp_before']),
+            'fmp_after_mean': np.mean(all_data['fmp_after']),
+            'fmp_after_std': np.std(all_data['fmp_after']),
+            'improvement_ratio_mean': np.mean(all_data['improvement_ratio']),
+            'improvement_ratio_std': np.std(all_data['improvement_ratio']),
+            'improved_samples': sum(1 for ratio in all_data['improvement_ratio'] if ratio > 1.0),
+            'improvement_rate': sum(1 for ratio in all_data['improvement_ratio'] if ratio > 1.0) / len(all_data['improvement_ratio']) * 100,
+            'correlation_mean': np.mean(all_data['correlation']),
+            'snr_improvement_mean': np.mean(all_data['snr_improvement']),
+            'energy_retention_mean': np.mean(all_data['energy_retention']),
+            'noise_reduction_mean': np.mean(all_data['noise_reduction'])
+        },
+        'category_stats': {},
+        'raw_data': {
+            'analysis_data': dict(analysis_data),
+            'all_data': all_data,
+            'category_names': label_encoder.classes_
+        }
+    }
+    
+    # Calculate category-specific statistics
+    for category_id in sorted(analysis_data.keys()):
+        category_name = label_encoder.classes_[category_id - 1]
+        cat_data = analysis_data[category_id]
         
-        print(f"  Total NaN values: {total_nan}")
-        print(f"  Total Inf values: {total_inf}")
+        if cat_data['fmp_before']:
+            results['category_stats'][category_id] = {
+                'name': category_name,
+                'samples': len(cat_data['fmp_before']),
+                'fmp_before_mean': np.mean(cat_data['fmp_before']),
+                'fmp_after_mean': np.mean(cat_data['fmp_after']),
+                'improvement_ratio_mean': np.mean(cat_data['improvement_ratio']),
+                'improved_count': sum(1 for ratio in cat_data['improvement_ratio'] if ratio > 1.0),
+                'improvement_rate': sum(1 for ratio in cat_data['improvement_ratio'] if ratio > 1.0) / len(cat_data['improvement_ratio']) * 100,
+                'correlation_mean': np.mean(cat_data['correlation']),
+                'snr_improvement_mean': np.mean(cat_data['snr_improvement']),
+                'energy_retention_mean': np.mean(cat_data['energy_retention']),
+                'noise_reduction_mean': np.mean(cat_data['noise_reduction'])
+            }
+    
+    if verbose:
+        print_analysis_summary(results)
+    
+    return results
+
+def estimate_fmp_before_denoising(signal):
+    """
+    Estimate FMP for the original signal using frequency domain analysis.
+    """
+    fs = 20000
+    
+    # Compute FFT
+    fft = np.fft.fft(signal)
+    freqs = np.fft.fftfreq(len(signal), 1/fs)
+    magnitude = np.abs(fft)
+    
+    # Define frequency ranges
+    abr_freq_mask = (np.abs(freqs) >= 100) & (np.abs(freqs) <= 1500)  # ABR relevant frequencies
+    noise_freq_mask = np.abs(freqs) > 1500  # High frequency noise
+    
+    # Calculate power in each range
+    abr_power = np.sum(magnitude[abr_freq_mask]**2)
+    noise_power = np.sum(magnitude[noise_freq_mask]**2)
+    
+    # Calculate FMP as ratio of ABR signal power to noise power
+    if noise_power > 0:
+        fmp_before = abr_power / noise_power
+    else:
+        fmp_before = abr_power  # If no noise detected, use signal power
+    
+    # Normalize to reasonable range
+    fmp_before = fmp_before / len(signal)
+    
+    return fmp_before if not np.isnan(fmp_before) and not np.isinf(fmp_before) else 0.1
+
+def print_analysis_summary(results):
+    """Print a summary of the denoising analysis results."""
+    print(f"\n📈 COMPLETE DATASET DENOISING ANALYSIS RESULTS")
+    print(f"=" * 60)
+    
+    dataset_info = results['dataset_info']
+    overall = results['overall_stats']
+    
+    print(f"📊 Dataset Information:")
+    print(f"   Total samples in dataset: {dataset_info['total_samples']:,}")
+    print(f"   Samples analyzed: {dataset_info['analyzed_samples']:,} ({dataset_info['sample_percentage']:.1f}%)")
+    print(f"   FMP filtering: {'None - Complete dataset' if dataset_info['no_fmp_filtering'] else 'Applied'}")
+    
+    print(f"\n📈 Overall Denoising Performance:")
+    print(f"   FMP before: {overall['fmp_before_mean']:.3f} ± {overall['fmp_before_std']:.3f}")
+    print(f"   FMP after: {overall['fmp_after_mean']:.3f} ± {overall['fmp_after_std']:.3f}")
+    print(f"   Average improvement ratio: {overall['improvement_ratio_mean']:.2f}x")
+    print(f"   Samples with improvement: {overall['improved_samples']:,}/{dataset_info['analyzed_samples']:,} ({overall['improvement_rate']:.1f}%)")
+    print(f"   Average correlation: {overall['correlation_mean']:.3f}")
+    print(f"   Average SNR improvement: {overall['snr_improvement_mean']:.1f} dB")
+    print(f"   Average energy retention: {overall['energy_retention_mean']:.1f}%")
+    print(f"   Average noise reduction: {overall['noise_reduction_mean']:.1f}%")
+    
+    print(f"\n📊 Performance by Hearing Loss Type:")
+    for category_id, stats in results['category_stats'].items():
+        print(f"   {stats['name']}:")
+        print(f"     Samples: {stats['samples']:,}")
+        print(f"     Avg improvement ratio: {stats['improvement_ratio_mean']:.2f}x")
+        print(f"     Success rate: {stats['improved_count']}/{stats['samples']} ({stats['improvement_rate']:.1f}%)")
+        print(f"     Correlation: {stats['correlation_mean']:.3f}")
+        print(f"     Noise reduction: {stats['noise_reduction_mean']:.1f}%")
+
+def analyze_model_ready_dataset(
+    input_file: str = "data/processed/model_ready_dataset.pkl",
+    verbose: bool = True
+) -> dict:
+    """
+    Analyze the model-ready dataset structure and statistics.
+    
+    Args:
+        input_file (str): Path to model-ready dataset
+        verbose (bool): If True, print detailed information
         
-        if total_nan == 0 and total_inf == 0:
-            print(f"  ✅ No NaN/Inf values found in signals and static params")
-        else:
-            print(f"  ❌ Found {total_nan} NaN and {total_inf} Inf values")
-        
+    Returns:
+        dict: Dataset analysis results
+    """
+    if verbose:
+        print(f"🔄 Analyzing model-ready dataset...")
+        print(f"   Input: {input_file}")
         print()
+    
+    # Load model-ready dataset
+    try:
+        data = joblib.load(input_file)
+        if verbose:
+            print(f"✅ Loaded {len(data)} samples from model-ready dataset")
+    except FileNotFoundError as e:
+        raise FileNotFoundError(f"Model-ready dataset not found: {e}")
+    
+    # Analyze dataset structure
+    if not data:
+        print("❌ Dataset is empty!")
+        return {}
+    
+    sample = data[0]
+    
+    if verbose:
+        print(f"\n📊 Dataset Structure Analysis:")
+        print(f"   Total samples: {len(data):,}")
+        print(f"   Sample keys: {list(sample.keys())}")
+        print(f"   Static parameters shape: {sample['static_params'].shape}")
+        print(f"   Signal shape: {sample['signal'].shape}")
+        print(f"   V peak shape: {sample['v_peak'].shape}")
+        print(f"   Target shape: {sample['target'].shape}")
+    
+    # Analyze data distributions
+    static_params = np.array([s['static_params'] for s in data])
+    signals = np.array([s['signal'] for s in data])
+    v_peaks = np.array([s['v_peak'] for s in data])
+    targets = np.array([s['target'] for s in data])
+    
+    # Count by hearing loss type
+    target_values = [t[0] if isinstance(t, np.ndarray) else t for t in targets]
+    target_counts = np.bincount(np.array(target_values).astype(int))
+    
+    if verbose:
+        print(f"\n📈 Data Statistics:")
+        print(f"   Static parameters:")
+        print(f"     Age - Mean: {static_params[:, 0].mean():.3f}, Std: {static_params[:, 0].std():.3f}")
+        print(f"     Intensity - Mean: {static_params[:, 1].mean():.3f}, Std: {static_params[:, 1].std():.3f}")
+        print(f"     Stimulus Rate - Mean: {static_params[:, 2].mean():.3f}, Std: {static_params[:, 2].std():.3f}")
         
-        # 8. Memory usage analysis
-        print("8️⃣ MEMORY USAGE ANALYSIS")
-        print("-" * 30)
+        print(f"   Signals:")
+        print(f"     Mean amplitude: {signals.mean():.6f}")
+        print(f"     Std amplitude: {signals.std():.6f}")
+        print(f"     Min amplitude: {signals.min():.6f}")
+        print(f"     Max amplitude: {signals.max():.6f}")
         
-        # Calculate memory usage for each component
-        signals_memory = all_signals.nbytes
-        static_memory = all_static.nbytes
-        peaks_memory = all_peaks.nbytes
-        masks_memory = all_peak_masks.nbytes
+        print(f"   V Peaks:")
+        valid_v_peaks = v_peaks[~np.isnan(v_peaks)]
+        if len(valid_v_peaks) > 0:
+            print(f"     Valid V peaks: {len(valid_v_peaks)}/{len(v_peaks)} ({len(valid_v_peaks)/len(v_peaks)*100:.1f}%)")
+            print(f"     V peak mean: {valid_v_peaks.mean():.3f}")
+            print(f"     V peak std: {valid_v_peaks.std():.3f}")
         
-        total_memory = signals_memory + static_memory + peaks_memory + masks_memory
-        
-        print(f"Memory usage breakdown:")
-        print(f"  Signals: {signals_memory / 1024**2:.2f} MB ({signals_memory/total_memory*100:.1f}%)")
-        print(f"  Static params: {static_memory / 1024**2:.2f} MB ({static_memory/total_memory*100:.1f}%)")
-        print(f"  Peaks: {peaks_memory / 1024**2:.2f} MB ({peaks_memory/total_memory*100:.1f}%)")
-        print(f"  Peak masks: {masks_memory / 1024**2:.2f} MB ({masks_memory/total_memory*100:.1f}%)")
-        print(f"  Total: {total_memory / 1024**2:.2f} MB")
-        
-        # Compare with one-hot encoding
-        print(f"\nComparison with one-hot encoding:")
-        onehot_static_memory = len(data) * 10 * 4  # 10 dimensions * 4 bytes (float32)
-        categorical_static_memory = static_memory
-        memory_saved = onehot_static_memory - categorical_static_memory
-        print(f"  One-hot static params: {onehot_static_memory / 1024**2:.2f} MB")
-        print(f"  Categorical static params: {categorical_static_memory / 1024**2:.2f} MB")
-        print(f"  Memory saved: {memory_saved / 1024**2:.2f} MB ({memory_saved/onehot_static_memory*100:.1f}%)")
-        
-        print()
-        
-        # 9. Summary
-        print("9️⃣ SUMMARY")
-        print("-" * 30)
-        print(f"✅ Successfully analyzed {len(data):,} samples")
-        print(f"✅ Signal length: {all_signals.shape[1]} timestamps")
-        print(f"✅ Static parameters: {all_static.shape[1]} dimensions (categorical encoding)")
-        print(f"✅ Peak data: {all_peaks.shape[1]} peak types")
-        print(f"✅ Data quality: No NaN/Inf values in core data")
-        print(f"✅ Memory efficient: {memory_saved/1024**2:.1f} MB saved vs one-hot encoding")
-        print(f"✅ Categorical encoding: 5 hearing loss categories (1-5)")
-        
-    except FileNotFoundError:
-        print(f"❌ File not found: {data_path}")
-        print("Please ensure the categorical data file exists.")
-    except Exception as e:
-        print(f"❌ Error analyzing file: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"   Target Distribution:")
+        for i, count in enumerate(target_counts):
+            if count > 0:
+                print(f"     Class {i}: {count:,} samples ({count/len(data)*100:.1f}%)")
+    
+    results = {
+        'total_samples': len(data),
+        'static_params_stats': {
+            'age_mean': static_params[:, 0].mean(),
+            'age_std': static_params[:, 0].std(),
+            'intensity_mean': static_params[:, 1].mean(),
+            'intensity_std': static_params[:, 1].std(),
+            'rate_mean': static_params[:, 2].mean(),
+            'rate_std': static_params[:, 2].std()
+        },
+        'signal_stats': {
+            'mean': signals.mean(),
+            'std': signals.std(),
+            'min': signals.min(),
+            'max': signals.max()
+        },
+        'v_peak_stats': {
+            'valid_count': len(valid_v_peaks) if len(valid_v_peaks) > 0 else 0,
+            'valid_percentage': len(valid_v_peaks)/len(v_peaks)*100 if len(valid_v_peaks) > 0 else 0,
+            'mean': valid_v_peaks.mean() if len(valid_v_peaks) > 0 else 0,
+            'std': valid_v_peaks.std() if len(valid_v_peaks) > 0 else 0
+        },
+        'target_distribution': {i: int(count) for i, count in enumerate(target_counts) if count > 0}
+    }
+    
+    return results
 
 if __name__ == "__main__":
-    analyze_pkl_structure() 
+    print("📊 PKL Structure Analysis Module")
+    print("=" * 40)
+    print("Available functions:")
+    print("- analyze_complete_dataset_denoising()")
+    print("- analyze_model_ready_dataset()")
+    print("- estimate_fmp_before_denoising()")
+    print("- print_analysis_summary()")
+    print("\nImport this module to use analysis functions.") 

@@ -1,98 +1,433 @@
+"""
+Training Script for ABR Hierarchical U-Net Diffusion Model
+
+This script implements the training pipeline for the Hierarchical U-Net with S4 Encoder
+and Transformer Decoder for ABR signal generation using denoising diffusion.
+
+Author: AI Assistant  
+Date: July 2024
+"""
+
+import os
+import sys
+import yaml
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-import matplotlib.pyplot as plt
-from typing import Dict, Any, Optional, Tuple
-import os
-import json
-import time
-from datetime import datetime
+import argparse
+import logging
+from tqdm import tqdm
+from typing import Dict, Any, Tuple, Optional
+import warnings
 
-# Import custom modules
-from models.cvae import CVAE
-from training.dataset import ABRDataset
-from utils.losses import cvae_loss, peak_loss
-from utils.preprocessing import load_and_preprocess_dataset
-from utils.schedulers import get_beta_scheduler
-from utils.early_stopping import EarlyStopping, ReduceLROnPlateau
-from utils.visualization import plot_signals_with_peaks
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Import project modules
+from models.hierarchical_unet import HierarchicalUNet
+from diffusion.schedule import get_noise_schedule
+from diffusion.loss import ABRDiffusionLoss, get_loss_function
+from training.dataset import load_ultimate_dataset
+from diffusion.sampling import create_sampler
+
+warnings.filterwarnings('ignore')
 
 
-class CVAETrainer:
+class ABRTrainer:
     """
-    Trainer class for CVAE model with support for peak prediction and KL annealing.
+    Trainer class for ABR Hierarchical U-Net diffusion model.
     """
     
-    def __init__(
-        self,
-        model: CVAE,
-        train_dataloader: DataLoader,
-        val_dataloader: DataLoader,
-        optimizer: optim.Optimizer,
-        device: torch.device,
-        config: Dict[str, Any]
-    ):
+    def __init__(self, config: Dict[str, Any]):
         """
-        Initialize the trainer.
+        Initialize trainer.
         
         Args:
-            model: CVAE model instance
-            train_dataloader: Training data loader
-            val_dataloader: Validation data loader
-            optimizer: Optimizer instance
-            device: Device to run training on
-            config: Training configuration dictionary
+            config: Configuration dictionary
         """
-        self.model = model
-        self.train_dataloader = train_dataloader
-        self.val_dataloader = val_dataloader
-        self.optimizer = optimizer
-        self.device = device
         self.config = config
+        self.setup_logging()
+        self.setup_device()
+        self.setup_reproducibility()
         
-        # Training parameters
-        self.max_beta = config.get('max_beta', 1.0)
-        self.warmup_epochs = config.get('warmup_epochs', 10)
-        self.peak_loss_weight = config.get('peak_loss_weight', 1.0)
-        self.use_peak_loss = config.get('use_peak_loss', True)
+        # Initialize components
+        self.model = None
+        self.optimizer = None
+        self.scheduler = None
+        self.loss_fn = None
+        self.noise_schedule = None
+        self.train_loader = None
+        self.val_loader = None
+        self.test_loader = None
         
-        # Initialize beta scheduler using factory function
-        beta_scheduler_type = self.config.get('beta_scheduler_type', 'linear')
-        beta_scheduler_params = self.config.get('beta_scheduler_params', {
-            'max_beta': self.max_beta,
-            'warmup_epochs': self.warmup_epochs
-        })
-        self.beta_scheduler = get_beta_scheduler(beta_scheduler_type, **beta_scheduler_params)
-        
-        # Initialize early stopping
-        self.early_stopper = EarlyStopping(
-            patience=self.config.get('early_stopping_patience', 15),
-            min_delta=self.config.get('early_stopping_delta', 1e-4)
-        )
-        
-        # Initialize learning rate scheduler
-        self.use_lr_scheduler = self.config.get('lr_scheduler', False)
-        if self.use_lr_scheduler:
-            self.lr_scheduler = ReduceLROnPlateau(
-                patience=self.config.get('lr_scheduler_patience', 5),
-                factor=self.config.get('lr_scheduler_factor', 0.5),
-                min_lr=self.config.get('min_lr', 1e-6),
-                verbose=True
-            )
+        # Training state
+        self.current_epoch = 0
+        self.best_val_loss = float('inf')
+        self.global_step = 0
         
         # Logging
-        self.train_losses = []
-        self.val_losses = []
-        self.best_val_loss = float('inf')
-        self.save_dir = config.get('save_dir', 'checkpoints')
-        os.makedirs(self.save_dir, exist_ok=True)
+        self.writer = None
+        self.logger = logging.getLogger(__name__)
         
-        # Initialize TensorBoard writer
-        self.writer = SummaryWriter(log_dir=self.save_dir)
+    def setup_logging(self):
+        """Setup logging configuration."""
+        log_config = self.config.get('logging', {})
+        log_level = getattr(logging, log_config.get('level', 'INFO').upper())
         
+        # Create logs directory
+        log_dir = log_config.get('log_dir', 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Configure logging
+        logging.basicConfig(
+            level=log_level,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(os.path.join(log_dir, 'training.log')),
+                logging.StreamHandler(sys.stdout)
+            ]
+        )
+        
+        # TensorBoard
+        if log_config.get('use_tensorboard', True):
+            self.writer = SummaryWriter(log_dir=os.path.join(log_dir, 'tensorboard'))
+    
+    def setup_device(self):
+        """Setup computation device."""
+        hardware_config = self.config.get('hardware', {})
+        device_type = hardware_config.get('device', 'auto')
+        
+        if device_type == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        elif device_type == 'cuda':
+            gpu_id = hardware_config.get('gpu_id', 0)
+            self.device = torch.device(f'cuda:{gpu_id}')
+        else:
+            self.device = torch.device('cpu')
+        
+        self.logger.info(f"Using device: {self.device}")
+        
+        # Mixed precision
+        self.use_amp = hardware_config.get('mixed_precision', True) and self.device.type == 'cuda'
+        if self.use_amp:
+            self.scaler = torch.cuda.amp.GradScaler()
+            self.logger.info("Mixed precision training enabled")
+    
+    def setup_reproducibility(self):
+        """Setup reproducibility settings."""
+        repro_config = self.config.get('reproducibility', {})
+        seed = repro_config.get('seed', 42)
+        
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
+        
+        if repro_config.get('deterministic', False):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+        elif repro_config.get('benchmark', True):
+            torch.backends.cudnn.benchmark = True
+        
+        self.logger.info(f"Reproducibility configured with seed: {seed}")
+    
+    def setup_data(self):
+        """Setup data loaders."""
+        data_config = self.config['data']
+        
+        # Load dataset with stratified patient splits
+        full_dataset, train_dataset, val_dataset, test_dataset = load_ultimate_dataset(
+            data_path=data_config['dataset_path'],
+            train_ratio=data_config['splits']['train_ratio'],
+            val_ratio=data_config['splits']['val_ratio'],
+            test_ratio=data_config['splits']['test_ratio'],
+            random_state=data_config['splits']['random_seed']
+        )
+        
+        # Create data loaders
+        dataloader_config = data_config['dataloader']
+        
+        self.train_loader = DataLoader(
+            train_dataset,
+            batch_size=dataloader_config['batch_size'],
+            shuffle=dataloader_config['shuffle_train'],
+            num_workers=dataloader_config['num_workers'],
+            pin_memory=dataloader_config['pin_memory'],
+            drop_last=dataloader_config['drop_last']
+        )
+        
+        self.val_loader = DataLoader(
+            val_dataset,
+            batch_size=dataloader_config['batch_size'],
+            shuffle=False,
+            num_workers=dataloader_config['num_workers'],
+            pin_memory=dataloader_config['pin_memory'],
+            drop_last=False
+        )
+        
+        self.test_loader = DataLoader(
+            test_dataset,
+            batch_size=dataloader_config['batch_size'],
+            shuffle=False,
+            num_workers=dataloader_config['num_workers'],
+            pin_memory=dataloader_config['pin_memory'],
+            drop_last=False
+        )
+        
+        # Get class weights for imbalanced data
+        if self.config['loss'].get('class_weights') == 'balanced':
+            class_weights = full_dataset.get_class_weights('balanced')
+            self.class_weights = class_weights.to(self.device)
+        else:
+            self.class_weights = None
+        
+        self.logger.info(f"Data loaded: {len(train_dataset)} train, {len(val_dataset)} val, {len(test_dataset)} test samples")
+    
+    def setup_model(self):
+        """Setup model architecture."""
+        model_config = self.config['model']['architecture']
+        
+        self.model = HierarchicalUNet(
+            signal_length=model_config['signal_length'],
+            static_dim=model_config['static_dim'],
+            base_channels=model_config['base_channels'],
+            n_levels=model_config['n_levels'],
+            n_classes=model_config['n_classes'],
+            dropout=model_config['dropout']
+        ).to(self.device)
+        
+        # Model compilation (PyTorch 2.0)
+        if self.config['hardware'].get('compile_model', False):
+            self.model = torch.compile(self.model)
+            self.logger.info("Model compiled with PyTorch 2.0")
+        
+        # Count parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        
+        self.logger.info(f"Model created: {total_params:,} total parameters, {trainable_params:,} trainable")
+    
+    def setup_optimization(self):
+        """Setup optimizer and scheduler."""
+        train_config = self.config['training']
+        opt_config = train_config['optimizer']
+        
+        # Optimizer
+        if opt_config['type'].lower() == 'adamw':
+            self.optimizer = optim.AdamW(
+                self.model.parameters(),
+                lr=opt_config['learning_rate'],
+                weight_decay=opt_config['weight_decay'],
+                betas=opt_config['betas'],
+                eps=opt_config['eps'],
+                amsgrad=opt_config.get('amsgrad', False)
+            )
+        elif opt_config['type'].lower() == 'adam':
+            self.optimizer = optim.Adam(
+                self.model.parameters(),
+                lr=opt_config['learning_rate'],
+                weight_decay=opt_config['weight_decay'],
+                betas=opt_config['betas'],
+                eps=opt_config['eps']
+            )
+        else:
+            raise ValueError(f"Unknown optimizer: {opt_config['type']}")
+        
+        # Scheduler
+        sched_config = train_config['scheduler']
+        if sched_config['type'] == 'cosine_annealing_warm_restarts':
+            self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=sched_config['T_0'],
+                T_mult=sched_config['T_mult'],
+                eta_min=sched_config['eta_min']
+            )
+        elif sched_config['type'] == 'reduce_on_plateau':
+            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                patience=sched_config.get('patience', 10),
+                factor=sched_config.get('factor', 0.5)
+            )
+        
+        self.logger.info(f"Optimizer: {opt_config['type']}, Scheduler: {sched_config['type']}")
+    
+    def setup_diffusion(self):
+        """Setup diffusion components."""
+        diffusion_config = self.config['diffusion']
+        
+        # Noise schedule
+        schedule_config = diffusion_config['noise_schedule']
+        self.noise_schedule = get_noise_schedule(
+            schedule_type=schedule_config['type'],
+            num_timesteps=schedule_config['num_timesteps'],
+            **{k: v for k, v in schedule_config.items() if k not in ['type', 'num_timesteps']}
+        )
+        
+        # Move schedule to device
+        self.noise_schedule.betas = self.noise_schedule.betas.to(self.device)
+        self.noise_schedule.alphas = self.noise_schedule.alphas.to(self.device)
+        self.noise_schedule.alpha_cumprod = self.noise_schedule.alpha_cumprod.to(self.device)
+        self.noise_schedule.alpha_cumprod_prev = self.noise_schedule.alpha_cumprod_prev.to(self.device)
+        self.noise_schedule.sqrt_alpha_cumprod = self.noise_schedule.sqrt_alpha_cumprod.to(self.device)
+        self.noise_schedule.sqrt_one_minus_alpha_cumprod = self.noise_schedule.sqrt_one_minus_alpha_cumprod.to(self.device)
+        self.noise_schedule.sqrt_recip_alpha_cumprod = self.noise_schedule.sqrt_recip_alpha_cumprod.to(self.device)
+        self.noise_schedule.sqrt_recipm1_alpha_cumprod = self.noise_schedule.sqrt_recipm1_alpha_cumprod.to(self.device)
+        self.noise_schedule.posterior_variance = self.noise_schedule.posterior_variance.to(self.device)
+        
+        self.logger.info(f"Diffusion setup: {schedule_config['type']} schedule with {schedule_config['num_timesteps']} timesteps")
+    
+    def setup_loss(self):
+        """Setup loss function."""
+        loss_config = self.config['loss']
+        
+        self.loss_fn = get_loss_function(loss_config, self.class_weights)
+        self.logger.info(f"Loss function: {loss_config['type']}")
+    
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """
+        Single training step.
+        
+        Args:
+            batch: Batch of data
+            
+        Returns:
+            Dictionary of losses
+        """
+        self.model.train()
+        
+        # Move data to device
+        signal = batch['signal'].to(self.device)  # [batch, 200]
+        static_params = batch['static'].to(self.device)  # [batch, 4]
+        v_peak = batch['v_peak'].to(self.device)  # [batch, 2]
+        v_peak_mask = batch['v_peak_mask'].to(self.device)  # [batch, 2]
+        target_class = batch['target'].to(self.device)  # [batch]
+        
+        # Ensure signal has channel dimension
+        if signal.dim() == 2:
+            signal = signal.unsqueeze(1)  # [batch, 1, 200]
+        
+        batch_size = signal.shape[0]
+        
+        # Sample random timesteps
+        t = torch.randint(0, self.noise_schedule.num_timesteps, (batch_size,), device=self.device)
+        
+        # Add noise to signal
+        noise = torch.randn_like(signal)
+        noisy_signal = self.noise_schedule.q_sample(signal, t, noise)
+        
+        # Forward pass with mixed precision
+        with torch.cuda.amp.autocast(enabled=self.use_amp):
+            # Model forward pass
+            model_output = self.model(noisy_signal, static_params, t)
+            
+            # Prepare targets
+            targets = {
+                'signal': signal,
+                'noise': noise,
+                'v_peak': v_peak,
+                'v_peak_mask': v_peak_mask,
+                'target': target_class,
+                'static_params': static_params
+            }
+            
+            # Compute loss
+            total_loss, loss_components = self.loss_fn(model_output, targets, t)
+        
+        # Backward pass
+        self.optimizer.zero_grad()
+        
+        if self.use_amp:
+            self.scaler.scale(total_loss).backward()
+            
+            # Gradient clipping
+            if self.config['training'].get('gradient_clip', 0) > 0:
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), 
+                    self.config['training']['gradient_clip']
+                )
+            
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+        else:
+            total_loss.backward()
+            
+            # Gradient clipping
+            if self.config['training'].get('gradient_clip', 0) > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config['training']['gradient_clip']
+                )
+            
+            self.optimizer.step()
+        
+        # Convert losses to float
+        losses = {k: v.item() if isinstance(v, torch.Tensor) else v 
+                 for k, v in loss_components.items()}
+        
+        return losses
+    
+    def validate_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """
+        Single validation step.
+        
+        Args:
+            batch: Batch of data
+            
+        Returns:
+            Dictionary of losses
+        """
+        self.model.eval()
+        
+        with torch.no_grad():
+            # Move data to device
+            signal = batch['signal'].to(self.device)
+            static_params = batch['static'].to(self.device)
+            v_peak = batch['v_peak'].to(self.device)
+            v_peak_mask = batch['v_peak_mask'].to(self.device)
+            target_class = batch['target'].to(self.device)
+            
+            # Ensure signal has channel dimension
+            if signal.dim() == 2:
+                signal = signal.unsqueeze(1)
+            
+            batch_size = signal.shape[0]
+            
+            # Sample random timesteps
+            t = torch.randint(0, self.noise_schedule.num_timesteps, (batch_size,), device=self.device)
+            
+            # Add noise to signal
+            noise = torch.randn_like(signal)
+            noisy_signal = self.noise_schedule.q_sample(signal, t, noise)
+            
+            # Forward pass
+            model_output = self.model(noisy_signal, static_params, t)
+            
+            # Prepare targets
+            targets = {
+                'signal': signal,
+                'noise': noise,
+                'v_peak': v_peak,
+                'v_peak_mask': v_peak_mask,
+                'target': target_class,
+                'static_params': static_params
+            }
+            
+            # Compute loss
+            total_loss, loss_components = self.loss_fn(model_output, targets, t)
+        
+        # Convert losses to float
+        losses = {k: v.item() if isinstance(v, torch.Tensor) else v 
+                 for k, v in loss_components.items()}
+        
+        return losses
+    
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """
         Train for one epoch.
@@ -101,631 +436,203 @@ class CVAETrainer:
             epoch: Current epoch number
             
         Returns:
-            Dictionary with training metrics
+            Average training losses
         """
         self.model.train()
         
-        # Get current beta value using beta scheduler
-        beta_value = self.beta_scheduler(epoch)
-        if isinstance(beta_value, dict):  # Hierarchical scheduler
-            # For standard loss compatibility, use average of global and local
-            beta = (beta_value['global_kl_weight'] + beta_value['local_kl_weight']) / 2.0
-            global_beta = beta_value['global_kl_weight']
-            local_beta = beta_value['local_kl_weight']
-        else:  # Standard scheduler
-            beta = beta_value
-            global_beta = beta_value
-            local_beta = beta_value
-        
-        total_loss = 0.0
-        recon_loss_sum = 0.0
-        kl_loss_sum = 0.0
-        peak_loss_sum = 0.0
+        total_losses = {}
         num_batches = 0
         
-        for batch_idx, batch in enumerate(self.train_dataloader):
-            start_time = time.time()
-            
-            # Move data to device
-            signal = batch['signal'].to(self.device)
-            static_params = batch['static_params'].to(self.device)
-            
-            # Forward pass
-            model_outputs = self.model(signal, static_params)
-            
-            # Handle different model architectures
-            if isinstance(model_outputs, dict):  # Hierarchical CVAE
-                recon_signal = model_outputs['recon_signal']
-                mu_global = model_outputs['mu_global']
-                logvar_global = model_outputs['logvar_global'] 
-                mu_local = model_outputs['mu_local']
-                logvar_local = model_outputs['logvar_local']
-                predicted_peaks = model_outputs.get('predicted_peaks', None)
-                recon_static_from_z = model_outputs.get('recon_static_from_z', None)
-                # For compatibility with loss functions, we'll use combined mu/logvar
-                mu = torch.cat([mu_global, mu_local], dim=1)
-                logvar = torch.cat([logvar_global, logvar_local], dim=1)
-            else:  # Standard CVAE
-                if self.model.predict_peaks:
-                    if len(model_outputs) == 5:  # includes recon_static_from_z
-                        recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
-                    else:  # standard 4 outputs
-                        recon_signal, mu, logvar, predicted_peaks = model_outputs
-                        recon_static_from_z = None
-                else:
-                    if len(model_outputs) == 4:  # includes recon_static_from_z
-                        recon_signal, mu, logvar, recon_static_from_z = model_outputs
-                    else:  # standard 3 outputs
-                        recon_signal, mu, logvar = model_outputs
-                        recon_static_from_z = None
-                    predicted_peaks = None
-            
-            # Calculate CVAE loss with annealed beta
-            cvae_total_loss, recon_loss, kl_loss = cvae_loss(
-                recon_signal, signal, mu, logvar, beta=beta
-            )
-            
-            # Initialize total loss
-            batch_total_loss = cvae_total_loss
-            batch_peak_loss = torch.tensor(0.0, device=self.device)
-            
-            # Add peak loss if enabled and model predicts peaks
-            if self.use_peak_loss and self.model.predict_peaks:
-                target_peaks = batch['peaks'].to(self.device)
-                peak_mask = batch['peak_mask'].to(self.device)
-                
-                batch_peak_loss = peak_loss(predicted_peaks, target_peaks, peak_mask)
-                batch_total_loss = batch_total_loss + self.peak_loss_weight * batch_peak_loss
-            
-            # Backward pass
-            self.optimizer.zero_grad()
-            batch_total_loss.backward()
-            
-            # Gradient clipping (optional)
-            if self.config.get('gradient_clip', None):
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['gradient_clip'])
-            
-            self.optimizer.step()
+        pbar = tqdm(self.train_loader, desc=f"Train Epoch {epoch}")
+        
+        for batch_idx, batch in enumerate(pbar):
+            # Training step
+            losses = self.train_step(batch)
             
             # Accumulate losses
-            total_loss += batch_total_loss.item()
-            recon_loss_sum += recon_loss.item()
-            kl_loss_sum += kl_loss.item()
-            peak_loss_sum += batch_peak_loss.item()
+            for key, value in losses.items():
+                if key not in total_losses:
+                    total_losses[key] = 0.0
+                total_losses[key] += value
+            
             num_batches += 1
+            self.global_step += 1
             
-            # Calculate batch time
-            duration = time.time() - start_time
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f"{losses['total_loss']:.4f}",
+                'diff': f"{losses['diffusion_loss']:.4f}",
+                'class': f"{losses['classification_loss']:.4f}"
+            })
             
-            # Log progress
-            if batch_idx % self.config.get('log_interval', 200) == 0:
-                print(f'Epoch {epoch}, Batch {batch_idx}/{len(self.train_dataloader)}, '
-                      f'Beta: {beta:.3f}, Total Loss: {batch_total_loss.item():.4f}, '
-                      f'Recon: {recon_loss.item():.4f}, KL: {kl_loss.item():.4f}, '
-                      f'Peak: {batch_peak_loss.item():.4f}, Time per batch: {duration:.3f} sec')
+            # Log to tensorboard
+            if self.writer and batch_idx % 100 == 0:
+                for key, value in losses.items():
+                    self.writer.add_scalar(f'train_batch/{key}', value, self.global_step)
         
         # Calculate average losses
-        avg_metrics = {
-            'total_loss': total_loss / num_batches,
-            'recon_loss': recon_loss_sum / num_batches,
-            'kl_loss': kl_loss_sum / num_batches,
-            'peak_loss': peak_loss_sum / num_batches,
-            'beta': beta
-        }
+        avg_losses = {key: value / num_batches for key, value in total_losses.items()}
         
-        return avg_metrics
+        return avg_losses
     
-    def validate(self, epoch: int) -> Dict[str, float]:
+    def validate_epoch(self, epoch: int) -> Dict[str, float]:
         """
-        Validate the model.
+        Validate for one epoch.
         
         Args:
             epoch: Current epoch number
             
         Returns:
-            Dictionary with validation metrics
+            Average validation losses
         """
         self.model.eval()
         
-        total_loss = 0.0
-        recon_loss_sum = 0.0
-        kl_loss_sum = 0.0
-        peak_loss_sum = 0.0
+        total_losses = {}
         num_batches = 0
         
-        with torch.no_grad():
-            for batch in self.val_dataloader:
-                # Move data to device
-                signal = batch['signal'].to(self.device)
-                static_params = batch['static_params'].to(self.device)
-                
-                # Forward pass
-                model_outputs = self.model(signal, static_params)
-                
-                # Handle different model architectures
-                if isinstance(model_outputs, dict):  # Hierarchical CVAE
-                    recon_signal = model_outputs['recon_signal']
-                    mu_global = model_outputs['mu_global']
-                    logvar_global = model_outputs['logvar_global'] 
-                    mu_local = model_outputs['mu_local']
-                    logvar_local = model_outputs['logvar_local']
-                    predicted_peaks = model_outputs.get('predicted_peaks', None)
-                    recon_static_from_z = model_outputs.get('recon_static_from_z', None)
-                    # For compatibility with loss functions, we'll use combined mu/logvar
-                    mu = torch.cat([mu_global, mu_local], dim=1)
-                    logvar = torch.cat([logvar_global, logvar_local], dim=1)
-                else:  # Standard CVAE
-                    if self.model.predict_peaks:
-                        if len(model_outputs) == 5:  # includes recon_static_from_z
-                            recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
-                        else:  # standard 4 outputs
-                            recon_signal, mu, logvar, predicted_peaks = model_outputs
-                            recon_static_from_z = None
-                    else:
-                        if len(model_outputs) == 4:  # includes recon_static_from_z
-                            recon_signal, mu, logvar, recon_static_from_z = model_outputs
-                        else:  # standard 3 outputs
-                            recon_signal, mu, logvar = model_outputs
-                            recon_static_from_z = None
-                        predicted_peaks = None
-                
-                # Calculate CVAE loss (use max_beta for validation)
-                cvae_total_loss, recon_loss, kl_loss = cvae_loss(
-                    recon_signal, signal, mu, logvar, beta=self.max_beta
-                )
-                
-                # Initialize total loss
-                batch_total_loss = cvae_total_loss
-                batch_peak_loss = torch.tensor(0.0, device=self.device)
-                
-                # Add peak loss if enabled and model predicts peaks
-                if self.use_peak_loss and self.model.predict_peaks:
-                    target_peaks = batch['peaks'].to(self.device)
-                    peak_mask = batch['peak_mask'].to(self.device)
-                    
-                    batch_peak_loss = peak_loss(predicted_peaks, target_peaks, peak_mask)
-                    batch_total_loss = batch_total_loss + self.peak_loss_weight * batch_peak_loss
-                
-                # Accumulate losses
-                total_loss += batch_total_loss.item()
-                recon_loss_sum += recon_loss.item()
-                kl_loss_sum += kl_loss.item()
-                peak_loss_sum += batch_peak_loss.item()
-                num_batches += 1
+        pbar = tqdm(self.val_loader, desc=f"Val Epoch {epoch}")
+        
+        for batch in pbar:
+            # Validation step
+            losses = self.validate_step(batch)
+            
+            # Accumulate losses
+            for key, value in losses.items():
+                if key not in total_losses:
+                    total_losses[key] = 0.0
+                total_losses[key] += value
+            
+            num_batches += 1
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'loss': f"{losses['total_loss']:.4f}",
+                'diff': f"{losses['diffusion_loss']:.4f}",
+                'class': f"{losses['classification_loss']:.4f}"
+            })
         
         # Calculate average losses
-        avg_metrics = {
-            'total_loss': total_loss / num_batches,
-            'recon_loss': recon_loss_sum / num_batches,
-            'kl_loss': kl_loss_sum / num_batches,
-            'peak_loss': peak_loss_sum / num_batches
-        }
+        avg_losses = {key: value / num_batches for key, value in total_losses.items()}
         
-        return avg_metrics
-    
-    def train(self, num_epochs: int):
-        """
-        Main training loop.
-        
-        Args:
-            num_epochs: Number of epochs to train
-        """
-        print(f"Starting training for {num_epochs} epochs...")
-        print(f"Model predicts peaks: {self.model.predict_peaks}")
-        print(f"Using peak loss: {self.use_peak_loss}")
-        print(f"Peak loss weight: {self.peak_loss_weight}")
-        print(f"Beta scheduler: {self.beta_scheduler}")
-        print(f"Using LR scheduler: {self.use_lr_scheduler}")
-        if self.use_lr_scheduler:
-            print(f"LR scheduler: {self.lr_scheduler}")
-        
-        for epoch in range(num_epochs):
-            # Training
-            train_metrics = self.train_epoch(epoch)
-            self.train_losses.append(train_metrics)
-            
-            # Validation
-            val_metrics = self.validate(epoch)
-            self.val_losses.append(val_metrics)
-            
-            # Log metrics to TensorBoard
-            self.writer.add_scalar('Loss/Train_Total', train_metrics['total_loss'], epoch)
-            self.writer.add_scalar('Loss/Train_Recon', train_metrics['recon_loss'], epoch)
-            self.writer.add_scalar('Loss/Train_KL', train_metrics['kl_loss'], epoch)
-            self.writer.add_scalar('Loss/Train_Peak', train_metrics['peak_loss'], epoch)
-            self.writer.add_scalar('Beta', train_metrics['beta'], epoch)
-            
-            self.writer.add_scalar('Loss/Val_Total', val_metrics['total_loss'], epoch)
-            self.writer.add_scalar('Loss/Val_Recon', val_metrics['recon_loss'], epoch)
-            self.writer.add_scalar('Loss/Val_KL', val_metrics['kl_loss'], epoch)
-            self.writer.add_scalar('Loss/Val_Peak', val_metrics['peak_loss'], epoch)
-            
-            # Log learning rate
-            lr = self.optimizer.param_groups[0]['lr']
-            self.writer.add_scalar('LearningRate', lr, epoch)
-            
-            # Log sample reconstructions every 10 epochs
-            if epoch % 10 == 0:
-                self.log_sample_reconstructions(epoch)
-            
-            # Print epoch summary
-            print(f"\nEpoch {epoch} Summary:")
-            print(f"  Train - Total: {train_metrics['total_loss']:.4f}, "
-                  f"Recon: {train_metrics['recon_loss']:.4f}, "
-                  f"KL: {train_metrics['kl_loss']:.4f}, "
-                  f"Peak: {train_metrics['peak_loss']:.4f}, "
-                  f"Beta: {train_metrics['beta']:.3f}")
-            print(f"  Val   - Total: {val_metrics['total_loss']:.4f}, "
-                  f"Recon: {val_metrics['recon_loss']:.4f}, "
-                  f"KL: {val_metrics['kl_loss']:.4f}, "
-                  f"Peak: {val_metrics['peak_loss']:.4f}")
-            
-            # Save best model
-            if val_metrics['total_loss'] < self.best_val_loss:
-                self.best_val_loss = val_metrics['total_loss']
-                self.save_checkpoint(epoch, is_best=True)
-                print(f"  New best validation loss: {self.best_val_loss:.4f}")
-            
-            # Update learning rate scheduler
-            if self.use_lr_scheduler:
-                self.lr_scheduler.step(val_metrics['total_loss'], self.optimizer, epoch)
-            
-            # Check early stopping
-            self.early_stopper.step(val_metrics['total_loss'], epoch)
-            if self.early_stopper.should_stop:
-                print(f"Early stopping triggered at epoch {epoch}. Training terminated.")
-                print(f"Best validation loss: {self.early_stopper.best_loss:.4f} at epoch {self.early_stopper.best_epoch}")
-                break
-            
-            # Save regular checkpoint
-            if epoch % self.config.get('save_interval', 10) == 0:
-                self.save_checkpoint(epoch, is_best=False)
-            
-            print("-" * 60)
-        
-        print("Training completed!")
-        self.writer.close()
-        self.plot_training_curves()
+        return avg_losses
     
     def save_checkpoint(self, epoch: int, is_best: bool = False):
-        """
-        Save model checkpoint.
+        """Save model checkpoint."""
+        checkpoint_dir = self.config['training']['checkpointing']['save_dir']
+        os.makedirs(checkpoint_dir, exist_ok=True)
         
-        Args:
-            epoch: Current epoch
-            is_best: Whether this is the best model so far
-        """
         checkpoint = {
             'epoch': epoch,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
             'best_val_loss': self.best_val_loss,
-            'config': self.config,
-            'early_stopper_state': {
-                'counter': self.early_stopper.counter,
-                'best_loss': self.early_stopper.best_loss,
-                'best_epoch': self.early_stopper.best_epoch,
-                'should_stop': self.early_stopper.should_stop
-            }
+            'config': self.config
         }
         
-        # Add LR scheduler state if used
-        if self.use_lr_scheduler:
-            checkpoint['lr_scheduler_state'] = {
-                'counter': self.lr_scheduler.counter,
-                'best_loss': self.lr_scheduler.best_loss,
-                'lr_reduced': self.lr_scheduler.lr_reduced
-            }
+        if self.scheduler:
+            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
         
-        filename = 'best_model.pth' if is_best else f'checkpoint_epoch_{epoch}.pth'
-        filepath = os.path.join(self.save_dir, filename)
-        torch.save(checkpoint, filepath)
+        # Save regular checkpoint
+        if self.config['training']['checkpointing']['save_last']:
+            torch.save(checkpoint, os.path.join(checkpoint_dir, 'last_checkpoint.pth'))
         
-        if is_best:
-            print(f"  Saved best model to {filepath}")
+        # Save periodic checkpoint
+        if epoch % self.config['training']['checkpointing']['save_frequency'] == 0:
+            torch.save(checkpoint, os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch:03d}.pth'))
+        
+        # Save best checkpoint
+        if is_best and self.config['training']['checkpointing']['save_best']:
+            torch.save(checkpoint, os.path.join(checkpoint_dir, 'best_checkpoint.pth'))
+            self.logger.info(f"New best checkpoint saved at epoch {epoch}")
     
-    def log_sample_reconstructions(self, epoch: int):
-        """
-        Log sample reconstructions to TensorBoard.
+    def train(self):
+        """Main training loop."""
+        self.logger.info("Starting training...")
         
-        Args:
-            epoch: Current epoch number
-        """
-        self.model.eval()
+        # Setup all components
+        self.setup_data()
+        self.setup_model()
+        self.setup_optimization()
+        self.setup_diffusion()
+        self.setup_loss()
         
-        with torch.no_grad():
-            # Get a batch from validation data
-            val_batch = next(iter(self.val_dataloader))
-            signal = val_batch['signal'][:4].to(self.device)  # Take first 4 samples
-            static_params = val_batch['static_params'][:4].to(self.device)
+        num_epochs = self.config['training']['epochs']
+        early_stopping_patience = self.config['training']['early_stopping']['patience']
+        early_stopping_counter = 0
+        
+        for epoch in range(num_epochs):
+            self.current_epoch = epoch
             
-            # Forward pass
-            model_outputs = self.model(signal, static_params)
+            # Training phase
+            train_losses = self.train_epoch(epoch)
             
-            # Handle different model architectures
-            if isinstance(model_outputs, dict):  # Hierarchical CVAE
-                recon_signal = model_outputs['recon_signal']
-                mu_global = model_outputs['mu_global']
-                logvar_global = model_outputs['logvar_global'] 
-                mu_local = model_outputs['mu_local']
-                logvar_local = model_outputs['logvar_local']
-                predicted_peaks = model_outputs.get('predicted_peaks', None)
-                recon_static_from_z = model_outputs.get('recon_static_from_z', None)
-                # For compatibility with existing code
-                mu = torch.cat([mu_global, mu_local], dim=1)
-                logvar = torch.cat([logvar_global, logvar_local], dim=1)
-            else:  # Standard CVAE
-                if self.model.predict_peaks:
-                    if len(model_outputs) == 5:  # includes recon_static_from_z
-                        recon_signal, mu, logvar, predicted_peaks, recon_static_from_z = model_outputs
-                    else:  # standard 4 outputs
-                        recon_signal, mu, logvar, predicted_peaks = model_outputs
-                        recon_static_from_z = None
-                else:
-                    if len(model_outputs) == 4:  # includes recon_static_from_z
-                        recon_signal, mu, logvar, recon_static_from_z = model_outputs
-                    else:  # standard 3 outputs
-                        recon_signal, mu, logvar = model_outputs
-                        recon_static_from_z = None
-                    predicted_peaks = None
-                
-            # Set target data based on model configuration
-            if self.model.predict_peaks and predicted_peaks is not None:
-                target_peaks = val_batch['peaks'][:4].to(self.device)
-                peak_mask = val_batch['peak_mask'][:4].to(self.device)
+            # Validation phase
+            val_losses = self.validate_epoch(epoch)
+            
+            # Learning rate scheduling
+            if isinstance(self.scheduler, optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step(val_losses['total_loss'])
             else:
-                target_peaks = None
-                peak_mask = None
+                self.scheduler.step()
             
-            # Create plots for each sample
-            for i in range(min(4, signal.shape[0])):
-                pred_peaks_i = predicted_peaks[i] if predicted_peaks is not None else None
-                tgt_peaks_i = target_peaks[i] if target_peaks is not None else None
-                peak_mask_i = peak_mask[i] if peak_mask is not None else None
-                
-                fig = plot_signals_with_peaks(
-                    ground_truth=signal[i],
-                    reconstructed=recon_signal[i],
-                    predicted_peaks=pred_peaks_i,
-                    target_peaks=tgt_peaks_i,
-                    peak_mask=peak_mask_i,
-                    title=f"Sample {i+1} Reconstruction"
-                )
-                
-                self.writer.add_figure(f"Reconstructions/Sample_{i+1}", fig, epoch)
-                plt.close(fig)
+            # Logging
+            current_lr = self.optimizer.param_groups[0]['lr']
+            
+            self.logger.info(
+                f"Epoch {epoch:03d}: "
+                f"Train Loss: {train_losses['total_loss']:.6f}, "
+                f"Val Loss: {val_losses['total_loss']:.6f}, "
+                f"LR: {current_lr:.2e}"
+            )
+            
+            # TensorBoard logging
+            if self.writer:
+                for key, value in train_losses.items():
+                    self.writer.add_scalar(f'train_epoch/{key}', value, epoch)
+                for key, value in val_losses.items():
+                    self.writer.add_scalar(f'val_epoch/{key}', value, epoch)
+                self.writer.add_scalar('learning_rate', current_lr, epoch)
+            
+            # Check for best model
+            is_best = val_losses['total_loss'] < self.best_val_loss
+            if is_best:
+                self.best_val_loss = val_losses['total_loss']
+                early_stopping_counter = 0
+            else:
+                early_stopping_counter += 1
+            
+            # Save checkpoint
+            self.save_checkpoint(epoch, is_best)
+            
+            # Early stopping
+            if early_stopping_counter >= early_stopping_patience:
+                self.logger.info(f"Early stopping triggered after {epoch + 1} epochs")
+                break
         
-        self.model.train()
-    
-    def load_checkpoint(self, checkpoint_path: str):
-        """
-        Load checkpoint and restore training state.
+        if self.writer:
+            self.writer.close()
         
-        Args:
-            checkpoint_path: Path to checkpoint file
-        """
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
-        
-        # Load model and optimizer states
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        
-        # Load training history
-        self.train_losses = checkpoint.get('train_losses', [])
-        self.val_losses = checkpoint.get('val_losses', [])
-        self.best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        
-        # Load early stopping state
-        if 'early_stopper_state' in checkpoint:
-            es_state = checkpoint['early_stopper_state']
-            self.early_stopper.counter = es_state['counter']
-            self.early_stopper.best_loss = es_state['best_loss']
-            self.early_stopper.best_epoch = es_state['best_epoch']
-            self.early_stopper.should_stop = es_state['should_stop']
-        
-        # Load LR scheduler state
-        if self.use_lr_scheduler and 'lr_scheduler_state' in checkpoint:
-            lr_state = checkpoint['lr_scheduler_state']
-            self.lr_scheduler.counter = lr_state['counter']
-            self.lr_scheduler.best_loss = lr_state['best_loss']
-            self.lr_scheduler.lr_reduced = lr_state['lr_reduced']
-        
-        start_epoch = checkpoint['epoch'] + 1
-        print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
-        print(f"Best validation loss: {self.best_val_loss:.4f}")
-        
-        return start_epoch
-    
-    def plot_training_curves(self):
-        """
-        Plot training and validation curves.
-        """
-        epochs = range(len(self.train_losses))
-        
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Total loss
-        axes[0, 0].plot(epochs, [m['total_loss'] for m in self.train_losses], label='Train')
-        axes[0, 0].plot(epochs, [m['total_loss'] for m in self.val_losses], label='Val')
-        axes[0, 0].set_title('Total Loss')
-        axes[0, 0].set_xlabel('Epoch')
-        axes[0, 0].set_ylabel('Loss')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True)
-        
-        # Reconstruction loss
-        axes[0, 1].plot(epochs, [m['recon_loss'] for m in self.train_losses], label='Train')
-        axes[0, 1].plot(epochs, [m['recon_loss'] for m in self.val_losses], label='Val')
-        axes[0, 1].set_title('Reconstruction Loss')
-        axes[0, 1].set_xlabel('Epoch')
-        axes[0, 1].set_ylabel('Loss')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True)
-        
-        # KL loss
-        axes[1, 0].plot(epochs, [m['kl_loss'] for m in self.train_losses], label='Train')
-        axes[1, 0].plot(epochs, [m['kl_loss'] for m in self.val_losses], label='Val')
-        axes[1, 0].set_title('KL Divergence Loss')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Loss')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True)
-        
-        # Peak loss and Beta
-        ax1 = axes[1, 1]
-        ax2 = ax1.twinx()
-        
-        ax1.plot(epochs, [m['peak_loss'] for m in self.train_losses], 'b-', label='Peak Loss (Train)')
-        ax1.plot(epochs, [m['peak_loss'] for m in self.val_losses], 'b--', label='Peak Loss (Val)')
-        ax2.plot(epochs, [m['beta'] for m in self.train_losses], 'r-', label='Beta')
-        
-        ax1.set_xlabel('Epoch')
-        ax1.set_ylabel('Peak Loss', color='b')
-        ax2.set_ylabel('Beta', color='r')
-        ax1.set_title('Peak Loss and Beta Schedule')
-        
-        # Combine legends
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-        
-        ax1.grid(True)
-        
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.save_dir, 'training_curves.png'), dpi=300, bbox_inches='tight')
-        plt.show()
-
-
-def create_dataloaders(data_path: str, batch_size: int = 32, val_split: float = 0.2, return_peaks: bool = True) -> Tuple[DataLoader, DataLoader]:
-    """
-    Create training and validation dataloaders.
-    
-    Args:
-        data_path: Path to preprocessed data
-        batch_size: Batch size for training
-        val_split: Fraction of data to use for validation
-        return_peaks: Whether to return peak data
-        
-    Returns:
-        Tuple of (train_dataloader, val_dataloader)
-    """
-    # Load full dataset
-    dataset = ABRDataset(data_path, return_peaks=return_peaks)
-    
-    # Split dataset
-    dataset_size = len(dataset)
-    val_size = int(val_split * dataset_size)
-    train_size = dataset_size - val_size
-    
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size],
-        generator=torch.Generator().manual_seed(42)
-    )
-    
-    # Create dataloaders
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=4
-    )
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=4
-    )
-    
-    return train_dataloader, val_dataloader
+        self.logger.info("Training completed!")
 
 
 def main():
-    """
-    Main training function.
-    """
-    # Configuration
-    config = {
-        'data_path': 'data/processed/processed_data.pkl',
-        'batch_size': 32,
-        'learning_rate': 1e-3,
-        'num_epochs': 100,
-        'latent_dim': 32,
-        'predict_peaks': True,
-        'use_peak_loss': True,
-        'peak_loss_weight': 1.0,
-        'max_beta': 1.0,
-        'warmup_epochs': 15,
-        'gradient_clip': 1.0,
-        'log_interval': 50,
-        'save_interval': 10,
-        'save_dir': 'checkpoints',
-        'val_split': 0.2,
-        'early_stopping_patience': 15,
-        'early_stopping_delta': 1e-4,
-        
-        # Beta scheduler configuration
-        'beta_scheduler_type': 'linear',  # 'linear', 'cosine', 'exponential'
-        'beta_scheduler_params': {
-            'max_beta': 1.0,
-            'warmup_epochs': 15,
-            'decay_rate': 0.1  # Only used for exponential scheduler
-        },
-        
-        # Learning rate scheduler configuration
-        'lr_scheduler': True,
-        'lr_scheduler_patience': 5,
-        'lr_scheduler_factor': 0.5,
-        'min_lr': 1e-6
-    }
+    """Main training function."""
+    parser = argparse.ArgumentParser(description="Train ABR Hierarchical U-Net")
+    parser.add_argument('--config', type=str, default='configs/config.yaml',
+                       help='Path to configuration file')
+    parser.add_argument('--resume', type=str, default=None,
+                       help='Path to checkpoint to resume from')
     
-    # Device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+    args = parser.parse_args()
     
-    # Create dataloaders
-    train_dataloader, val_dataloader = create_dataloaders(
-        config['data_path'], 
-        config['batch_size'], 
-        config['val_split'],
-        config['predict_peaks']
-    )
+    # Load configuration
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
     
-    # Get dataset info
-    sample_batch = next(iter(train_dataloader))
-    signal_length = sample_batch['signal'].shape[1]
-    static_dim = sample_batch['static_params'].shape[1]
-    
-    print(f"Dataset info:")
-    print(f"  Signal length: {signal_length}")
-    print(f"  Static params dimension: {static_dim}")
-    print(f"  Training batches: {len(train_dataloader)}")
-    print(f"  Validation batches: {len(val_dataloader)}")
-    
-    # Create model
-    model = CVAE(
-        signal_length=signal_length,
-        static_dim=static_dim,
-        latent_dim=config['latent_dim'],
-        predict_peaks=config['predict_peaks'],
-        num_peaks=6
-    ).to(device)
-    
-    # Create optimizer
-    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
-    
-    # Create trainer
-    trainer = CVAETrainer(
-        model=model,
-        train_dataloader=train_dataloader,
-        val_dataloader=val_dataloader,
-        optimizer=optimizer,
-        device=device,
-        config=config
-    )
-    
-    # Save configuration
-    with open(os.path.join(config['save_dir'], 'config.json'), 'w') as f:
-        json.dump(config, f, indent=2)
-    
-    # Start training
-    trainer.train(config['num_epochs'])
+    # Create trainer and start training
+    trainer = ABRTrainer(config)
+    trainer.train()
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    main() 

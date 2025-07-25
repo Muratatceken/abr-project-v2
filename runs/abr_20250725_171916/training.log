@@ -1,0 +1,3 @@
+2025-07-25 17:19:16,630 - INFO - Starting training...
+2025-07-25 17:19:16,632 - INFO - Model parameters: 603,585
+2025-07-25 17:19:16,633 - INFO - Epoch 0 curriculum weights: {'signal': 1.0, 'peak_exist': 0.5, 'peak_latency': 1.0, 'peak_amplitude': 1.0, 'classification': 1.5, 'threshold': 0.8}

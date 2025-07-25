@@ -10,4 +10,10 @@ seaborn
 scikit-image
 dtw-python
 pyyaml
-plotly 
+plotly
+PyWavelets
+scipy
+einops
+tqdm
+joblib
+opt_einsum

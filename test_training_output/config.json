@@ -1,0 +1,14 @@
+{
+  "batch_size": 4,
+  "learning_rate": 0.001,
+  "num_epochs": 1,
+  "weight_decay": 0.01,
+  "use_amp": false,
+  "patience": 1,
+  "num_workers": 0,
+  "use_class_weights": false,
+  "use_focal_loss": false,
+  "output_dir": "test_training_output",
+  "use_wandb": false,
+  "save_every": 1
+}
