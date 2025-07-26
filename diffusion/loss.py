@@ -245,11 +245,14 @@ class ABRDiffusionLoss(nn.Module):
         Returns:
             Threshold loss tensor
         """
-        # Ensure true_threshold has the correct shape
+        # Ensure true_threshold has the correct shape and device
         if true_threshold.dim() == 1:
             true_threshold = true_threshold.float()
         else:
             true_threshold = true_threshold.squeeze().float()
+            
+        # Ensure both tensors are on the same device
+        true_threshold = true_threshold.to(threshold_output.device)
             
         # Check if this is uncertainty prediction (2 outputs: mean, std)
         if threshold_output.size(-1) == 2:
@@ -362,6 +365,9 @@ class ABRDiffusionLoss(nn.Module):
         """
         loss_components = {}
         
+        # Get device from the first available tensor
+        device = next(iter(outputs.values())).device if outputs else next(iter(batch.values())).device
+        
         # Signal reconstruction loss - handle different output keys
         signal_key = 'recon' if 'recon' in outputs else 'signal'
         if signal_key in outputs:
@@ -371,7 +377,7 @@ class ABRDiffusionLoss(nn.Module):
             )
             loss_components['signal_loss'] = signal_loss
         else:
-            signal_loss = torch.tensor(0.0, device=self.device)
+            signal_loss = torch.tensor(0.0, device=device)
             loss_components['signal_loss'] = signal_loss
         
         # Peak prediction losses with improved handling
@@ -386,7 +392,7 @@ class ABRDiffusionLoss(nn.Module):
             loss_components['peak_amplitude_loss'] = peak_losses['amplitude']
         else:
             # Zero losses if peak outputs not available
-            zero_loss = torch.tensor(0.0, device=self.device)
+            zero_loss = torch.tensor(0.0, device=device)
             loss_components['peak_exist_loss'] = zero_loss
             loss_components['peak_latency_loss'] = zero_loss
             loss_components['peak_amplitude_loss'] = zero_loss
@@ -409,7 +415,7 @@ class ABRDiffusionLoss(nn.Module):
                 )
             loss_components['classification_loss'] = classification_loss
         else:
-            classification_loss = torch.tensor(0.0, device=self.device)
+            classification_loss = torch.tensor(0.0, device=device)
             loss_components['classification_loss'] = classification_loss
         
         # Threshold loss with robust handling
@@ -420,7 +426,7 @@ class ABRDiffusionLoss(nn.Module):
             )
             loss_components['threshold_loss'] = threshold_loss
         else:
-            threshold_loss = torch.tensor(0.0, device=self.device)
+            threshold_loss = torch.tensor(0.0, device=device)
             loss_components['threshold_loss'] = threshold_loss
         
         # Static parameter loss (for joint generation in optimized model)
