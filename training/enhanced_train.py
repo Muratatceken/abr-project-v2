@@ -430,12 +430,12 @@ class ABRTrainer:
         
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
-            for key in ['static_params', 'signal', 'v_peak', 'v_peak_mask', 'target']:
+            for key in ['static_params', 'signal', 'v_peak', 'v_peak_mask', 'target', 'threshold']:
                 if key in batch:
                     batch[key] = batch[key].to(self.device)
             
             # Forward pass with mixed precision
-            with autocast(enabled=self.config.get('use_amp', False)):
+            with autocast(enabled=self.use_amp):
                 outputs = self.model(batch['signal'], batch['static_params'])
                 loss, loss_dict = self.loss_fn(outputs, batch)
                 
@@ -443,35 +443,29 @@ class ABRTrainer:
                 loss = loss / accumulation_steps
             
             # Backward pass
-            if self.config.get('use_amp', False):
+            if self.use_amp and self.scaler is not None:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
                 
             # Optimizer step only after accumulation_steps
             if (batch_idx + 1) % accumulation_steps == 0:
-                if self.config.get('use_amp', False):
-                # Gradient clipping
-                    if self.config.get('gradient_clip_norm', 0) > 0:
-                        self.scaler.unscale_(self.optimizer)
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.config.get('gradient_clip_norm', 1.0)
-                        )
-                
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
                 # Gradient clipping
                 if self.config.get('gradient_clip_norm', 0) > 0:
+                    if self.use_amp and self.scaler is not None:
+                        self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(), 
                         self.config.get('gradient_clip_norm', 1.0)
                     )
                 
-                self.optimizer.step()
+                # Optimizer step with or without AMP
+                if self.use_amp and self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 
-                # Zero gradients after optimizer step
                 self.optimizer.zero_grad()
             
             # Update metrics with detailed tracking
