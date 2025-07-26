@@ -9,12 +9,14 @@ Includes:
 - Peak prediction head (existence, latency, amplitude)  
 - Classification head (hearing loss type)
 - Threshold regression head
+
+Updated with architectural improvements for better performance.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 import math
 import numpy as np
 
@@ -55,6 +57,34 @@ class BaseHead(nn.Module):
             nn.init.xavier_uniform_(module.weight)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+
+
+class MultiScaleFeatureExtractor(nn.Module):
+    """Multi-scale feature extraction for better peak and signal analysis."""
+    
+    def __init__(self, input_dim: int, scales: List[int] = [1, 3, 5, 7]):
+        super().__init__()
+        self.scales = scales
+        self.convs = nn.ModuleList([
+            nn.Conv1d(input_dim, input_dim // len(scales), 
+                     kernel_size=scale, padding=scale//2)
+            for scale in scales
+        ])
+        self.fusion = nn.Conv1d(input_dim, input_dim, kernel_size=1)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply multi-scale convolutions and fuse features."""
+        if x.dim() != 3:
+            raise ValueError(f"Expected 3D input [batch, channels, seq], got {x.shape}")
+        
+        multi_scale_features = []
+        for conv in self.convs:
+            feature = conv(x)
+            multi_scale_features.append(feature)
+        
+        # Concatenate and fuse
+        fused = torch.cat(multi_scale_features, dim=1)
+        return self.fusion(fused)
 
 
 class AttentionPooling(nn.Module):
@@ -100,6 +130,288 @@ class AttentionPooling(nn.Module):
         pooled = torch.sum(x * attention_weights, dim=1)  # [batch, input_dim]
         
         return pooled
+
+
+class RobustPeakHead(nn.Module):
+    """
+    Improved peak prediction head with better masking and multi-scale processing.
+    
+    Addresses the NaN R² issues by:
+    1. Proper gradient flow through masking
+    2. Multi-scale feature extraction
+    3. Uncertainty estimation
+    4. Separate decoders for each prediction type
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = None,
+        num_layers: int = 3,
+        dropout: float = 0.1,
+        use_attention: bool = True,
+        use_uncertainty: bool = True,
+        use_multiscale: bool = True,
+        latency_range: Tuple[float, float] = (1.0, 8.0),  # ms
+        amplitude_range: Tuple[float, float] = (-0.5, 0.5)  # μV
+    ):
+        super().__init__()
+        
+        if hidden_dim is None:
+            hidden_dim = input_dim
+        
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.use_attention = use_attention
+        self.use_uncertainty = use_uncertainty
+        self.use_multiscale = use_multiscale
+        self.latency_range = latency_range
+        self.amplitude_range = amplitude_range
+        
+        # Multi-scale feature extraction
+        if use_multiscale:
+            self.multiscale_extractor = MultiScaleFeatureExtractor(input_dim)
+        else:
+            self.multiscale_extractor = None
+        
+        # Attention pooling for global features
+        if use_attention:
+            self.attention_pool = AttentionPooling(input_dim)
+        
+        # Separate feature encoders for each task
+        self.existence_encoder = self._make_encoder(input_dim, hidden_dim, num_layers, dropout)
+        self.latency_encoder = self._make_encoder(input_dim, hidden_dim, num_layers, dropout)
+        self.amplitude_encoder = self._make_encoder(input_dim, hidden_dim, num_layers, dropout)
+        
+        # Output heads
+        self.existence_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, 1)  # Logits for BCE
+        )
+        
+        # Latency head with range normalization
+        if use_uncertainty:
+            self.latency_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 2)  # [mean, log_std]
+            )
+        else:
+            self.latency_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+        
+        # Amplitude head with range normalization
+        if use_uncertainty:
+            self.amplitude_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 2)  # [mean, log_std]
+            )
+        else:
+            self.amplitude_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+        
+        self.apply(self._init_weights)
+    
+    def _make_encoder(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> nn.Module:
+        """Create a task-specific feature encoder."""
+        layers = []
+        
+        # First layer
+        layers.extend([
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        ])
+        
+        # Hidden layers
+        for _ in range(num_layers - 1):
+            layers.extend([
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout)
+            ])
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self, module):
+        """Initialize weights properly."""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        """
+        Forward pass through peak prediction head.
+        
+        Args:
+            x: Input features [batch, channels, seq_len]
+            
+        Returns:
+            Tuple of (existence_logits, latency_pred, amplitude_pred[, uncertainties])
+        """
+        batch_size = x.size(0)
+        
+        # Multi-scale feature extraction
+        if self.multiscale_extractor is not None:
+            x = self.multiscale_extractor(x)
+        
+        # Global pooling using attention
+        if self.use_attention:
+            global_features = self.attention_pool(x)
+        else:
+            # Simple average pooling as fallback
+            global_features = x.mean(dim=-1)  # [batch, channels]
+        
+        # Task-specific feature encoding
+        existence_features = self.existence_encoder(global_features)
+        latency_features = self.latency_encoder(global_features)
+        amplitude_features = self.amplitude_encoder(global_features)
+        
+        # Predictions
+        existence_logits = self.existence_head(existence_features)  # [batch, 1]
+        
+        if self.use_uncertainty:
+            # Latency with uncertainty
+            latency_params = self.latency_head(latency_features)  # [batch, 2]
+            latency_mean = latency_params[:, 0:1]  # [batch, 1]
+            latency_log_std = latency_params[:, 1:2]  # [batch, 1]
+            
+            # Scale to proper range
+            latency_mean = self._scale_to_range(latency_mean, self.latency_range)
+            latency_std = torch.exp(latency_log_std.clamp(-10, 2))  # Prevent numerical issues
+            
+            # Amplitude with uncertainty
+            amplitude_params = self.amplitude_head(amplitude_features)  # [batch, 2]
+            amplitude_mean = amplitude_params[:, 0:1]  # [batch, 1]
+            amplitude_log_std = amplitude_params[:, 1:2]  # [batch, 1]
+            
+            # Scale to proper range
+            amplitude_mean = self._scale_to_range(amplitude_mean, self.amplitude_range)
+            amplitude_std = torch.exp(amplitude_log_std.clamp(-10, 2))  # Prevent numerical issues
+            
+            return (
+                existence_logits.squeeze(-1),  # [batch]
+                latency_mean.squeeze(-1),      # [batch]
+                amplitude_mean.squeeze(-1),    # [batch]
+                latency_std.squeeze(-1),       # [batch]
+                amplitude_std.squeeze(-1)      # [batch]
+            )
+        else:
+            # Simple predictions without uncertainty
+            latency_pred = self.latency_head(latency_features)  # [batch, 1]
+            amplitude_pred = self.amplitude_head(amplitude_features)  # [batch, 1]
+            
+            # Scale to proper ranges
+            latency_pred = self._scale_to_range(latency_pred, self.latency_range)
+            amplitude_pred = self._scale_to_range(amplitude_pred, self.amplitude_range)
+            
+            return (
+                existence_logits.squeeze(-1),  # [batch]
+                latency_pred.squeeze(-1),      # [batch]
+                amplitude_pred.squeeze(-1)     # [batch]
+            )
+    
+    def _scale_to_range(self, x: torch.Tensor, target_range: Tuple[float, float]) -> torch.Tensor:
+        """Scale predictions to target range using tanh activation."""
+        min_val, max_val = target_range
+        # Use tanh to map to [-1, 1], then scale to target range
+        scaled = torch.tanh(x)
+        return min_val + (max_val - min_val) * (scaled + 1) / 2
+    
+    def compute_masked_loss(
+        self,
+        predictions: Tuple[torch.Tensor, ...],
+        targets: Dict[str, torch.Tensor],
+        masks: torch.Tensor,
+        reduction: str = 'mean'
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute masked losses for peak predictions.
+        
+        Args:
+            predictions: Tuple of (existence, latency, amplitude[, uncertainties])
+            targets: Dict with 'existence', 'latency', 'amplitude' keys
+            masks: Boolean mask [batch] indicating valid peaks
+            reduction: Loss reduction method
+            
+        Returns:
+            Dictionary of individual losses
+        """
+        losses = {}
+        
+        # Unpack predictions
+        if len(predictions) == 5:  # With uncertainty
+            pred_exist, pred_latency, pred_amplitude, latency_std, amplitude_std = predictions
+            use_uncertainty = True
+        else:  # Without uncertainty
+            pred_exist, pred_latency, pred_amplitude = predictions
+            use_uncertainty = False
+        
+        # Existence loss (no masking needed for this)
+        existence_loss = F.binary_cross_entropy_with_logits(
+            pred_exist, targets['existence'].float(), reduction=reduction
+        )
+        losses['existence'] = existence_loss
+        
+        # Only compute latency/amplitude losses for samples with existing peaks
+        if masks.sum() > 0:  # Ensure we have valid samples
+            valid_indices = masks.bool()
+            
+            if use_uncertainty:
+                # Uncertainty-aware losses (negative log-likelihood)
+                valid_latency_pred = pred_latency[valid_indices]
+                valid_latency_std = latency_std[valid_indices]
+                valid_latency_target = targets['latency'][valid_indices]
+                
+                latency_nll = ((valid_latency_pred - valid_latency_target) ** 2 / 
+                              (2 * valid_latency_std ** 2) + 
+                              torch.log(valid_latency_std * np.sqrt(2 * np.pi)))
+                losses['latency'] = latency_nll.mean() if reduction == 'mean' else latency_nll.sum()
+                
+                valid_amplitude_pred = pred_amplitude[valid_indices]
+                valid_amplitude_std = amplitude_std[valid_indices]
+                valid_amplitude_target = targets['amplitude'][valid_indices]
+                
+                amplitude_nll = ((valid_amplitude_pred - valid_amplitude_target) ** 2 / 
+                                (2 * valid_amplitude_std ** 2) + 
+                                torch.log(valid_amplitude_std * np.sqrt(2 * np.pi)))
+                losses['amplitude'] = amplitude_nll.mean() if reduction == 'mean' else amplitude_nll.sum()
+            else:
+                # Standard MSE losses for valid samples only
+                valid_latency_pred = pred_latency[valid_indices]
+                valid_latency_target = targets['latency'][valid_indices]
+                losses['latency'] = F.mse_loss(valid_latency_pred, valid_latency_target, reduction=reduction)
+                
+                valid_amplitude_pred = pred_amplitude[valid_indices]
+                valid_amplitude_target = targets['amplitude'][valid_indices]
+                losses['amplitude'] = F.mse_loss(valid_amplitude_pred, valid_amplitude_target, reduction=reduction)
+        else:
+            # No valid peaks - set losses to zero but keep gradients
+            device = pred_exist.device
+            losses['latency'] = torch.tensor(0.0, device=device, requires_grad=True)
+            losses['amplitude'] = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        return losses
+
+
+# Keep the original EnhancedPeakHead as an alias for backward compatibility
+EnhancedPeakHead = RobustPeakHead
 
 
 class EnhancedSignalHead(nn.Module):
@@ -218,213 +530,15 @@ class EnhancedSignalHead(nn.Module):
         return signal
 
 
-class EnhancedPeakHead(nn.Module):
+class RobustClassificationHead(nn.Module):
     """
-    Enhanced peak prediction head with separate specialized MLPs and masked loss support.
+    Improved classification head with focal loss support and better minority class handling.
     
-    Features:
-    - Separate MLPs for existence, latency, and amplitude prediction
-    - Built-in support for peak masking during loss computation
-    - Uncertainty estimation (optional)
-    - Attention-based pooling for sequence inputs
-    """
-    
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int = None,
-        num_layers: int = 2,
-        dropout: float = 0.1,
-        use_attention: bool = True,
-        use_uncertainty: bool = False,
-        apply_mask_in_forward: bool = False  # Whether to apply mask in forward pass
-    ):
-        super().__init__()
-        
-        if hidden_dim is None:
-            hidden_dim = input_dim
-        
-        self.input_dim = input_dim
-        self.use_attention = use_attention
-        self.use_uncertainty = use_uncertainty
-        self.apply_mask_in_forward = apply_mask_in_forward
-        
-        # Attention pooling
-        if use_attention:
-            self.attention_pool = AttentionPooling(input_dim)
-        
-        # Shared feature extractor
-        shared_layers = []
-        for i in range(num_layers):
-            if i == 0:
-                in_features = input_dim
-            else:
-                in_features = hidden_dim
-            
-            shared_layers.extend([
-                nn.Linear(in_features, hidden_dim),
-                nn.GELU(),
-                nn.Dropout(dropout)
-            ])
-        
-        self.shared_features = nn.Sequential(*shared_layers)
-        
-        # Binary existence prediction (sigmoid)
-        self.existence_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
-            nn.Sigmoid()
-        )
-        
-        # Latency regression with specialized processing
-        self.latency_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-        
-        # Amplitude regression with specialized processing
-        self.amplitude_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
-        
-        # Uncertainty estimation (if enabled)
-        if use_uncertainty:
-            self.uncertainty_head = nn.Sequential(
-                nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.ReLU(),
-                nn.Linear(hidden_dim // 2, 3),  # 3 uncertainties: existence, latency, amplitude
-                nn.Softplus()
-            )
-    
-    def forward(
-        self, 
-        x: torch.Tensor, 
-        peak_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Predict peak information with optional masking support.
-        
-        Args:
-            x: Input features [batch, input_dim] or [batch, seq_len, input_dim] or [batch, input_dim, seq_len]
-            peak_mask: Optional peak mask [batch] - 1 where peak exists, 0 otherwise
-            
-        Returns:
-            Tuple of (existence_prob, latency, amplitude) [batch] each
-            
-        Note:
-            For masked loss computation, use the returned values as:
-            amp_loss = (pred_amp - true_amp)**2 * peak_mask
-            lat_loss = (pred_lat - true_lat)**2 * peak_mask
-        """
-        # Handle different input shapes
-        if x.dim() == 3:
-            if self.use_attention:
-                x = self.attention_pool(x)
-            else:
-                x = x.mean(dim=1) if x.size(1) != self.input_dim else x.mean(dim=2)
-        
-        # Extract shared features
-        features = self.shared_features(x)
-        
-        # Separate predictions
-        existence = self.existence_head(features).squeeze(-1)  # [batch]
-        latency = self.latency_head(features).squeeze(-1)      # [batch]
-        amplitude = self.amplitude_head(features).squeeze(-1)  # [batch]
-        
-        # Apply masking if requested and mask is provided
-        if self.apply_mask_in_forward and peak_mask is not None:
-            # Apply mask to regression outputs (existence is always predicted)
-            latency = latency * peak_mask
-            amplitude = amplitude * peak_mask
-        
-        if self.use_uncertainty:
-            uncertainties = self.uncertainty_head(features)  # [batch, 3]
-            return existence, latency, amplitude, uncertainties
-        
-        return existence, latency, amplitude
-    
-    def compute_masked_loss(
-        self,
-        pred_existence: torch.Tensor,
-        pred_latency: torch.Tensor,
-        pred_amplitude: torch.Tensor,
-        true_existence: torch.Tensor,
-        true_latency: torch.Tensor,
-        true_amplitude: torch.Tensor,
-        peak_mask: torch.Tensor,
-        existence_weight: float = 1.0,
-        latency_weight: float = 1.0,
-        amplitude_weight: float = 1.0
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Compute masked losses for peak prediction as specified in Fix 2.
-        
-        Args:
-            pred_existence: Predicted existence probability [batch]
-            pred_latency: Predicted latency [batch]
-            pred_amplitude: Predicted amplitude [batch]
-            true_existence: True existence (0 or 1) [batch]
-            true_latency: True latency [batch]
-            true_amplitude: True amplitude [batch]
-            peak_mask: Peak mask (1 where peak exists, 0 otherwise) [batch]
-            existence_weight: Weight for existence loss
-            latency_weight: Weight for latency loss
-            amplitude_weight: Weight for amplitude loss
-            
-        Returns:
-            Dictionary with individual and total losses
-        """
-        # Existence loss (BCE) - always computed (no masking needed)
-        existence_loss = F.binary_cross_entropy(
-            pred_existence, 
-            true_existence.float()
-        )
-        
-        # Masked regression losses (only where peaks exist)
-        # amp_loss = (pred_amp - true_amp)**2 * peak_mask
-        # lat_loss = (pred_lat - true_lat)**2 * peak_mask
-        latency_loss_unmasked = (pred_latency - true_latency) ** 2
-        amplitude_loss_unmasked = (pred_amplitude - true_amplitude) ** 2
-        
-        # Apply peak mask
-        latency_loss_masked = latency_loss_unmasked * peak_mask
-        amplitude_loss_masked = amplitude_loss_unmasked * peak_mask
-        
-        # Take mean only over samples where peaks exist
-        num_peaks = peak_mask.sum().clamp(min=1)  # Avoid division by zero
-        latency_loss = latency_loss_masked.sum() / num_peaks
-        amplitude_loss = amplitude_loss_masked.sum() / num_peaks
-        
-        # Total weighted loss
-        total_loss = (
-            existence_weight * existence_loss +
-            latency_weight * latency_loss +
-            amplitude_weight * amplitude_loss
-        )
-        
-        return {
-            'existence_loss': existence_loss,
-            'latency_loss': latency_loss,
-            'amplitude_loss': amplitude_loss,
-            'total_loss': total_loss,
-            'num_peaks': num_peaks
-        }
-
-
-class EnhancedClassificationHead(nn.Module):
-    """
-    Enhanced classification head with attention pooling and class balancing.
+    Addresses classification issues by:
+    1. Hierarchical feature learning
+    2. Class-aware attention mechanisms
+    3. Built-in focal loss support
+    4. Better handling of class imbalance
     """
     
     def __init__(
@@ -432,11 +546,12 @@ class EnhancedClassificationHead(nn.Module):
         input_dim: int,
         num_classes: int,
         hidden_dim: int = None,
-        num_layers: int = 2,
+        num_layers: int = 3,
         dropout: float = 0.1,
         use_attention: bool = True,
-        class_weights: Optional[torch.Tensor] = None,
-        use_focal_loss_prep: bool = True
+        use_focal_loss_prep: bool = True,
+        use_class_weights: bool = True,
+        temperature: float = 1.0
     ):
         super().__init__()
         
@@ -447,221 +562,341 @@ class EnhancedClassificationHead(nn.Module):
         self.num_classes = num_classes
         self.use_attention = use_attention
         self.use_focal_loss_prep = use_focal_loss_prep
+        self.temperature = temperature
         
-        # Register class weights
-        if class_weights is not None:
-            self.register_buffer('class_weights', class_weights)
-        else:
-            self.class_weights = None
+        # Multi-scale feature extractor for classification
+        self.multiscale_extractor = MultiScaleFeatureExtractor(input_dim)
         
         # Attention pooling
         if use_attention:
             self.attention_pool = AttentionPooling(input_dim)
         
-        # Feature processing layers
-        layers = []
-        for i in range(num_layers):
-            if i == 0:
-                in_features = input_dim
-            else:
-                in_features = hidden_dim
-            
-            layers.extend([
-                nn.Linear(in_features, hidden_dim),
-                nn.GELU(),
-                nn.LayerNorm(hidden_dim),
-                nn.Dropout(dropout)
-            ])
+        # Hierarchical feature learning
+        self.feature_encoder = self._make_hierarchical_encoder(input_dim, hidden_dim, num_layers, dropout)
         
-        self.feature_layers = nn.Sequential(*layers)
-        
-        # Classification head with potential focal loss preparation
-        if use_focal_loss_prep:
-            # Add an intermediate layer for better gradient flow
-            self.classifier = nn.Sequential(
+        # Class-specific feature extractors (for better minority class handling)
+        self.class_extractors = nn.ModuleList([
+            nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
-                nn.ReLU(),
-                nn.Dropout(dropout * 0.5),
-                nn.Linear(hidden_dim // 2, num_classes)
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, hidden_dim // 4)
             )
-        else:
-            self.classifier = nn.Linear(hidden_dim, num_classes)
+            for _ in range(num_classes)
+        ])
         
-        # Optional temperature scaling for calibration
-        self.temperature = nn.Parameter(torch.ones(1))
+        # Final classification head
+        total_feature_dim = hidden_dim + (hidden_dim // 4) * num_classes
+        self.classifier = nn.Sequential(
+            nn.Linear(total_feature_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim // 2, num_classes)
+        )
+        
+        # Class weights for balanced learning (will be set dynamically)
+        if use_class_weights:
+            self.register_buffer('class_weights', torch.ones(num_classes))
+        else:
+            self.class_weights = None
+        
+        self.apply(self._init_weights)
+    
+    def _make_hierarchical_encoder(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> nn.Module:
+        """Create hierarchical feature encoder with residual connections."""
+        layers = []
+        
+        # First layer
+        layers.extend([
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        ])
+        
+        # Residual blocks
+        for i in range(num_layers - 1):
+            layers.append(ResidualBlock(hidden_dim, dropout))
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self, module):
+        """Initialize weights properly."""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
+    def update_class_weights(self, class_counts: torch.Tensor):
+        """Update class weights based on class distribution."""
+        if self.class_weights is not None:
+            total_samples = class_counts.sum()
+            weights = total_samples / (len(class_counts) * class_counts.clamp(min=1))
+            self.class_weights.data = weights / weights.sum() * len(class_counts)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Classify input features.
+        Forward pass through classification head.
         
         Args:
-            x: Input features [batch, input_dim] or [batch, seq_len, input_dim] or [batch, input_dim, seq_len]
+            x: Input features [batch, channels, seq_len]
             
         Returns:
             Classification logits [batch, num_classes]
         """
-        # Handle different input shapes
-        if x.dim() == 3:
-            if self.use_attention:
-                x = self.attention_pool(x)
-            else:
-                x = x.mean(dim=1) if x.size(1) != self.input_dim else x.mean(dim=2)
+        # Multi-scale feature extraction
+        x = self.multiscale_extractor(x)
         
-        # Feature processing
-        features = self.feature_layers(x)
+        # Global pooling using attention
+        if self.use_attention:
+            global_features = self.attention_pool(x)
+        else:
+            global_features = x.mean(dim=-1)
         
-        # Classification
-        logits = self.classifier(features)
+        # Hierarchical feature encoding
+        encoded_features = self.feature_encoder(global_features)
         
-        # Temperature scaling
-        logits = logits / self.temperature
+        # Class-specific feature extraction
+        class_features = []
+        for extractor in self.class_extractors:
+            class_feature = extractor(encoded_features)
+            class_features.append(class_feature)
+        
+        # Combine all features
+        all_features = torch.cat([encoded_features] + class_features, dim=1)
+        
+        # Final classification
+        logits = self.classifier(all_features)
+        
+        # Apply temperature scaling if requested
+        if self.temperature != 1.0:
+            logits = logits / self.temperature
         
         return logits
-
-
-class EnhancedThresholdHead(nn.Module):
-    """
-    Enhanced threshold regression head with log-scale loss support and uncertainty estimation.
     
-    Features:
-    - Attention pooling or mean pooling
-    - Log-scale regression for better threshold prediction
-    - Optional uncertainty estimation (μ, σ outputs)
-    - Clinical constraint enforcement
+    def compute_focal_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        alpha: float = 1.0,
+        gamma: float = 2.0,
+        reduction: str = 'mean'
+    ) -> torch.Tensor:
+        """Compute focal loss for handling class imbalance."""
+        ce_loss = F.cross_entropy(logits, targets, weight=self.class_weights, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = alpha * (1 - pt) ** gamma * ce_loss
+        
+        if reduction == 'mean':
+            return focal_loss.mean()
+        elif reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
+
+
+class ResidualBlock(nn.Module):
+    """Residual block for better gradient flow."""
+    
+    def __init__(self, dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim, dim),
+            nn.LayerNorm(dim)
+        )
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.dropout(self.net(x))
+
+
+class RobustThresholdHead(nn.Module):
+    """
+    Improved threshold regression head with robust loss and better normalization.
+    
+    Addresses threshold estimation issues by:
+    1. Robust regression with multiple objectives
+    2. Better normalization and scaling
+    3. Uncertainty estimation
+    4. Outlier-resistant loss functions
     """
     
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: int = 256,
-        use_attention_pooling: bool = True,
-        use_uncertainty: bool = False,
-        use_log_scale: bool = True,
+        hidden_dim: int = None,
         dropout: float = 0.1,
-        threshold_range: Tuple[float, float] = (0.0, 120.0)
+        use_attention_pooling: bool = True,
+        use_uncertainty: bool = True,
+        use_robust_loss: bool = True,
+        threshold_range: Tuple[float, float] = (0.0, 120.0),
+        use_multiscale: bool = True
     ):
-        """
-        Initialize enhanced threshold head.
-        
-        Args:
-            input_dim: Input feature dimension
-            hidden_dim: Hidden layer dimension
-            use_attention_pooling: Whether to use attention pooling
-            use_uncertainty: Whether to predict uncertainty (σ) along with mean (μ)
-            use_log_scale: Whether to use log-scale for better regression
-            dropout: Dropout rate
-            threshold_range: Valid threshold range (dB SPL)
-        """
         super().__init__()
         
-        self.use_attention_pooling = use_attention_pooling
+        if hidden_dim is None:
+            hidden_dim = input_dim
+        
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
         self.use_uncertainty = use_uncertainty
-        self.use_log_scale = use_log_scale
+        self.use_robust_loss = use_robust_loss
         self.threshold_range = threshold_range
+        self.use_multiscale = use_multiscale
         
-        # Pooling layer
+        # Multi-scale feature extraction
+        if use_multiscale:
+            self.multiscale_extractor = MultiScaleFeatureExtractor(input_dim)
+        
+        # Attention pooling
         if use_attention_pooling:
-            self.pooling = AttentionPooling(input_dim)
+            self.attention_pool = AttentionPooling(input_dim)
         else:
-            self.pooling = nn.AdaptiveAvgPool1d(1)
+            self.attention_pool = None
         
-        # Feature processing
-        self.feature_layers = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(inplace=True),
+        # Feature encoder with multiple paths
+        self.global_encoder = self._make_encoder(input_dim, hidden_dim, 3, dropout)
+        self.local_encoder = self._make_encoder(input_dim, hidden_dim, 2, dropout)
+        
+        # Fusion layer
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
             nn.Dropout(dropout)
         )
         
-        # Output layers
-        output_dim = 2 if use_uncertainty else 1
-        self.output_layer = nn.Linear(hidden_dim // 2, output_dim)
-        
-        # Initialize weights for better threshold regression
-        self._initialize_weights()
-    
-    def _initialize_weights(self):
-        """Initialize weights for stable threshold regression."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-        
-        # Initialize output layer to predict reasonable threshold values
-        if hasattr(self, 'output_layer'):
-            # Initialize to predict mid-range thresholds
-            mid_threshold = (self.threshold_range[0] + self.threshold_range[1]) / 2
-            if self.use_log_scale:
-                init_value = np.log1p(mid_threshold)
-            else:
-                init_value = mid_threshold
+        # Multiple regression heads for robustness
+        if use_uncertainty:
+            # Main predictor (mean and log-std)
+            self.main_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 2)  # [mean, log_std]
+            )
             
-            nn.init.constant_(self.output_layer.bias[0], init_value)
-            if self.use_uncertainty and self.output_layer.bias.size(0) > 1:
-                nn.init.constant_(self.output_layer.bias[1], -2.0)  # Small initial uncertainty
+            # Auxiliary predictor for regularization
+            self.aux_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.GELU(),
+                nn.Linear(hidden_dim // 4, 1)
+            )
+        else:
+            # Simple regression head
+            self.main_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim // 2, 1)
+            )
+            self.aux_head = None
+        
+        # Outlier detection head (for robust loss)
+        if use_robust_loss:
+            self.outlier_head = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim // 4),
+                nn.GELU(),
+                nn.Linear(hidden_dim // 4, 1),
+                nn.Sigmoid()  # Probability of being an outlier
+            )
+        else:
+            self.outlier_head = None
+        
+        self.apply(self._init_weights)
+    
+    def _make_encoder(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> nn.Module:
+        """Create feature encoder."""
+        layers = []
+        
+        layers.extend([
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        ])
+        
+        for _ in range(num_layers - 1):
+            layers.append(ResidualBlock(hidden_dim, dropout))
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self, module):
+        """Initialize weights properly."""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass for threshold prediction.
+        Forward pass through threshold head.
         
         Args:
-            x: Input features [batch, channels, sequence_length]
+            x: Input features [batch, channels, seq_len]
             
         Returns:
-            Threshold predictions [batch, 1] or [batch, 2] if uncertainty enabled
+            Threshold predictions [batch, 1] or [batch, 2] if uncertainty
         """
-        # Apply pooling
-        if self.use_attention_pooling:
-            pooled = self.pooling(x)  # [batch, channels]
+        # Multi-scale feature extraction
+        if self.use_multiscale:
+            x = self.multiscale_extractor(x)
+        
+        # Global pooling
+        if self.attention_pool is not None:
+            global_features = self.attention_pool(x)
         else:
-            pooled = self.pooling(x).squeeze(-1)  # [batch, channels]
+            global_features = x.mean(dim=-1)
         
-        # Feature processing
-        features = self.feature_layers(pooled)  # [batch, hidden_dim // 2]
+        # Dual-path encoding
+        global_encoded = self.global_encoder(global_features)
+        local_encoded = self.local_encoder(global_features)
         
-        # Output prediction
-        output = self.output_layer(features)  # [batch, output_dim]
+        # Fusion
+        fused_features = self.fusion(torch.cat([global_encoded, local_encoded], dim=1))
         
-        # Apply constraints and transformations
+        # Main prediction
+        main_pred = self.main_head(fused_features)
+        
         if self.use_uncertainty:
-            mu = output[:, 0:1]  # [batch, 1]
-            log_sigma = output[:, 1:2]  # [batch, 1]
+            # Split into mean and log_std
+            pred_mean = main_pred[:, 0:1]
+            pred_log_std = main_pred[:, 1:2]
             
-            # Apply log-scale transformation to mean
-            if self.use_log_scale:
-                # Transform from log space back to threshold space
-                mu = torch.expm1(mu)  # Inverse of log1p
+            # Scale mean to proper range
+            pred_mean = self._scale_to_range(pred_mean, self.threshold_range)
+            pred_std = torch.exp(pred_log_std.clamp(-10, 2))
             
-            # Ensure positive sigma and apply constraints
-            sigma = F.softplus(log_sigma) + 1e-6
-            
-            # Apply threshold range constraints to mu
-            mu = torch.clamp(mu, self.threshold_range[0], self.threshold_range[1])
-            
-            # Combine mu and sigma
-            output = torch.cat([mu, sigma], dim=1)  # [batch, 2]
+            return torch.cat([pred_mean, pred_std], dim=1)
         else:
-            # Single threshold prediction
-            if self.use_log_scale:
-                # Transform from log space back to threshold space
-                output = torch.expm1(output)  # [batch, 1]
-            
-            # Apply threshold range constraints
-            output = torch.clamp(output, self.threshold_range[0], self.threshold_range[1])
-        
-        return output
+            # Simple prediction
+            pred = self._scale_to_range(main_pred, self.threshold_range)
+            return pred
     
-    def compute_loss(
-        self, 
-        predictions: torch.Tensor, 
+    def _scale_to_range(self, x: torch.Tensor, target_range: Tuple[float, float]) -> torch.Tensor:
+        """Scale predictions to target range."""
+        min_val, max_val = target_range
+        # Use sigmoid to map to [0, 1], then scale to target range
+        scaled = torch.sigmoid(x)
+        return min_val + (max_val - min_val) * scaled
+    
+    def compute_robust_loss(
+        self,
+        predictions: torch.Tensor,
         targets: torch.Tensor,
         reduction: str = 'mean'
-    ) -> torch.Tensor:
+    ) -> Dict[str, torch.Tensor]:
         """
-        Compute threshold regression loss with log-scale and uncertainty support.
+        Compute robust threshold loss with outlier handling.
         
         Args:
             predictions: Model predictions [batch, 1] or [batch, 2]
@@ -669,149 +904,384 @@ class EnhancedThresholdHead(nn.Module):
             reduction: Loss reduction method
             
         Returns:
-            Computed loss tensor
+            Dictionary of losses
         """
+        losses = {}
+        
         if self.use_uncertainty and predictions.size(-1) == 2:
-            # Uncertainty-aware loss (negative log-likelihood)
-            pred_mu = predictions[:, 0]  # [batch]
-            pred_sigma = predictions[:, 1]  # [batch]
+            # Uncertainty-aware loss
+            pred_mean = predictions[:, 0]
+            pred_std = predictions[:, 1]
             
-            # NLL loss: -log p(y|μ,σ) = 0.5 * ((y-μ)/σ)² + log(σ) + 0.5*log(2π)
-            nll = ((pred_mu - targets) ** 2 / (2 * pred_sigma ** 2) + 
-                   torch.log(pred_sigma * np.sqrt(2 * np.pi)))
+            # Negative log-likelihood
+            nll = ((pred_mean - targets) ** 2 / (2 * pred_std ** 2) + 
+                   torch.log(pred_std * np.sqrt(2 * np.pi)))
             
-            if reduction == 'mean':
-                return nll.mean()
-            elif reduction == 'sum':
-                return nll.sum()
-            else:
-                return nll
+            losses['main_loss'] = nll.mean() if reduction == 'mean' else nll.sum()
         else:
             # Standard regression loss
-            pred_threshold = predictions.squeeze(-1)  # [batch]
+            pred_threshold = predictions.squeeze(-1)
             
-            if self.use_log_scale:
-                # Log-scale MSE loss
-                log_pred = torch.log1p(torch.clamp(pred_threshold, min=0))
-                log_target = torch.log1p(torch.clamp(targets, min=0))
-                return F.mse_loss(log_pred, log_target, reduction=reduction)
+            # Huber loss (more robust to outliers than MSE)
+            if self.use_robust_loss:
+                losses['main_loss'] = F.huber_loss(pred_threshold, targets, delta=1.0, reduction=reduction)
             else:
-                # Standard MSE loss
-                return F.mse_loss(pred_threshold, targets, reduction=reduction)
+                losses['main_loss'] = F.mse_loss(pred_threshold, targets, reduction=reduction)
+        
+        # Auxiliary loss for regularization
+        if self.aux_head is not None:
+            aux_pred = self.aux_head(self.last_features).squeeze(-1)
+            aux_pred_scaled = self._scale_to_range(aux_pred.unsqueeze(-1), self.threshold_range).squeeze(-1)
+            losses['aux_loss'] = F.mse_loss(aux_pred_scaled, targets, reduction=reduction)
+        
+        return losses
 
 
-# Update existing heads to use enhanced versions by default
-class SignalHead(EnhancedSignalHead):
-    """Signal reconstruction head (enhanced version)."""
-    pass
-
-class PeakHead(EnhancedPeakHead):
-    """Peak prediction head (enhanced version)."""
-    pass
-
-class ClassificationHead(EnhancedClassificationHead):
-    """Classification head (enhanced version)."""
-    pass
-
-class ThresholdHead(EnhancedThresholdHead):
-    """Threshold regression head (enhanced version)."""
-    pass
+# Keep original class names as aliases for backward compatibility
+EnhancedClassificationHead = RobustClassificationHead
+EnhancedThresholdHead = RobustThresholdHead
 
 
-class MultiTaskHead(nn.Module):
+class StaticParameterGenerationHead(nn.Module):
     """
-    Combined multi-task head that outputs all predictions simultaneously.
+    Static parameter generation head for joint generation of ABR signals and static parameters.
     
-    Provides a unified interface for all ABR prediction tasks
-    with shared feature extraction and task-specific heads.
+    Generates realistic values for:
+    - Age (continuous, normalized)
+    - Intensity (continuous, normalized) 
+    - Stimulus Rate (continuous, normalized)
+    - FMP (continuous, normalized)
+    
+    Supports both unconditional generation and conditional generation with constraints.
     """
     
     def __init__(
         self,
         input_dim: int,
-        signal_length: int = 200,
-        num_classes: int = 4,
-        hidden_dim: Optional[int] = None,
+        static_dim: int = 4,  # age, intensity, stimulus_rate, fmp
+        hidden_dim: int = None,
+        num_layers: int = 3,
         dropout: float = 0.1,
-        use_shared_features: bool = True,
-        predict_uncertainty: bool = False
+        use_attention: bool = True,
+        use_uncertainty: bool = True,
+        use_constraints: bool = True,
+        parameter_ranges: Dict[str, Tuple[float, float]] = None
     ):
         super().__init__()
         
+        if hidden_dim is None:
+            hidden_dim = input_dim
+        
         self.input_dim = input_dim
-        self.signal_length = signal_length
-        self.num_classes = num_classes
-        self.use_shared_features = use_shared_features
+        self.static_dim = static_dim
+        self.hidden_dim = hidden_dim
+        self.use_attention = use_attention
+        self.use_uncertainty = use_uncertainty
+        self.use_constraints = use_constraints
         
-        # Shared feature extraction
-        if use_shared_features:
-            self.shared_features = nn.Sequential(
-                nn.LayerNorm(input_dim),
-                nn.Linear(input_dim, hidden_dim or input_dim),
-                nn.GELU(),
-                nn.Dropout(dropout)
-            )
-            head_input_dim = hidden_dim or input_dim
+        # Default parameter ranges (normalized values from dataset analysis)
+        if parameter_ranges is None:
+            self.parameter_ranges = {
+                'age': (-0.36, 11.37),           # Age range from dataset
+                'intensity': (-2.61, 1.99),     # Intensity range
+                'stimulus_rate': (-6.79, 5.10), # Stimulus rate range
+                'fmp': (-0.20, 129.11)          # FMP range
+            }
         else:
-            self.shared_features = nn.Identity()
-            head_input_dim = input_dim
+            self.parameter_ranges = parameter_ranges
         
-        # Individual task heads
-        self.signal_head = SignalHead(
-            input_dim=head_input_dim,
-            signal_length=signal_length,
-            dropout=dropout
+        # Multi-scale feature extraction for better parameter generation
+        self.multiscale_extractor = MultiScaleFeatureExtractor(input_dim)
+        
+        # Attention pooling for global context
+        if use_attention:
+            self.attention_pool = AttentionPooling(input_dim)
+        
+        # Parameter-specific encoders for better generation
+        self.param_encoders = nn.ModuleList([
+            self._make_param_encoder(input_dim, hidden_dim, num_layers, dropout)
+            for _ in range(static_dim)
+        ])
+        
+        # Parameter names for easier debugging
+        self.param_names = ['age', 'intensity', 'stimulus_rate', 'fmp']
+        
+        # Output heads for each parameter
+        if use_uncertainty:
+            # Generate mean and log_std for each parameter
+            self.param_heads = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim // 2),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim // 2, 2)  # [mean, log_std]
+                )
+                for _ in range(static_dim)
+            ])
+        else:
+            # Simple point estimates
+            self.param_heads = nn.ModuleList([
+                nn.Sequential(
+                    nn.Linear(hidden_dim, hidden_dim // 2),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(hidden_dim // 2, 1)
+                )
+                for _ in range(static_dim)
+            ])
+        
+        # Cross-parameter dependency modeling (important for realistic generation)
+        self.dependency_encoder = nn.Sequential(
+            nn.Linear(hidden_dim * static_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, static_dim)  # Dependency adjustment
         )
         
-        self.peak_head = PeakHead(
-            input_dim=head_input_dim,
-            dropout=dropout
-        )
-        
-        self.class_head = ClassificationHead(
-            input_dim=head_input_dim,
-            num_classes=num_classes,
-            dropout=dropout
-        )
-        
-        self.threshold_head = ThresholdHead(
-            input_dim=head_input_dim,
-            dropout=dropout,
-            predict_uncertainty=predict_uncertainty
-        )
+        self.apply(self._init_weights)
     
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _make_param_encoder(self, input_dim: int, hidden_dim: int, num_layers: int, dropout: float) -> nn.Module:
+        """Create parameter-specific encoder."""
+        layers = []
+        
+        # First layer
+        layers.extend([
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        ])
+        
+        # Residual blocks
+        for _ in range(num_layers - 1):
+            layers.append(ResidualBlock(hidden_dim, dropout))
+        
+        return nn.Sequential(*layers)
+    
+    def _init_weights(self, module):
+        """Initialize weights properly."""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass through multi-task head.
+        Generate static parameters from input features.
         
         Args:
-            x: Input features [batch, seq_len, input_dim] or [batch, input_dim]
+            x: Input features [batch, channels, seq_len]
             
         Returns:
-            Dictionary with task predictions:
-            {
-                'signal': [batch, signal_length],
-                'peak_exists': [batch, 1],
-                'peak_latency': [batch, 1], 
-                'peak_amplitude': [batch, 1],
-                'class': [batch, num_classes],
-                'threshold': [batch, 1] or [batch, 2]
-            }
+            Generated static parameters [batch, static_dim] or [batch, static_dim, 2] if uncertainty
         """
-        # Extract shared features
-        shared_features = self.shared_features(x)
+        batch_size = x.size(0)
         
-        # Get predictions from each head
-        signal = self.signal_head(shared_features)
-        peak_exists, peak_latency, peak_amplitude = self.peak_head(shared_features)
-        class_logits = self.class_head(shared_features)
-        threshold = self.threshold_head(shared_features)
+        # Multi-scale feature extraction
+        x = self.multiscale_extractor(x)
         
-        return {
-            'signal': signal,
-            'peak_exists': peak_exists,
-            'peak_latency': peak_latency,
-            'peak_amplitude': peak_amplitude,
-            'class': class_logits,
-            'threshold': threshold
-        } 
+        # Global pooling using attention
+        if self.use_attention:
+            global_features = self.attention_pool(x)
+        else:
+            global_features = x.mean(dim=-1)
+        
+        # Parameter-specific encoding
+        param_features = []
+        for encoder in self.param_encoders:
+            param_feature = encoder(global_features)
+            param_features.append(param_feature)
+        
+        # Model cross-parameter dependencies
+        combined_features = torch.cat(param_features, dim=1)  # [batch, hidden_dim * static_dim]
+        dependency_adjustment = self.dependency_encoder(combined_features)  # [batch, static_dim]
+        
+        # Generate parameters
+        generated_params = []
+        
+        for i, (param_head, param_feature) in enumerate(zip(self.param_heads, param_features)):
+            if self.use_uncertainty:
+                # Generate mean and log_std
+                param_output = param_head(param_feature)  # [batch, 2]
+                param_mean = param_output[:, 0:1]  # [batch, 1]
+                param_log_std = param_output[:, 1:2]  # [batch, 1]
+                
+                # Apply dependency adjustment to mean
+                param_mean = param_mean + dependency_adjustment[:, i:i+1] * 0.1
+                
+                # Scale to parameter range
+                param_name = self.param_names[i]
+                param_range = self.parameter_ranges[param_name]
+                scaled_mean = self._scale_to_range(param_mean, param_range)
+                scaled_std = torch.exp(param_log_std.clamp(-10, 2))
+                
+                generated_params.append(torch.cat([scaled_mean, scaled_std], dim=1))
+            else:
+                # Simple point estimate
+                param_output = param_head(param_feature)  # [batch, 1]
+                
+                # Apply dependency adjustment
+                param_output = param_output + dependency_adjustment[:, i:i+1] * 0.1
+                
+                # Scale to parameter range
+                param_name = self.param_names[i]
+                param_range = self.parameter_ranges[param_name]
+                scaled_param = self._scale_to_range(param_output, param_range)
+                
+                generated_params.append(scaled_param)
+        
+        if self.use_uncertainty:
+            # Stack and return [batch, static_dim, 2]
+            return torch.stack(generated_params, dim=1)  # [batch, static_dim, 2]
+        else:
+            # Concatenate and return [batch, static_dim]
+            return torch.cat(generated_params, dim=1)  # [batch, static_dim]
+    
+    def _scale_to_range(self, x: torch.Tensor, target_range: Tuple[float, float]) -> torch.Tensor:
+        """Scale parameters to target range using tanh activation."""
+        min_val, max_val = target_range
+        # Use tanh to map to [-1, 1], then scale to target range
+        scaled = torch.tanh(x)
+        return min_val + (max_val - min_val) * (scaled + 1) / 2
+    
+    def sample_parameters(
+        self, 
+        x: torch.Tensor, 
+        temperature: float = 1.0,
+        use_constraints: bool = True
+    ) -> torch.Tensor:
+        """
+        Sample static parameters with optional temperature scaling and constraints.
+        
+        Args:
+            x: Input features [batch, channels, seq_len]
+            temperature: Temperature for sampling (higher = more random)
+            use_constraints: Whether to apply clinical constraints
+            
+        Returns:
+            Sampled static parameters [batch, static_dim]
+        """
+        with torch.no_grad():
+            param_output = self.forward(x)
+            
+            if self.use_uncertainty:
+                # Sample from distributions
+                means = param_output[:, :, 0]  # [batch, static_dim]
+                stds = param_output[:, :, 1]   # [batch, static_dim]
+                
+                # Apply temperature scaling
+                scaled_stds = stds * temperature
+                
+                # Sample from normal distributions
+                noise = torch.randn_like(means)
+                sampled_params = means + scaled_stds * noise
+            else:
+                # Add noise for sampling
+                sampled_params = param_output + torch.randn_like(param_output) * temperature * 0.1
+            
+            # Apply clinical constraints if requested
+            if use_constraints and self.use_constraints:
+                sampled_params = self._apply_clinical_constraints(sampled_params)
+            
+            return sampled_params
+    
+    def _apply_clinical_constraints(self, params: torch.Tensor) -> torch.Tensor:
+        """Apply clinical constraints to ensure realistic parameter combinations."""
+        # Clone to avoid in-place operations
+        constrained_params = params.clone()
+        
+        # Example constraints (can be expanded based on clinical knowledge):
+        # 1. Very young patients (age < -0.2 normalized) should have lower intensities
+        young_mask = constrained_params[:, 0] < -0.2  # Young patients
+        if young_mask.any():
+            # Reduce intensity for young patients
+            constrained_params[young_mask, 1] = torch.clamp(
+                constrained_params[young_mask, 1], 
+                max=constrained_params[young_mask, 1] * 0.8
+            )
+        
+        # 2. High stimulus rates should typically have moderate intensities
+        high_rate_mask = constrained_params[:, 2] > 2.0  # High stimulus rate
+        if high_rate_mask.any():
+            # Moderate intensity for high rates
+            constrained_params[high_rate_mask, 1] = torch.clamp(
+                constrained_params[high_rate_mask, 1],
+                min=-1.0, max=1.0
+            )
+        
+        # 3. Ensure FMP is reasonable relative to other parameters
+        # High FMP should correlate with certain intensity ranges
+        high_fmp_mask = constrained_params[:, 3] > 50.0  # High FMP
+        if high_fmp_mask.any():
+            # Adjust intensity for high FMP
+            constrained_params[high_fmp_mask, 1] = torch.clamp(
+                constrained_params[high_fmp_mask, 1],
+                min=-0.5, max=1.5
+            )
+        
+        return constrained_params
+    
+    def compute_generation_loss(
+        self,
+        generated_params: torch.Tensor,
+        target_params: torch.Tensor,
+        reduction: str = 'mean'
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Compute loss for static parameter generation.
+        
+        Args:
+            generated_params: Generated parameters [batch, static_dim] or [batch, static_dim, 2]
+            target_params: Target parameters [batch, static_dim]
+            reduction: Loss reduction method
+            
+        Returns:
+            Dictionary of losses
+        """
+        losses = {}
+        
+        if self.use_uncertainty and generated_params.dim() == 3:
+            # Uncertainty-aware loss
+            pred_means = generated_params[:, :, 0]  # [batch, static_dim]
+            pred_stds = generated_params[:, :, 1]   # [batch, static_dim]
+            
+            # Negative log-likelihood for each parameter
+            param_losses = []
+            for i in range(self.static_dim):
+                pred_mean = pred_means[:, i]
+                pred_std = pred_stds[:, i]
+                target = target_params[:, i]
+                
+                nll = ((pred_mean - target) ** 2 / (2 * pred_std ** 2) + 
+                       torch.log(pred_std * np.sqrt(2 * np.pi)))
+                param_losses.append(nll)
+            
+            # Individual parameter losses
+            for i, param_name in enumerate(self.param_names):
+                losses[f'static_{param_name}'] = param_losses[i].mean() if reduction == 'mean' else param_losses[i].sum()
+            
+            # Total static parameter loss
+            total_loss = torch.stack(param_losses).mean(dim=0)
+            losses['static_total'] = total_loss.mean() if reduction == 'mean' else total_loss.sum()
+        else:
+            # Standard MSE loss for each parameter
+            param_losses = []
+            for i in range(self.static_dim):
+                pred = generated_params[:, i]
+                target = target_params[:, i]
+                loss = F.mse_loss(pred, target, reduction='none')
+                param_losses.append(loss)
+            
+            # Individual parameter losses
+            for i, param_name in enumerate(self.param_names):
+                losses[f'static_{param_name}'] = param_losses[i].mean() if reduction == 'mean' else param_losses[i].sum()
+            
+            # Total static parameter loss
+            total_loss = torch.stack(param_losses).mean(dim=0)
+            losses['static_total'] = total_loss.mean() if reduction == 'mean' else total_loss.sum()
+        
+        return losses 

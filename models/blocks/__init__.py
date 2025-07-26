@@ -15,13 +15,14 @@ from .film import (
 )
 from .positional import PositionalEmbedding, SinusoidalEmbedding
 from .heads import (
-    PeakHead, ClassificationHead, ThresholdHead, SignalHead,
-    EnhancedPeakHead, EnhancedClassificationHead, EnhancedThresholdHead, 
-    EnhancedSignalHead, AttentionPooling
+    RobustPeakHead, RobustClassificationHead, RobustThresholdHead,
+    EnhancedSignalHead, AttentionPooling, StaticParameterGenerationHead,
+    # Aliases for backward compatibility
+    EnhancedPeakHead, EnhancedClassificationHead, EnhancedThresholdHead
 )
 from .conv_blocks import Conv1dBlock, ResidualBlock, DownsampleBlock, UpsampleBlock, SkipConnection, EnhancedConvBlock, ResidualS4Block
-from .encoder_block import EnhancedEncoderBlock, MultiScaleEncoderStack
-from .decoder_block import EnhancedDecoderBlock, MultiScaleDecoderStack, BottleneckProcessor
+from .encoder_block import EnhancedEncoderBlock, MultiScaleEncoderStack, OptimizedEncoderBlock, OptimizedBottleneckProcessor
+from .decoder_block import EnhancedDecoderBlock, MultiScaleDecoderStack, BottleneckProcessor, OptimizedDecoderBlock, EnhancedSkipFusion, TaskSpecificFeatureExtractor
 
 __all__ = [
     'S4Layer', 'S4Block', 'EnhancedS4Layer',
@@ -30,11 +31,13 @@ __all__ = [
     'FiLMLayer', 'ConditionalEmbedding', 'AdaptiveFiLMWithDropout', 
     'MultiFiLM', 'CFGWrapper',
     'PositionalEmbedding', 'SinusoidalEmbedding',
-    'PeakHead', 'ClassificationHead', 'ThresholdHead', 'SignalHead',
+    'RobustPeakHead', 'RobustClassificationHead', 'RobustThresholdHead',
+    'EnhancedSignalHead', 'AttentionPooling', 'StaticParameterGenerationHead',
     'EnhancedPeakHead', 'EnhancedClassificationHead', 'EnhancedThresholdHead', 
-    'EnhancedSignalHead', 'AttentionPooling',
     'Conv1dBlock', 'ResidualBlock', 'DownsampleBlock', 'UpsampleBlock', 'SkipConnection',
     'EnhancedConvBlock', 'ResidualS4Block',
     'EnhancedEncoderBlock', 'MultiScaleEncoderStack',
-    'EnhancedDecoderBlock', 'MultiScaleDecoderStack', 'BottleneckProcessor'
+    'EnhancedDecoderBlock', 'MultiScaleDecoderStack', 'BottleneckProcessor',
+    'OptimizedEncoderBlock', 'OptimizedDecoderBlock', 'OptimizedBottleneckProcessor',
+    'TaskSpecificFeatureExtractor', 'EnhancedSkipFusion'
 ] 

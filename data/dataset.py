@@ -156,6 +156,7 @@ class ABRDataset(Dataset):
                 - target: Hearing loss classification label (int)
                 - v_peak: V peak data [2] (latency, amplitude)
                 - v_peak_mask: Validity mask [2] (bool)
+                - threshold: Clinical threshold (for optimized model)
                 - patient_id: Patient identifier (str)
         """
         if idx >= len(self.data):
@@ -171,6 +172,16 @@ class ABRDataset(Dataset):
         target = int(sample['target'])
         patient_id = str(sample['patient_id'])
         
+        # Extract clinical threshold if available (for optimized model)
+        if 'clinical_threshold' in sample:
+            threshold = float(sample['clinical_threshold'])
+        elif 'threshold' in sample:
+            threshold = float(sample['threshold'])
+        else:
+            # Fallback: derive from target class (rough approximation)
+            threshold_map = {0: 15.0, 1: 35.0, 2: 55.0, 3: 75.0, 4: 95.0}
+            threshold = threshold_map.get(target, 50.0)
+        
         # Apply signal normalization if requested
         if self.normalize_signal:
             # Z-score normalization per sample (already done in preprocessing, but ensure)
@@ -185,6 +196,7 @@ class ABRDataset(Dataset):
             'target': torch.tensor(target, dtype=torch.long),
             'v_peak': torch.tensor(v_peak, dtype=torch.float32),
             'v_peak_mask': torch.tensor(v_peak_mask, dtype=torch.bool),
+            'threshold': torch.tensor(threshold, dtype=torch.float32),
             'patient_id': patient_id
         }
         
@@ -452,13 +464,13 @@ def load_ultimate_dataset(
 
 
 def abr_collate_fn(batch):
-    """Custom collate function for ABR data."""
+    """Custom collate function for ABR data with support for optimized model."""
     # Stack signals and add channel dimension: [batch, 200] -> [batch, 1, 200]
     signals = torch.stack([item['signal'] for item in batch]).unsqueeze(1)
     static_params = torch.stack([item['static'] for item in batch])  # Note: key is 'static', not 'static_params'
     targets = torch.stack([item['target'] for item in batch])
     
-    # Handle optional fields
+    # Handle required fields
     batch_dict = {
         'signal': signals,
         'static_params': static_params,  # Rename to expected key
@@ -473,6 +485,11 @@ def abr_collate_fn(batch):
             'v_peak': v_peaks,
             'v_peak_mask': v_peak_masks
         })
+    
+    # Add threshold data if available (for optimized model)
+    if 'threshold' in batch[0]:
+        thresholds = torch.stack([item['threshold'] for item in batch])
+        batch_dict['threshold'] = thresholds
     
     # Add patient IDs if needed
     if 'patient_id' in batch[0]:

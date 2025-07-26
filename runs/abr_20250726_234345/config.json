@@ -1,0 +1,180 @@
+{
+  "experiment": {
+    "name": "abr_optimized_clinical_thresholds",
+    "description": "Ultimate training with OptimizedHierarchicalUNet using clinical thresholds dataset for maximum clinical applicability",
+    "random_seed": 42,
+    "tags": [
+      "optimized-architecture",
+      "clinical-thresholds",
+      "multi-scale-attention",
+      "task-specific-extractors",
+      "joint-generation",
+      "ultimate-results"
+    ]
+  },
+  "data": {
+    "data_path": "data/processed/ultimate_dataset_with_clinical_thresholds.pkl",
+    "valid_peaks_only": false,
+    "val_split": 0.2,
+    "augment": true,
+    "cfg_dropout_prob": 0.1,
+    "normalize_signal": true,
+    "normalize_static": true
+  },
+  "model": {
+    "type": "optimized_hierarchical_unet_v2",
+    "input_channels": 1,
+    "static_dim": 4,
+    "base_channels": 64,
+    "n_levels": 4,
+    "sequence_length": 200,
+    "signal_length": 200,
+    "num_classes": 5,
+    "s4_state_size": 64,
+    "num_s4_layers": 2,
+    "use_enhanced_s4": true,
+    "num_transformer_layers": 2,
+    "num_heads": 8,
+    "use_multi_scale_attention": true,
+    "use_cross_attention": true,
+    "dropout": 0.1,
+    "film_dropout": 0.15,
+    "use_cfg": true,
+    "use_attention_heads": true,
+    "predict_uncertainty": true,
+    "enable_joint_generation": true,
+    "static_param_ranges": {
+      "age": [
+        -2.0,
+        2.0
+      ],
+      "intensity": [
+        -2.0,
+        2.0
+      ],
+      "stimulus_rate": [
+        -2.0,
+        2.0
+      ],
+      "fmp": [
+        0.0,
+        150.0
+      ]
+    },
+    "use_task_specific_extractors": true,
+    "use_attention_skip_connections": true,
+    "channel_multiplier": 2.0
+  },
+  "training": {
+    "batch_size": 8,
+    "num_epochs": 50,
+    "learning_rate": 0.0003,
+    "weight_decay": "1e-4",
+    "use_amp": false,
+    "patience": 15,
+    "gradient_clip_norm": 1.0,
+    "gradient_accumulation_steps": 4,
+    "num_workers": 2,
+    "task_lr_multipliers": {
+      "task_extractors": 1.2,
+      "attention_layers": 0.8,
+      "s4_layers": 1.0,
+      "other": 1.0
+    }
+  },
+  "loss": {
+    "use_focal_loss": true,
+    "use_class_weights": true,
+    "peak_loss_type": "mse",
+    "use_log_threshold": false,
+    "use_uncertainty_threshold": true,
+    "enable_static_param_loss": true,
+    "loss_weights": {
+      "signal": 1.0,
+      "peak_exist": 0.5,
+      "peak_latency": 2.0,
+      "peak_amplitude": 2.0,
+      "classification": 2.5,
+      "threshold": 3.0,
+      "joint_generation": 0.8
+    }
+  },
+  "optimizer": {
+    "type": "adamw",
+    "betas": [
+      0.9,
+      0.999
+    ],
+    "eps": "1e-8",
+    "amsgrad": false
+  },
+  "scheduler": {
+    "type": "cosine_with_warmup",
+    "warmup_steps": 1000,
+    "eta_min": "1e-6",
+    "T_max": 100
+  },
+  "cfg": {
+    "joint_cfg": {
+      "enabled": true,
+      "guidance_scale": 7.5,
+      "dropout_prob": 0.1
+    }
+  },
+  "hardware": {
+    "compile_model": true,
+    "use_flash_attention": true,
+    "memory_fraction": 0.9,
+    "benchmark": true,
+    "deterministic": false
+  },
+  "validation": {
+    "fast_mode": false,
+    "full_validation_every": 5,
+    "ddim_steps": 50,
+    "skip_generation": false,
+    "use_cv": false,
+    "cv_folds": 5,
+    "cv_strategy": "StratifiedGroupKFold"
+  },
+  "logging": {
+    "output_dir": null,
+    "use_wandb": false,
+    "wandb_project": "abr-optimized-v2",
+    "use_tensorboard": true,
+    "log_every": 10,
+    "save_every": 10,
+    "save_formats": [
+      "pytorch"
+    ]
+  },
+  "evaluation": {
+    "architecture_evaluation": true,
+    "compute_metrics": true,
+    "save_predictions": true,
+    "create_visualizations": true
+  },
+  "output": {
+    "save_attention_maps": true,
+    "save_feature_maps": false,
+    "save_generated_samples": true,
+    "num_sample_generations": 10
+  },
+  "curriculum": {
+    "enabled": false,
+    "ramp_epochs": 5,
+    "peak_start": 5,
+    "class_start": 3,
+    "threshold_start": 10
+  },
+  "advanced": {
+    "memory_efficient_attention": true,
+    "gradient_checkpointing": false,
+    "mixed_precision_level": "O1",
+    "distributed_training": false,
+    "use_fused_layernorm": true,
+    "use_fused_adam": true,
+    "detect_anomaly": false,
+    "profile_memory": false
+  }
+}

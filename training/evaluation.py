@@ -37,6 +37,7 @@ except ImportError:
 class ABREvaluator:
     """
     Comprehensive evaluator for ABR model with multi-task metrics.
+    Supports both ProfessionalHierarchicalUNet and OptimizedHierarchicalUNet.
     """
     
     def __init__(
@@ -44,7 +45,8 @@ class ABREvaluator:
         model: nn.Module,
         device: torch.device,
         class_names: Optional[List[str]] = None,
-        output_dir: str = 'evaluation_results'
+        output_dir: str = 'evaluation_results',
+        model_type: str = 'auto'
     ):
         """
         Initialize ABR evaluator.
@@ -54,16 +56,48 @@ class ABREvaluator:
             device: Device for evaluation
             class_names: List of class names
             output_dir: Directory to save evaluation results
+            model_type: Type of model ('professional', 'optimized', 'auto')
         """
         self.model = model
         self.device = device
         self.class_names = class_names or ["NORMAL", "NÖROPATİ", "SNİK", "TOTAL", "İTİK"]
         self.output_dir = output_dir
         
+        # Detect model type if auto
+        if model_type == 'auto':
+            self.model_type = self._detect_model_type()
+        else:
+            self.model_type = model_type
+        
+        print(f"🔍 Detected model type: {self.model_type}")
+        
         os.makedirs(output_dir, exist_ok=True)
         
         # Initialize metrics storage
         self.reset_metrics()
+    
+    def _detect_model_type(self) -> str:
+        """Detect model type from model attributes."""
+        if hasattr(self.model, 'get_model_info'):
+            try:
+                model_info = self.model.get_model_info()
+                if 'optimized' in model_info.get('model_name', '').lower():
+                    return 'optimized'
+            except:
+                pass
+        
+        # Check for optimized model specific attributes
+        optimized_indicators = [
+            'use_multi_scale_attention',
+            'use_task_specific_extractors',
+            'enable_joint_generation'
+        ]
+        
+        for indicator in optimized_indicators:
+            if hasattr(self.model, indicator) and getattr(self.model, indicator, False):
+                return 'optimized'
+        
+        return 'professional'
     
     def reset_metrics(self):
         """Reset all accumulated metrics."""
@@ -73,7 +107,8 @@ class ABREvaluator:
             'peak_latency': [],
             'peak_amplitude': [],
             'threshold': [],
-            'signal': []
+            'signal': [],
+            'static_params': []  # For joint generation in optimized model
         }
         
         self.targets = {
@@ -83,7 +118,8 @@ class ABREvaluator:
             'peak_amplitude': [],
             'threshold': [],
             'signal': [],
-            'v_peak_mask': []
+            'v_peak_mask': [],
+            'static_params': []  # For joint generation
         }
         
         self.losses = defaultdict(list)
@@ -115,12 +151,48 @@ class ABREvaluator:
                 static_params=batch['static_params']
             )
             
-            # Extract predictions
-            class_pred = torch.argmax(outputs['class'], dim=1)
-            peak_exists, peak_latency, peak_amplitude = outputs['peak'][:3]
+            # Handle different output formats based on model type
+            if self.model_type == 'optimized':
+                # OptimizedHierarchicalUNet outputs
+                class_key = 'class' if 'class' in outputs else 'classification_logits'
+                signal_key = 'recon' if 'recon' in outputs else 'signal'
+                
+                class_pred = torch.argmax(outputs[class_key], dim=1)
+                signal_pred = outputs[signal_key]
+                
+                # Handle peak outputs
+                if 'peak' in outputs:
+                    peak_outputs = outputs['peak']
+                    if len(peak_outputs) >= 3:
+                        peak_exists, peak_latency, peak_amplitude = peak_outputs[:3]
+                    else:
+                        peak_exists = peak_latency = peak_amplitude = torch.zeros_like(batch['target']).float()
+                else:
+                    peak_exists = peak_latency = peak_amplitude = torch.zeros_like(batch['target']).float()
+                
+                # Handle threshold outputs
+                if 'threshold' in outputs:
+                    threshold_pred = outputs['threshold']
+                    if threshold_pred.dim() > 1:
+                        threshold_pred = threshold_pred.squeeze(-1)
+                else:
+                    threshold_pred = torch.zeros_like(batch['target']).float()
+                
+                # Handle static parameter outputs (joint generation)
+                if 'static_params' in outputs:
+                    static_pred = outputs['static_params']
+                    self.predictions['static_params'].extend(static_pred.cpu().numpy())
+                    self.targets['static_params'].extend(batch['static_params'].cpu().numpy())
+                
+            else:
+                # ProfessionalHierarchicalUNet outputs
+                class_pred = torch.argmax(outputs['class'], dim=1)
+                peak_exists, peak_latency, peak_amplitude = outputs['peak'][:3]
+                threshold_pred = outputs['threshold']
+                signal_pred = outputs['recon']
+            
+            # Process peak predictions
             peak_exists_pred = torch.sigmoid(peak_exists) > 0.5
-            threshold_pred = outputs['threshold']
-            signal_pred = outputs['recon']
             
             # Store predictions
             self.predictions['class'].extend(class_pred.cpu().numpy())
@@ -136,20 +208,33 @@ class ABREvaluator:
             self.targets['peak_exists'].extend(peak_exists_target.cpu().numpy())
             self.targets['peak_latency'].extend(batch['v_peak'][:, 0].cpu().numpy())
             self.targets['peak_amplitude'].extend(batch['v_peak'][:, 1].cpu().numpy())
-            # Use intensity as threshold proxy if no explicit threshold
-            intensity_proxy = torch.sigmoid(batch['static_params'][:, 1])
-            self.targets['threshold'].extend(intensity_proxy.cpu().numpy())
+            
+            # Handle threshold targets - use explicit threshold if available
+            if 'threshold' in batch:
+                self.targets['threshold'].extend(batch['threshold'].cpu().numpy())
+            else:
+                # Use intensity as threshold proxy if no explicit threshold
+                intensity_proxy = torch.sigmoid(batch['static_params'][:, 1])
+                self.targets['threshold'].extend(intensity_proxy.cpu().numpy())
+            
             self.targets['signal'].extend(batch['signal'].cpu().numpy())
             self.targets['v_peak_mask'].extend(batch['v_peak_mask'].cpu().numpy())
             
             # Store sample info
             for i in range(len(batch['target'])):
-                self.sample_info.append({
+                sample_info = {
                     'patient_id': batch['patient_ids'][i] if 'patient_ids' in batch else i,
                     'true_class': batch['target'][i].item(),
                     'pred_class': class_pred[i].item(),
-                    'static_params': batch['static_params'][i].cpu().numpy()
-                })
+                    'static_params': batch['static_params'][i].cpu().numpy(),
+                    'model_type': self.model_type
+                }
+                
+                # Add optimized model specific info
+                if self.model_type == 'optimized' and 'static_params' in outputs:
+                    sample_info['pred_static_params'] = static_pred[i].cpu().numpy()
+                
+                self.sample_info.append(sample_info)
             
             # Compute loss if requested
             batch_metrics = {}
@@ -157,8 +242,12 @@ class ABREvaluator:
                 loss, loss_components = loss_fn(outputs, batch)
                 batch_metrics['total_loss'] = loss.item()
                 for key, value in loss_components.items():
-                    batch_metrics[key] = value.item()
-                    self.losses[key].append(value.item())
+                    if torch.is_tensor(value):
+                        batch_metrics[key] = value.item()
+                        self.losses[key].append(value.item())
+                    else:
+                        batch_metrics[key] = value
+                        self.losses[key].append(value)
         
         return batch_metrics
     

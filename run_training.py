@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Enhanced ABR Training Runner
+Unified ABR Training Runner
 
-Simple script to run the enhanced ABR training pipeline with YAML configuration support.
+Enhanced script to run ABR training pipeline supporting both ProfessionalHierarchicalUNet 
+and OptimizedHierarchicalUNet architectures with comprehensive features.
 
 Usage:
     python run_training.py --config training/config.yaml
-    python run_training.py --config training/config.yaml --batch_size 64 --learning_rate 2e-4
-    python run_training.py --data_path data/processed/ultimate_dataset.pkl --valid_peaks_only
+    python run_training.py --config training/config_optimized_v2.yaml --model_type optimized
+    python run_training.py --quick_test --debug
 
-Author: AI Assistant
+Author: AI Assistant  
 Date: January 2025
 """
 
@@ -25,13 +26,13 @@ project_root = Path(__file__).parent
 sys.path.append(str(project_root))
 
 from training.config_loader import ConfigLoader, load_config_with_overrides
-from training.enhanced_train import main as train_main
+from training.enhanced_train import main as enhanced_train_main
 
 
 def create_parser() -> argparse.ArgumentParser:
-    """Create argument parser for training script."""
+    """Create argument parser for unified training script."""
     parser = argparse.ArgumentParser(
-        description='Enhanced ABR Model Training',
+        description='Unified ABR Model Training with Architecture Selection',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -39,6 +40,13 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--config', type=str, default='training/config.yaml',
         help='Path to YAML configuration file'
+    )
+    
+    # Model architecture selection
+    parser.add_argument(
+        '--model_type', type=str, default='professional', 
+        choices=['professional', 'optimized', 'auto'],
+        help='Model architecture type (professional=ProfessionalHierarchicalUNet, optimized=OptimizedHierarchicalUNet, auto=detect from config)'
     )
     
     # Data arguments
@@ -55,7 +63,7 @@ def create_parser() -> argparse.ArgumentParser:
         help='Validation split ratio'
     )
     
-    # Model arguments
+    # Model arguments (compatible with both architectures)
     parser.add_argument(
         '--base_channels', type=int, default=64,
         help='Base number of channels'
@@ -79,6 +87,24 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--num_classes', type=int, default=5,
         help='Number of output classes'
+    )
+    
+    # Optimized architecture specific arguments
+    parser.add_argument(
+        '--use_multi_scale_attention', action='store_true', default=False,
+        help='Use multi-scale attention for peak detection (optimized model only)'
+    )
+    parser.add_argument(
+        '--use_task_specific_extractors', action='store_true', default=False,
+        help='Use task-specific feature extractors (optimized model only)'
+    )
+    parser.add_argument(
+        '--use_attention_skip_connections', action='store_true', default=False,
+        help='Use attention-based skip connections (optimized model only)'
+    )
+    parser.add_argument(
+        '--enable_joint_generation', action='store_true', default=False,
+        help='Enable joint signal and parameter generation (optimized model only)'
     )
     
     # Training arguments
@@ -172,7 +198,7 @@ def create_parser() -> argparse.ArgumentParser:
         help='Use Weights & Biases for logging'
     )
     parser.add_argument(
-        '--wandb_project', type=str, default='abr-enhanced-training',
+        '--wandb_project', type=str, default='abr-unified-training',
         help='Weights & Biases project name'
     )
     parser.add_argument(
@@ -225,6 +251,12 @@ def create_parser() -> argparse.ArgumentParser:
         help='Debug mode with minimal data and epochs'
     )
     
+    # Architecture testing
+    parser.add_argument(
+        '--test_architecture', action='store_true',
+        help='Test the architecture before training'
+    )
+    
     return parser
 
 
@@ -271,6 +303,119 @@ def apply_quick_modes(args):
         args.n_levels = 3
 
 
+def detect_model_type_from_config(config):
+    """Detect model type from configuration."""
+    model_config = config.get('model', {})
+    
+    # Check for optimized model indicators
+    optimized_indicators = [
+        'use_multi_scale_attention',
+        'use_task_specific_extractors', 
+        'use_attention_skip_connections',
+        'enable_joint_generation'
+    ]
+    
+    # Check if any optimized features are enabled
+    for indicator in optimized_indicators:
+        if model_config.get(indicator, False):
+            return 'optimized'
+    
+    # Check model type directly
+    model_type = model_config.get('type', '').lower()
+    if 'optimized' in model_type:
+        return 'optimized'
+    elif 'professional' in model_type:
+        return 'professional'
+    
+    # Default to professional
+    return 'professional'
+
+
+def create_optimized_model_config(args):
+    """Create configuration for optimized model."""
+    return {
+        'input_channels': 1,
+        'static_dim': 4,
+        'base_channels': args.base_channels,
+        'n_levels': args.n_levels,
+        'sequence_length': 200,
+        'signal_length': 200,
+        'num_classes': args.num_classes,
+        
+        # S4 configuration
+        's4_state_size': 64,
+        'num_s4_layers': 2,
+        'use_enhanced_s4': True,
+        
+        # Transformer configuration
+        'num_transformer_layers': args.num_transformer_layers,
+        'num_heads': 8,
+        'use_multi_scale_attention': args.use_multi_scale_attention,
+        'use_cross_attention': args.use_cross_attention,
+        
+        # FiLM and conditioning
+        'dropout': 0.1,
+        'film_dropout': args.film_dropout,
+        'use_cfg': True,
+        
+        # Output configuration
+        'use_attention_heads': True,
+        'predict_uncertainty': True,
+        
+        # Joint generation
+        'enable_joint_generation': args.enable_joint_generation,
+        'static_param_ranges': {
+            'age': [-2.0, 2.0],
+            'intensity': [-2.0, 2.0], 
+            'stimulus_rate': [-2.0, 2.0],
+            'fmp': [0.0, 150.0]
+        },
+        
+        # Optimization features
+        'use_task_specific_extractors': args.use_task_specific_extractors,
+        'use_attention_skip_connections': args.use_attention_skip_connections,
+        'channel_multiplier': 2.0
+    }
+
+
+def test_optimized_architecture(model_config, device):
+    """Test the optimized architecture before training."""
+    print("\n🧪 Testing optimized architecture...")
+    
+    try:
+        from models.hierarchical_unet import OptimizedHierarchicalUNet
+        
+        model = OptimizedHierarchicalUNet(**model_config)
+        model = model.to(device)
+        model.eval()
+        
+        with torch.no_grad():
+            # Test input
+            x = torch.randn(2, 1, 200, device=device)
+            static_params = torch.randn(2, 4, device=device)
+            
+            # Test conditional generation
+            outputs = model(x, static_params, generation_mode='conditional')
+            print(f"✅ Conditional generation: {list(outputs.keys())}")
+            
+            # Test joint generation if enabled
+            if model_config.get('enable_joint_generation', False):
+                joint_outputs = model.generate_joint(batch_size=2, device=device)
+                print(f"✅ Joint generation: {list(joint_outputs.keys())}")
+            
+            # Get model info
+            model_info = model.get_model_info()
+            print(f"✅ Model parameters: {model_info['total_parameters']:,}")
+            print(f"✅ Architecture features: {len(model_info['features'])}")
+            
+            print("🎉 Optimized architecture test passed!")
+            return True
+            
+    except Exception as e:
+        print(f"❌ Optimized architecture test failed: {e}")
+        return False
+
+
 def main():
     """Main training function."""
     # Parse arguments
@@ -285,7 +430,7 @@ def main():
     
     # Load configuration
     if os.path.exists(args.config):
-        print(f"Loading configuration from: {args.config}")
+        print(f"📋 Loading configuration from: {args.config}")
         config = load_config_with_overrides(args.config, args=args)
     else:
         print(f"Configuration file not found: {args.config}")
@@ -293,35 +438,89 @@ def main():
         from training.config_loader import create_config_from_args
         config = create_config_from_args(args)
     
+    # Determine model type
+    if args.model_type == 'auto':
+        detected_type = detect_model_type_from_config(config)
+        print(f"🔍 Auto-detected model type: {detected_type}")
+        model_type = detected_type
+    else:
+        model_type = args.model_type
+    
+    # Update configuration based on model type
+    if model_type == 'optimized':
+        print("🚀 Using OptimizedHierarchicalUNet architecture")
+        
+        # Set optimized model indicators in config
+        if 'model' not in config:
+            config['model'] = {}
+        
+        config['model']['type'] = 'optimized_hierarchical_unet_v2'
+        config['model']['use_multi_scale_attention'] = args.use_multi_scale_attention
+        config['model']['use_task_specific_extractors'] = args.use_task_specific_extractors
+        config['model']['use_attention_skip_connections'] = args.use_attention_skip_connections
+        config['model']['enable_joint_generation'] = args.enable_joint_generation
+        
+        # Test optimized architecture if requested
+        if args.test_architecture:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model_config = create_optimized_model_config(args)
+            if not test_optimized_architecture(model_config, device):
+                print("❌ Architecture test failed, aborting training")
+                return 1
+                
+        # Update project name for wandb
+        if args.use_wandb:
+            args.wandb_project = 'abr-optimized-v2'
+        
+    else:
+        print("🏛️ Using ProfessionalHierarchicalUNet architecture")
+        if 'model' not in config:
+            config['model'] = {}
+        config['model']['type'] = 'professional_hierarchical_unet'
+    
     # Validate required paths
-    if not os.path.exists(config['data']['data_path']):
-        print(f"❌ Dataset not found: {config['data']['data_path']}")
+    data_path = config.get('data', {}).get('data_path', args.data_path)
+    if not os.path.exists(data_path):
+        print(f"❌ Dataset not found: {data_path}")
         print("Please ensure the ultimate_dataset.pkl file exists")
         return 1
     
     # Print configuration summary
-    print("\n" + "="*60)
-    print("🚀 ENHANCED ABR TRAINING CONFIGURATION")
-    print("="*60)
-    print(f"Dataset: {config['data']['data_path']}")
-    print(f"Valid peaks only: {config['data']['valid_peaks_only']}")
-    print(f"Batch size: {config['training']['batch_size']}")
-    print(f"Learning rate: {config['training']['learning_rate']}")
-    print(f"Epochs: {config['training']['num_epochs']}")
-    print(f"Model channels: {config['model']['base_channels']}")
-    print(f"Model levels: {config['model']['n_levels']}")
-    print(f"Transformer layers: {config['model']['num_transformer_layers']}")
-    print(f"Cross-attention: {config['model']['use_cross_attention']}")
-    print(f"FiLM dropout: {config['model']['film_dropout']}")
-    print(f"Mixed precision: {config['training']['use_amp']}")
-    print(f"Output directory: {config.get('logging', {}).get('output_dir', 'auto-generated')}")
-    print("="*60)
+    print("\n" + "="*70)
+    print("🚀 UNIFIED ABR TRAINING CONFIGURATION")
+    print("="*70)
+    print(f"Model Type: {model_type.upper()}")
+    print(f"Dataset: {data_path}")
+    print(f"Valid peaks only: {config.get('data', {}).get('valid_peaks_only', args.valid_peaks_only)}")
+    print(f"Batch size: {config.get('training', {}).get('batch_size', args.batch_size)}")
+    print(f"Learning rate: {config.get('training', {}).get('learning_rate', args.learning_rate)}")
+    print(f"Epochs: {config.get('training', {}).get('num_epochs', args.num_epochs)}")
+    print(f"Model channels: {config.get('model', {}).get('base_channels', args.base_channels)}")
+    print(f"Model levels: {config.get('model', {}).get('n_levels', args.n_levels)}")
+    print(f"Transformer layers: {config.get('model', {}).get('num_transformer_layers', args.num_transformer_layers)}")
+    print(f"Cross-attention: {config.get('model', {}).get('use_cross_attention', args.use_cross_attention)}")
+    print(f"FiLM dropout: {config.get('model', {}).get('film_dropout', args.film_dropout)}")
     
-    # Convert config back to args format for compatibility
+    if model_type == 'optimized':
+        print(f"Multi-scale attention: {args.use_multi_scale_attention}")
+        print(f"Task-specific extractors: {args.use_task_specific_extractors}")
+        print(f"Attention skip connections: {args.use_attention_skip_connections}")
+        print(f"Joint generation: {args.enable_joint_generation}")
+    
+    print(f"Mixed precision: {config.get('training', {}).get('use_amp', args.use_amp)}")
+    print(f"Output directory: {config.get('logging', {}).get('output_dir', args.output_dir or 'auto-generated')}")
+    print("="*70)
+    
+    # Convert config back to args format for compatibility with enhanced_train.py
     class ConfigArgs:
-        def __init__(self, config_dict):
+        def __init__(self, config_dict, original_args):
             self.config = config_dict
-            # Flatten config for attribute access
+            
+            # Copy original args
+            for key, value in vars(original_args).items():
+                setattr(self, key, value)
+            
+            # Override with config values, flattening nested structure
             self._flatten_config(config_dict)
         
         def _flatten_config(self, config, prefix=''):
@@ -333,7 +532,7 @@ def main():
                     setattr(self, attr_name, value)
     
     # Create args object from config
-    config_args = ConfigArgs(config)
+    config_args = ConfigArgs(config, args)
     
     # Set specific attributes that the training script expects
     for key in ['data_path', 'valid_peaks_only', 'batch_size', 'learning_rate', 
@@ -357,7 +556,7 @@ def main():
     
     # Start training
     try:
-        print("\n🎯 Starting Enhanced ABR Training...")
+        print(f"\n🎯 Starting {model_type.title()} ABR Training...")
         
         # Check if cross-validation is requested
         if config.get('validation', {}).get('use_cv', False) or getattr(config_args, 'use_cv', False):
@@ -390,8 +589,8 @@ def main():
             
         else:
             print("🚀 Running Single Training...")
-            train_main(config_args)
-            print("\n✅ Training completed successfully!")
+            enhanced_train_main(config_args)
+            print(f"\n✅ {model_type.title()} training completed successfully!")
             
         return 0
 

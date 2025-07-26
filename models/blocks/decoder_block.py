@@ -13,8 +13,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, List, Dict, Tuple
 
-from .transformer_block import MultiLayerTransformerBlock, DeepTransformerDecoder
-from .conv_blocks import UpsampleBlock, Conv1dBlock
+from .transformer_block import MultiLayerTransformerBlock, DeepTransformerDecoder, CrossAttentionTransformerBlock
+from .conv_blocks import UpsampleBlock, Conv1dBlock, EnhancedConvBlock
 from .film import AdaptiveFiLMWithDropout
 from .positional import PositionalEmbedding
 from .heads import AttentionPooling
@@ -111,7 +111,7 @@ class EnhancedDecoderBlock(nn.Module):
         # FiLM applied after each transformer stage with MLP
         self.film_layers = nn.ModuleList([
             AdaptiveFiLMWithDropout(
-                input_dim=static_dim,
+                input_dim=static_dim * 2,  # Static params are embedded to 2x size
                 feature_dim=out_channels,
                 num_layers=2,
                 dropout=dropout,
@@ -477,7 +477,7 @@ class BottleneckProcessor(nn.Module):
         
         # FiLM conditioning
         self.film_layer = AdaptiveFiLMWithDropout(
-            input_dim=static_dim,
+            input_dim=static_dim * 2,  # Static params are embedded to 2x size
             feature_dim=channels,
             num_layers=2,
             dropout=dropout,
@@ -552,3 +552,521 @@ class BottleneckProcessor(nn.Module):
         x_final = x_final.transpose(1, 2)  # [batch, channels, seq_len]
         
         return x_final 
+
+
+class OptimizedDecoderBlock(nn.Module):
+    """
+    Optimized decoder block with proper transformer placement.
+    
+    Architectural flow:
+    S4 (short sequences) → Upsample → Transformer (long sequences) → Skip Fusion → FiLM
+    
+    This addresses the architectural issue by using S4 on short sequences
+    and transformers after upsampling when sequences are longer.
+    """
+    
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        skip_channels: int,
+        static_dim: int,
+        sequence_length: int,
+        upsample_factor: int = 2,
+        s4_state_size: int = 64,
+        num_s4_layers: int = 2,
+        num_transformer_layers: int = 2,
+        num_heads: int = 8,
+        dropout: float = 0.1,
+        film_dropout: float = 0.15,
+        use_enhanced_s4: bool = True,
+        use_cross_attention: bool = True,
+        use_multi_scale_attention: bool = True
+    ):
+        super().__init__()
+        
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.skip_channels = skip_channels
+        self.sequence_length = sequence_length
+        self.upsample_factor = upsample_factor
+        self.use_cross_attention = use_cross_attention
+        
+        # ============== S4 PROCESSING (SHORT SEQUENCES FIRST) ==============
+        # S4 works well on short sequences at decoder input
+        if use_enhanced_s4:
+            from .s4_layer import EnhancedS4Layer
+            self.s4_layers = nn.ModuleList([
+                EnhancedS4Layer(
+                    features=in_channels,
+                    lmax=sequence_length,
+                    N=s4_state_size,
+                    dropout=dropout
+                )
+                for _ in range(num_s4_layers)
+            ])
+        else:
+            from .s4_layer import S4Layer
+            self.s4_layers = nn.ModuleList([
+                S4Layer(
+                    d_model=in_channels,
+                    d_state=s4_state_size,
+                    dropout=dropout
+                )
+                for _ in range(num_s4_layers)
+            ])
+        
+        # ============== UPSAMPLING ==============
+        self.upsample = nn.ConvTranspose1d(
+            in_channels, out_channels,
+            kernel_size=upsample_factor * 2,
+            stride=upsample_factor,
+            padding=upsample_factor // 2
+        )
+        
+        # ============== SKIP CONNECTION FUSION ==============
+        self.skip_fusion = EnhancedSkipFusion(
+            main_channels=out_channels,
+            skip_channels=skip_channels,
+            output_channels=out_channels,
+            use_attention=True
+        )
+        
+        # ============== TRANSFORMER PROCESSING (LONG SEQUENCES AFTER UPSAMPLING) ==============
+        # Expected sequence length after upsampling
+        upsampled_seq_len = sequence_length * upsample_factor
+        
+        # Use transformer AFTER upsampling when sequences are long
+        if upsampled_seq_len >= 50:  # Only use transformer for long sequences
+            if use_cross_attention:
+                from .transformer_block import CrossAttentionTransformerBlock
+                self.transformer_layers = nn.ModuleList([
+                    CrossAttentionTransformerBlock(
+                        d_model=out_channels,
+                        n_heads=num_heads,
+                        dropout=dropout,
+                        use_pre_norm=True
+                    )
+                    for _ in range(num_transformer_layers)
+                ])
+            elif use_multi_scale_attention:
+                from .transformer_block import EnhancedTransformerBlock
+                self.transformer_layers = nn.ModuleList([
+                    EnhancedTransformerBlock(
+                        d_model=out_channels,
+                        n_heads=num_heads,
+                        dropout=dropout,
+                        use_multi_scale=True,
+                        use_cross_attention=False
+                    )
+                    for _ in range(num_transformer_layers)
+                ])
+            else:
+                from .transformer_block import TransformerBlock
+                self.transformer_layers = nn.ModuleList([
+                    TransformerBlock(
+                        d_model=out_channels,
+                        n_heads=num_heads,
+                        dropout=dropout
+                    )
+                    for _ in range(num_transformer_layers)
+                ])
+            self.use_transformer = True
+        else:
+            self.transformer_layers = None
+            self.use_transformer = False
+        
+        # ============== FILM CONDITIONING ==============
+        from .film import AdaptiveFiLMWithDropout
+        self.film_layer = AdaptiveFiLMWithDropout(
+            input_dim=static_dim * 2,  # Static params are embedded to 2x size
+            feature_dim=out_channels,
+            dropout=film_dropout
+        )
+        
+        # ============== FINAL PROCESSING ==============
+        self.final_conv = EnhancedConvBlock(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=3,
+            dropout=dropout
+        )
+        
+        # ============== NORMALIZATION ==============
+        self.final_norm = nn.LayerNorm(out_channels)
+        
+        # ============== POSITIONAL ENCODING ==============
+        if self.use_transformer:
+            from .positional import SinusoidalEmbedding
+            self.pos_encoding = SinusoidalEmbedding(
+                d_model=out_channels,
+                max_len=upsampled_seq_len
+            )
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        skip_connection: torch.Tensor,
+        static_params: torch.Tensor,
+        encoder_output: Optional[torch.Tensor] = None,
+        cfg_guidance_scale: float = 1.0,
+        force_uncond: bool = False
+    ) -> torch.Tensor:
+        """
+        Optimized forward pass with proper architectural flow.
+        
+        Args:
+            x: Input tensor [batch, in_channels, seq_len]
+            skip_connection: Skip connection [batch, skip_channels, seq_len]
+            static_params: Static conditioning [batch, static_dim]
+            encoder_output: Encoder output for cross-attention [batch, channels, enc_seq_len]
+            cfg_guidance_scale: CFG guidance scale
+            force_uncond: Force unconditional processing
+            
+        Returns:
+            Output tensor [batch, out_channels, upsampled_seq_len]
+        """
+        # ============== S4 PROCESSING (SHORT SEQUENCES) ==============
+        # Process short sequences with S4 first
+        for s4_layer in self.s4_layers:
+            x_s4 = s4_layer(x)
+            x = x + x_s4  # Residual connection
+        
+        # ============== UPSAMPLING ==============
+        x = self.upsample(x)
+        
+        # ============== SKIP CONNECTION FUSION ==============
+        # Fuse with skip connection after upsampling
+        x = self.skip_fusion(x, skip_connection)
+        
+        # ============== TRANSFORMER PROCESSING (LONG SEQUENCES) ==============
+        if self.use_transformer and x.size(-1) >= 50:
+            # Convert to transformer format [batch, seq_len, channels]
+            x = x.transpose(1, 2)
+            
+            # Add positional encoding
+            x = self.pos_encoding(x)
+            
+            # Apply transformer layers
+            for transformer_layer in self.transformer_layers:
+                if self.use_cross_attention and encoder_output is not None:
+                    # Convert encoder output to transformer format
+                    encoder_transformer = encoder_output.transpose(1, 2)
+                    
+                    # Apply cross-attention transformer
+                    if isinstance(transformer_layer, CrossAttentionTransformerBlock):
+                        x, self_attn_weights, cross_attn_weights = transformer_layer(
+                            decoder_input=x,
+                            encoder_output=encoder_transformer
+                        )
+                    else:
+                        x = transformer_layer(x, encoder_output=encoder_transformer)
+                else:
+                    # Apply regular transformer
+                    x = transformer_layer(x)
+            
+            # Convert back to conv format [batch, channels, seq_len]
+            x = x.transpose(1, 2)
+        
+        # ============== FILM CONDITIONING ==============
+        x = self.film_layer(
+            features=x,
+            condition=static_params,
+            cfg_guidance_scale=cfg_guidance_scale,
+            force_uncond=force_uncond
+        )
+        
+        # ============== FINAL PROCESSING ==============
+        x = self.final_conv(x)
+        
+        # ============== FINAL NORMALIZATION ==============
+        x = x.transpose(1, 2)
+        x = self.final_norm(x)
+        x = x.transpose(1, 2)
+        
+        return x
+
+
+class EnhancedSkipFusion(nn.Module):
+    """
+    Enhanced skip connection fusion with attention-based feature selection.
+    
+    Learns to selectively combine main features with skip connections
+    based on content and relevance.
+    """
+    
+    def __init__(
+        self,
+        main_channels: int,
+        skip_channels: int,
+        output_channels: int,
+        use_attention: bool = True,
+        attention_heads: int = 4
+    ):
+        super().__init__()
+        
+        self.main_channels = main_channels
+        self.skip_channels = skip_channels
+        self.output_channels = output_channels
+        self.use_attention = use_attention
+        
+        # Channel alignment for skip connection
+        if skip_channels != main_channels:
+            self.skip_align = nn.Conv1d(skip_channels, main_channels, kernel_size=1)
+        else:
+            self.skip_align = nn.Identity()
+        
+        # Attention-based fusion
+        if use_attention:
+            self.attention_fusion = nn.MultiheadAttention(
+                embed_dim=main_channels,
+                num_heads=attention_heads,
+                dropout=0.1,
+                batch_first=True
+            )
+            
+            # Gating mechanism for fusion control
+            self.fusion_gate = nn.Sequential(
+                nn.Conv1d(main_channels * 2, main_channels, kernel_size=1),
+                nn.Sigmoid()
+            )
+        
+        # Final fusion layers
+        self.fusion_layers = nn.Sequential(
+            nn.Conv1d(main_channels * 2, output_channels, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(1, output_channels),
+            nn.Dropout(0.1),
+            nn.Conv1d(output_channels, output_channels, kernel_size=1)
+        )
+    
+    def forward(self, main_features: torch.Tensor, skip_features: torch.Tensor) -> torch.Tensor:
+        """
+        Fuse main features with skip connection using attention.
+        
+        Args:
+            main_features: Main pathway features [batch, main_channels, seq_len]
+            skip_features: Skip connection features [batch, skip_channels, skip_seq_len]
+            
+        Returns:
+            Fused features [batch, output_channels, seq_len]
+        """
+        # Align skip connection channels
+        skip_aligned = self.skip_align(skip_features)
+        
+        # Handle sequence length mismatch
+        if skip_aligned.size(-1) != main_features.size(-1):
+            skip_aligned = F.interpolate(
+                skip_aligned,
+                size=main_features.size(-1),
+                mode='linear',
+                align_corners=False
+            )
+        
+        if self.use_attention:
+            # Attention-based fusion
+            # Convert to [batch, seq_len, channels] for attention
+            main_attn = main_features.transpose(1, 2)
+            skip_attn = skip_aligned.transpose(1, 2)
+            
+            # Use main features as query, skip features as key/value
+            attended_skip, _ = self.attention_fusion(
+                query=main_attn,
+                key=skip_attn,
+                value=skip_attn
+            )
+            
+            # Convert back to [batch, channels, seq_len]
+            attended_skip = attended_skip.transpose(1, 2)
+            
+            # Gated fusion
+            combined = torch.cat([main_features, attended_skip], dim=1)
+            gate = self.fusion_gate(combined)
+            gated_skip = attended_skip * gate
+            
+            # Final combination
+            final_combined = torch.cat([main_features, gated_skip], dim=1)
+        else:
+            # Simple concatenation fusion
+            final_combined = torch.cat([main_features, skip_aligned], dim=1)
+        
+        # Apply fusion layers
+        fused_output = self.fusion_layers(final_combined)
+        
+        return fused_output
+
+
+class TaskSpecificFeatureExtractor(nn.Module):
+    """
+    Task-specific feature extractor that learns specialized representations
+    for different prediction tasks (peaks, classification, threshold).
+    
+    This addresses the multi-task learning issues by creating dedicated
+    feature extraction pathways for each task.
+    """
+    
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = None,
+        num_tasks: int = 4,  # signal, peaks, classification, threshold
+        dropout: float = 0.1,
+        use_cross_task_attention: bool = True
+    ):
+        super().__init__()
+        
+        if hidden_dim is None:
+            hidden_dim = input_dim
+        
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_tasks = num_tasks
+        self.use_cross_task_attention = use_cross_task_attention
+        
+        # Task names for reference
+        self.task_names = ['signal', 'peaks', 'classification', 'threshold']
+        
+        # Shared feature encoder
+        self.shared_encoder = nn.Sequential(
+            nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(1, hidden_dim),  # Use GroupNorm instead of LayerNorm for Conv1d
+            nn.Dropout(dropout)
+        )
+        
+        # Task-specific feature extractors
+        self.task_extractors = nn.ModuleDict({
+            'signal': self._create_signal_extractor(hidden_dim, dropout),
+            'peaks': self._create_peak_extractor(hidden_dim, dropout),
+            'classification': self._create_class_extractor(hidden_dim, dropout),
+            'threshold': self._create_threshold_extractor(hidden_dim, dropout)
+        })
+        
+        # Cross-task attention for feature sharing
+        if use_cross_task_attention:
+            self.cross_task_attention = nn.ModuleDict({
+                task: nn.MultiheadAttention(
+                    embed_dim=hidden_dim,
+                    num_heads=max(1, hidden_dim // 64),
+                    dropout=dropout,
+                    batch_first=True
+                )
+                for task in self.task_names
+            })
+        
+        # Task-specific output projections
+        self.task_projections = nn.ModuleDict({
+            task: nn.Conv1d(hidden_dim, hidden_dim, kernel_size=1)
+            for task in self.task_names
+        })
+    
+    def _create_signal_extractor(self, hidden_dim: int, dropout: float) -> nn.Module:
+        """Create specialized extractor for signal reconstruction."""
+        return nn.Sequential(
+            # Focus on temporal continuity and smoothness
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=7, padding=3),
+            nn.GELU(),
+            nn.GroupNorm(1, hidden_dim),
+            nn.Dropout(dropout),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=5, padding=2),
+            nn.GELU(),
+            nn.GroupNorm(1, hidden_dim)
+        )
+    
+    def _create_peak_extractor(self, hidden_dim: int, dropout: float) -> nn.Module:
+        """Create specialized extractor for peak detection."""
+        return nn.Sequential(
+            # Focus on local features and sharp changes
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1, dilation=1),
+            nn.GELU(),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=2, dilation=2),
+            nn.GELU(),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=4, dilation=4),
+            nn.GELU(),
+            nn.GroupNorm(1, hidden_dim),
+            nn.Dropout(dropout)
+        )
+    
+    def _create_class_extractor(self, hidden_dim: int, dropout: float) -> nn.Module:
+        """Create specialized extractor for classification."""
+        return nn.Sequential(
+            # Focus on global patterns and morphology
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=11, padding=5),
+            nn.GELU(),
+            # Use dilated convolutions instead of adaptive pooling to preserve sequence length
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=4, dilation=4),
+            nn.GELU(),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(1, hidden_dim),
+            nn.Dropout(dropout)
+        )
+    
+    def _create_threshold_extractor(self, hidden_dim: int, dropout: float) -> nn.Module:
+        """Create specialized extractor for threshold regression."""
+        return nn.Sequential(
+            # Focus on amplitude ranges and overall signal strength
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=9, padding=4),
+            nn.GELU(),
+            nn.Conv1d(hidden_dim, hidden_dim, kernel_size=7, padding=3),
+            nn.GELU(),
+            nn.GroupNorm(1, hidden_dim),
+            nn.Dropout(dropout)
+        )
+    
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Extract task-specific features.
+        
+        Args:
+            x: Input features [batch, input_dim, seq_len]
+            
+        Returns:
+            Dictionary of task-specific features
+        """
+        # Shared feature encoding
+        shared_features = self.shared_encoder(x)
+        
+        # Extract task-specific features
+        task_features = {}
+        for task_name, extractor in self.task_extractors.items():
+            task_features[task_name] = extractor(shared_features)
+        
+        # Apply cross-task attention if enabled
+        if self.use_cross_task_attention:
+            enhanced_features = {}
+            for task_name in self.task_names:
+                # Current task features as query
+                query = task_features[task_name].transpose(1, 2)  # [batch, seq, dim]
+                
+                # Other task features as context
+                context_features = []
+                for other_task in self.task_names:
+                    if other_task != task_name:
+                        context_features.append(task_features[other_task].transpose(1, 2))
+                
+                if context_features:
+                    # Concatenate context from other tasks
+                    context = torch.cat(context_features, dim=1)  # [batch, seq*3, dim]
+                    
+                    # Apply cross-attention
+                    attended_features, _ = self.cross_task_attention[task_name](
+                        query=query,
+                        key=context,
+                        value=context
+                    )
+                    
+                    # Combine with original features
+                    enhanced = query + attended_features
+                    enhanced_features[task_name] = enhanced.transpose(1, 2)
+                else:
+                    enhanced_features[task_name] = task_features[task_name]
+            
+            task_features = enhanced_features
+        
+        # Apply final projections
+        output_features = {}
+        for task_name, features in task_features.items():
+            output_features[task_name] = self.task_projections[task_name](features)
+        
+        return output_features 

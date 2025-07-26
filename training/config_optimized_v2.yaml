@@ -1,0 +1,287 @@
+# ============== OPTIMIZED ABR ARCHITECTURE V2 CONFIGURATION ==============
+# Configuration for the fully optimized OptimizedHierarchicalUNet
+# Features:
+# - Fixed transformer placement (long sequences only)
+# - S4-only bottleneck processing
+# - Multi-scale attention for peak detection
+# - Task-specific feature extractors
+# - Attention-based skip connections
+# - Cross-attention encoder-decoder interaction
+# - Joint generation capabilities
+
+# ============== PROJECT INFORMATION ==============
+project:
+  name: "OptimizedABR_V2_Training"
+  description: "Optimized Hierarchical U-Net V2 with All Architectural Improvements"
+  version: "2.1.0"
+  author: "AI Assistant"
+  experiment_name: "optimized_abr_v2"
+
+# ============== DATA CONFIGURATION ==============
+data:
+  dataset_path: "data/processed/ultimate_dataset.pkl"
+  signal_length: 200
+  static_dim: 4  # age, intensity, stimulus_rate, fmp
+  n_classes: 5   # hearing loss types
+  
+  splits:
+    train_ratio: 0.7
+    val_ratio: 0.15
+    test_ratio: 0.15
+    random_seed: 42
+  
+  dataloader:
+    batch_size: 16  # Reduced for optimized model
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    shuffle_train: true
+
+# ============== OPTIMIZED MODEL ARCHITECTURE ==============
+model:
+  type: "optimized_hierarchical_unet_v2"
+  
+  # Basic architecture parameters
+  input_channels: 1
+  static_dim: 4
+  base_channels: 64
+  n_levels: 4
+  sequence_length: 200
+  signal_length: 200
+  num_classes: 5
+  channel_multiplier: 2.0
+  
+  # S4 configuration (optimized)
+  s4_state_size: 64
+  num_s4_layers: 2
+  use_enhanced_s4: true
+  
+  # Transformer configuration (optimized placement)
+  num_transformer_layers: 2  # Reduced from 3
+  num_heads: 8
+  use_multi_scale_attention: true  # NEW: Multi-scale attention
+  use_cross_attention: true        # NEW: Cross-attention
+  
+  # FiLM and conditioning
+  dropout: 0.1
+  film_dropout: 0.15
+  use_cfg: true
+  
+  # Output configuration
+  use_attention_heads: true
+  predict_uncertainty: true
+  
+  # NEW: Joint generation parameters
+  enable_joint_generation: true
+  static_param_ranges:
+    age: [-2.0, 2.0]           # Normalized age
+    intensity: [-2.0, 2.0]     # Normalized intensity
+    stimulus_rate: [-2.0, 2.0] # Normalized stimulus rate
+    fmp: [0.0, 150.0]          # FMP range
+  
+  # NEW: Optimization features
+  use_task_specific_extractors: true     # Task-specific feature extractors
+  use_attention_skip_connections: true   # Attention-based skip connections
+
+# ============== TRAINING CONFIGURATION ==============
+training:
+  # Basic training parameters
+  epochs: 100
+  warmup_epochs: 10
+  gradient_clip_norm: 1.0
+  accumulation_steps: 2  # Effective batch size = 16 * 2 = 32
+  
+  # Mixed precision training
+  use_mixed_precision: true
+  loss_scaling: "dynamic"
+  
+  # Checkpointing
+  save_every: 10
+  save_best: true
+  early_stopping_patience: 15
+  early_stopping_metric: "val_total_loss"
+  early_stopping_mode: "min"
+  
+  # Validation
+  validate_every: 1
+  validation_steps: null  # Use full validation set
+  
+  # NEW: Multi-task learning weights (optimized for new architecture)
+  loss_weights:
+    reconstruction: 1.0
+    peak_detection: 2.0      # Increased due to multi-scale attention
+    classification: 3.0
+    threshold_regression: 1.5
+    joint_generation: 0.5    # NEW: Joint generation loss
+  
+  # NEW: Task-specific learning rates
+  task_lr_multipliers:
+    task_extractors: 1.2     # Higher LR for task-specific extractors
+    attention_layers: 0.8    # Lower LR for attention layers
+    s4_layers: 1.0          # Standard LR for S4 layers
+
+# ============== OPTIMIZER CONFIGURATION ==============
+optimizer:
+  type: "adamw"
+  learning_rate: 3e-4  # Slightly reduced for optimized architecture
+  weight_decay: 1e-4
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  amsgrad: false
+  
+  # AdamW-specific
+  decoupled_weight_decay: true
+
+# ============== SCHEDULER CONFIGURATION ==============
+scheduler:
+  type: "cosine_with_warmup"
+  warmup_steps: 1000
+  max_steps: 10000
+  min_lr_ratio: 0.01
+  restart_cycles: 2
+
+# ============== CLASS BALANCING ==============
+class_balancing:
+  use_class_weights: true
+  weight_strategy: "balanced"  # 'balanced', 'sqrt', 'log', or custom weights
+  focal_loss:
+    use_focal: true
+    alpha: 0.25
+    gamma: 2.0
+  
+  # Class-specific configurations
+  class_names: ["NORMAL", "NÖROPATİ", "SNİK", "TOTAL", "İTİK"]
+
+# ============== REGULARIZATION ==============
+regularization:
+  dropout: 0.1
+  film_dropout: 0.15
+  attention_dropout: 0.1  # NEW: Attention-specific dropout
+  
+  # Data augmentation
+  noise_augmentation:
+    enabled: true
+    noise_std: 0.05
+    probability: 0.3
+  
+  temporal_augmentation:
+    enabled: true
+    time_shift_range: 5
+    probability: 0.2
+  
+  # NEW: Task-specific augmentation
+  task_augmentation:
+    peak_jitter: 0.1      # Add jitter to peak positions
+    amplitude_scaling: 0.1 # Scale amplitudes slightly
+
+# ============== CLASSIFIER-FREE GUIDANCE ==============
+cfg:
+  use_cfg: true
+  training_guidance_scale: 1.0
+  inference_guidance_scale: 7.5
+  uncond_prob: 0.1  # 10% unconditional training
+  
+  # NEW: CFG for joint generation
+  joint_cfg:
+    enabled: true
+    guidance_scale: 5.0
+    uncond_prob: 0.15
+
+# ============== MONITORING AND LOGGING ==============
+logging:
+  log_level: "INFO"
+  log_every: 50
+  log_gradients: false
+  log_weights: false
+  
+  # Metrics to track
+  metrics:
+    - "loss"
+    - "reconstruction_loss"
+    - "peak_loss"
+    - "classification_loss"
+    - "threshold_loss"
+    - "joint_generation_loss"  # NEW
+    - "accuracy"
+    - "f1_score"
+    - "balanced_accuracy"
+  
+  # NEW: Architecture-specific metrics
+  architecture_metrics:
+    - "transformer_usage"     # Track transformer layer usage
+    - "attention_weights"     # Monitor attention patterns
+    - "task_extractor_loss"   # Task-specific extractor losses
+
+# ============== WANDB CONFIGURATION ==============
+wandb:
+  enabled: true
+  project: "abr-optimized-v2"
+  entity: null  # Set your wandb entity
+  tags: 
+    - "optimized-architecture"
+    - "multi-scale-attention"
+    - "task-specific-extractors"
+    - "joint-generation"
+  
+  watch_model: true
+  log_frequency: 100
+
+# ============== HARDWARE CONFIGURATION ==============
+hardware:
+  device: "auto"  # 'auto', 'cuda', 'cpu'
+  num_gpus: 1
+  distributed: false
+  
+  # Memory optimization
+  memory_efficient: true
+  gradient_checkpointing: false  # Disabled for optimized architecture
+  
+  # NEW: Architecture-specific optimizations
+  compile_model: true          # Use torch.compile for speed
+  use_flash_attention: true    # Use flash attention if available
+
+# ============== EVALUATION CONFIGURATION ==============
+evaluation:
+  # Evaluation frequency
+  eval_during_training: true
+  eval_every_n_epochs: 5
+  
+  # Metrics
+  primary_metric: "val_total_loss"
+  secondary_metrics:
+    - "val_classification_accuracy"
+    - "val_f1_score"
+    - "val_peak_detection_f1"
+    - "val_threshold_mae"
+  
+  # NEW: Architecture-specific evaluation
+  architecture_evaluation:
+    test_joint_generation: true
+    test_attention_patterns: true
+    test_task_extractors: true
+    
+  # Generate samples during evaluation
+  generate_samples: true
+  num_samples: 16
+  
+# ============== OUTPUT CONFIGURATION ==============
+output:
+  experiment_dir: "runs/optimized_v2"
+  checkpoint_dir: "checkpoints/optimized_v2"
+  log_dir: "logs/optimized_v2"
+  
+  # Save configurations
+  save_config: true
+  save_model_summary: true
+  save_training_curves: true
+  
+  # NEW: Architecture-specific outputs
+  save_attention_maps: true
+  save_task_extractor_outputs: true
+  save_generated_samples: true
+
+# ============== REPRODUCIBILITY ==============
+reproducibility:
+  seed: 42
+  deterministic: true
+  benchmark: false  # Set to true for consistent input sizes 

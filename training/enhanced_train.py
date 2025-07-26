@@ -476,8 +476,22 @@ class ABRTrainer:
             
             # Update metrics with detailed tracking
             for key, value in loss_dict.items():
-                epoch_metrics[key] += value.item()
-                detailed_metrics[key].append(value.item())
+                if isinstance(value, dict):
+                    # Handle nested dictionaries (e.g., static parameter losses)
+                    for sub_key, sub_value in value.items():
+                        full_key = f"{key}_{sub_key}"
+                        if full_key not in epoch_metrics:
+                            epoch_metrics[full_key] = 0.0
+                            detailed_metrics[full_key] = []
+                        if hasattr(sub_value, 'item'):
+                            epoch_metrics[full_key] += sub_value.item()
+                            detailed_metrics[full_key].append(sub_value.item())
+                elif hasattr(value, 'item'):
+                    epoch_metrics[key] += value.item()
+                    detailed_metrics[key].append(value.item())
+                else:
+                    # Skip non-tensor values
+                    continue
             
             num_batches += 1
             
@@ -1144,29 +1158,92 @@ def load_dataset(data_path: str, valid_peaks_only: bool = False) -> Tuple[List[D
 
 
 def create_model(config: Dict[str, Any]) -> nn.Module:
-    """Create the enhanced ABR model."""
+    """Create the ABR model based on configuration."""
     
-    model = ProfessionalHierarchicalUNet(
-        input_channels=config.get('input_channels', 1),
-        static_dim=config.get('static_dim', 4),
-        base_channels=config.get('base_channels', 64),
-        n_levels=config.get('n_levels', 4),
-        sequence_length=config.get('sequence_length', 200),
-        signal_length=config.get('signal_length', 200),
-        num_classes=config.get('num_classes', 5),
+    # Determine model type from configuration
+    model_config = config.get('model', {})
+    model_type = model_config.get('type', 'professional_hierarchical_unet').lower()
+    
+    if 'optimized' in model_type:
+        print("🚀 Creating OptimizedHierarchicalUNet...")
+        from models.hierarchical_unet import OptimizedHierarchicalUNet
         
-        # Enhanced features
-        num_transformer_layers=config.get('num_transformer_layers', 3),
-        use_cross_attention=config.get('use_cross_attention', True),
-        use_positional_encoding=config.get('use_positional_encoding', True),
-        film_dropout=config.get('film_dropout', 0.15),
-        use_cfg=config.get('use_cfg', True),
+        model = OptimizedHierarchicalUNet(
+            input_channels=model_config.get('input_channels', 1),
+            static_dim=model_config.get('static_dim', 4),
+            base_channels=model_config.get('base_channels', 64),
+            n_levels=model_config.get('n_levels', 4),
+            sequence_length=model_config.get('sequence_length', 200),
+            signal_length=model_config.get('signal_length', 200),
+            num_classes=model_config.get('num_classes', 5),
+            
+            # S4 configuration
+            s4_state_size=model_config.get('s4_state_size', 64),
+            num_s4_layers=model_config.get('num_s4_layers', 2),
+            use_enhanced_s4=model_config.get('use_enhanced_s4', True),
+            
+            # Transformer configuration (optimized)
+            num_transformer_layers=model_config.get('num_transformer_layers', 2),
+            num_heads=model_config.get('num_heads', 8),
+            use_multi_scale_attention=model_config.get('use_multi_scale_attention', True),
+            use_cross_attention=model_config.get('use_cross_attention', True),
+            
+            # FiLM and conditioning
+            dropout=model_config.get('dropout', 0.1),
+            film_dropout=model_config.get('film_dropout', 0.15),
+            use_cfg=model_config.get('use_cfg', True),
+            
+            # Output configuration
+            use_attention_heads=model_config.get('use_attention_heads', True),
+            predict_uncertainty=model_config.get('predict_uncertainty', True),
+            
+            # Joint generation
+            enable_joint_generation=model_config.get('enable_joint_generation', True),
+            static_param_ranges=model_config.get('static_param_ranges', {
+                'age': [-2.0, 2.0],
+                'intensity': [-2.0, 2.0], 
+                'stimulus_rate': [-2.0, 2.0],
+                'fmp': [0.0, 150.0]
+            }),
+            
+            # Optimization features
+            use_task_specific_extractors=model_config.get('use_task_specific_extractors', True),
+            use_attention_skip_connections=model_config.get('use_attention_skip_connections', True),
+            channel_multiplier=model_config.get('channel_multiplier', 2.0)
+        )
         
-        # Additional parameters
-        dropout=config.get('dropout', 0.1),
-        use_attention_heads=config.get('use_attention_heads', True),
-        predict_uncertainty=config.get('predict_uncertainty', False)
-    )
+        # Get model info for logging
+        model_info = model.get_model_info()
+        print(f"✅ Model created: {model_info['model_name']}")
+        print(f"📊 Total parameters: {model_info['total_parameters']:,}")
+        print(f"🏗️ Architecture features: {len(model_info['features'])}")
+        
+    else:
+        print("🏛️ Creating ProfessionalHierarchicalUNet...")
+        
+        model = ProfessionalHierarchicalUNet(
+            input_channels=model_config.get('input_channels', 1),
+            static_dim=model_config.get('static_dim', 4),
+            base_channels=model_config.get('base_channels', 64),
+            n_levels=model_config.get('n_levels', 4),
+            sequence_length=model_config.get('sequence_length', 200),
+            signal_length=model_config.get('signal_length', 200),
+            num_classes=model_config.get('num_classes', 5),
+            
+            # Enhanced features
+            num_transformer_layers=model_config.get('num_transformer_layers', 3),
+            use_cross_attention=model_config.get('use_cross_attention', True),
+            use_positional_encoding=model_config.get('use_positional_encoding', True),
+            film_dropout=model_config.get('film_dropout', 0.15),
+            use_cfg=model_config.get('use_cfg', True),
+            
+            # Additional parameters
+            dropout=model_config.get('dropout', 0.1),
+            use_attention_heads=model_config.get('use_attention_heads', True),
+            predict_uncertainty=model_config.get('predict_uncertainty', False)
+        )
+        
+        print(f"✅ Professional model created with {sum(p.numel() for p in model.parameters()):,} parameters")
     
     return model
 

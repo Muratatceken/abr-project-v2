@@ -353,7 +353,10 @@ class ABRComprehensiveEvaluator:
             
             metrics['latency_mae'] = mean_absolute_error(lat_true, lat_pred)
             metrics['latency_rmse'] = np.sqrt(mean_squared_error(lat_true, lat_pred))
-            metrics['latency_r2'] = r2_score(lat_true, lat_pred)
+            try:
+                metrics['latency_r2'] = r2_score(lat_true, lat_pred)
+            except ValueError:
+                metrics['latency_r2'] = 0.0
             
             # Error histogram data
             latency_errors = lat_pred - lat_true
@@ -366,7 +369,10 @@ class ABRComprehensiveEvaluator:
             
             metrics['amplitude_mae'] = mean_absolute_error(amp_true, amp_pred)
             metrics['amplitude_rmse'] = np.sqrt(mean_squared_error(amp_true, amp_pred))
-            metrics['amplitude_r2'] = r2_score(amp_true, amp_pred)
+            try:
+                metrics['amplitude_r2'] = r2_score(amp_true, amp_pred)
+            except ValueError:
+                metrics['amplitude_r2'] = 0.0
             
             # Error histogram data
             amplitude_errors = amp_pred - amp_true

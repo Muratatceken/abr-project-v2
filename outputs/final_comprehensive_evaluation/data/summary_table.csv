@@ -1,0 +1,12 @@
+Task,Metric,Mean,Std,Unit
+Reconstruction,Correlation,0.8973,0.0292,—
+Reconstruction,Spectral MSE,18.7310,5.9951,—
+Peaks,Peak Existence F1,0.8705,0.1289,—
+Peaks,Latency R²,nan,nan,—
+Peaks,Amplitude R²,nan,nan,—
+Classification,Accuracy,0.8222,0.2053,—
+Classification,Balanced Accuracy,0.7780,0.2308,—
+Classification,Macro F1,0.2148,0.0660,—
+Classification,Weighted F1,0.8455,0.2035,—
+Threshold,R²,-1.1989,9.0951,—
+Threshold,Correlation,-0.2908,0.3296,—

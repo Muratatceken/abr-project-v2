@@ -11,13 +11,13 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from einops import rearrange
 
 
 class MultiHeadAttention(nn.Module):
     """
-    Multi-head self-attention mechanism.
+    Multi-head attention mechanism with support for self-attention and cross-attention.
     
     Implements scaled dot-product attention with multiple heads
     for enhanced representation learning.
@@ -29,7 +29,8 @@ class MultiHeadAttention(nn.Module):
         n_heads: int = 8,
         dropout: float = 0.1,
         bias: bool = True,
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        is_cross_attention: bool = False
     ):
         super().__init__()
         assert d_model % n_heads == 0, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
@@ -38,6 +39,7 @@ class MultiHeadAttention(nn.Module):
         self.n_heads = n_heads
         self.d_head = d_model // n_heads
         self.temperature = temperature
+        self.is_cross_attention = is_cross_attention
         
         # Linear projections for Q, K, V
         self.q_proj = nn.Linear(d_model, d_model, bias=bias)
@@ -60,7 +62,9 @@ class MultiHeadAttention(nn.Module):
     
     def forward(
         self, 
-        x: torch.Tensor, 
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        value: Optional[torch.Tensor] = None, 
         mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -68,19 +72,28 @@ class MultiHeadAttention(nn.Module):
         Forward pass through multi-head attention.
         
         Args:
-            x: Input tensor [batch, seq_len, d_model]
-            mask: Attention mask [seq_len, seq_len] or [batch, seq_len, seq_len]
-            key_padding_mask: Key padding mask [batch, seq_len]
+            query: Query tensor [batch, seq_len_q, d_model]
+            key: Key tensor [batch, seq_len_k, d_model] (None for self-attention)
+            value: Value tensor [batch, seq_len_k, d_model] (None for self-attention)
+            mask: Attention mask [seq_len_q, seq_len_k] or [batch, seq_len_q, seq_len_k]
+            key_padding_mask: Key padding mask [batch, seq_len_k]
             
         Returns:
             Tuple of (output, attention_weights)
         """
-        batch_size, seq_len, d_model = x.shape
+        # Handle self-attention vs cross-attention
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+        
+        batch_size, seq_len_q, d_model = query.shape
+        seq_len_k = key.size(1)
         
         # Linear projections and reshape for multi-head attention
-        q = self.q_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        k = self.k_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
-        v = self.v_proj(x).view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)
+        q = self.q_proj(query).view(batch_size, seq_len_q, self.n_heads, self.d_head).transpose(1, 2)
+        k = self.k_proj(key).view(batch_size, seq_len_k, self.n_heads, self.d_head).transpose(1, 2)
+        v = self.v_proj(value).view(batch_size, seq_len_k, self.n_heads, self.d_head).transpose(1, 2)
         
         # Scaled dot-product attention
         output, attn_weights = self._scaled_dot_product_attention(
@@ -88,7 +101,7 @@ class MultiHeadAttention(nn.Module):
         )
         
         # Reshape and apply output projection
-        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len_q, d_model)
         output = self.out_proj(output)
         
         return output, attn_weights
@@ -135,6 +148,15 @@ class MultiHeadAttention(nn.Module):
         
         # Compute attention weights
         attn_weights = F.softmax(scores, dim=-1)
+        
+        # Handle NaN values that might occur during softmax
+        if torch.isnan(attn_weights).any():
+            attn_weights = torch.where(torch.isnan(attn_weights), 
+                                     torch.zeros_like(attn_weights), 
+                                     attn_weights)
+            # Renormalize
+            attn_weights = attn_weights / (attn_weights.sum(dim=-1, keepdim=True) + 1e-8)
+        
         attn_weights = self.dropout(attn_weights)
         
         # Apply attention to values
@@ -953,3 +975,520 @@ def get_activation(name: str):
         return nn.Mish()
     else:
         return nn.GELU() 
+
+
+class CrossAttentionTransformerBlock(nn.Module):
+    """
+    Transformer block with cross-attention support for encoder-decoder architecture.
+    
+    Features:
+    - Self-attention on decoder features
+    - Cross-attention to encoder features  
+    - Position-wise feed-forward network
+    - Residual connections and layer normalization
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int = 8,
+        d_ff: Optional[int] = None,
+        dropout: float = 0.1,
+        activation: str = 'gelu',
+        use_pre_norm: bool = True,
+        use_relative_position: bool = False
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.use_pre_norm = use_pre_norm
+        
+        if d_ff is None:
+            d_ff = 4 * d_model
+        
+        # Self-attention
+        self.self_attention = MultiHeadAttention(
+            d_model=d_model,
+            n_heads=n_heads,
+            dropout=dropout,
+            is_cross_attention=False
+        )
+        
+        # Cross-attention
+        self.cross_attention = MultiHeadAttention(
+            d_model=d_model,
+            n_heads=n_heads,
+            dropout=dropout,
+            is_cross_attention=True
+        )
+        
+        # Feed-forward network
+        self.feed_forward = PositionwiseFeedForward(
+            d_model=d_model,
+            d_ff=d_ff,
+            dropout=dropout,
+            activation=activation
+        )
+        
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.norm3 = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+        
+        # Relative position encoding (optional)
+        if use_relative_position:
+            self.relative_position = RelativePositionEncoding(d_model, n_heads)
+        else:
+            self.relative_position = None
+    
+    def forward(
+        self,
+        decoder_input: torch.Tensor,
+        encoder_output: torch.Tensor,
+        self_attn_mask: Optional[torch.Tensor] = None,
+        cross_attn_mask: Optional[torch.Tensor] = None,
+        key_padding_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass through cross-attention transformer block.
+        
+        Args:
+            decoder_input: Decoder features [batch, seq_len_decoder, d_model]
+            encoder_output: Encoder features [batch, seq_len_encoder, d_model]
+            self_attn_mask: Self-attention mask
+            cross_attn_mask: Cross-attention mask
+            key_padding_mask: Key padding mask
+            
+        Returns:
+            Tuple of (output, self_attn_weights, cross_attn_weights)
+        """
+        # Self-attention
+        if self.use_pre_norm:
+            # Pre-normalization
+            normed_input = self.norm1(decoder_input)
+            self_attn_output, self_attn_weights = self.self_attention(
+                query=normed_input,
+                mask=self_attn_mask
+            )
+            decoder_input = decoder_input + self.dropout(self_attn_output)
+        else:
+            # Post-normalization
+            self_attn_output, self_attn_weights = self.self_attention(
+                query=decoder_input,
+                mask=self_attn_mask
+            )
+            decoder_input = self.norm1(decoder_input + self.dropout(self_attn_output))
+        
+        # Cross-attention
+        if self.use_pre_norm:
+            # Pre-normalization
+            normed_input = self.norm2(decoder_input)
+            cross_attn_output, cross_attn_weights = self.cross_attention(
+                query=normed_input,
+                key=encoder_output,
+                value=encoder_output,
+                mask=cross_attn_mask,
+                key_padding_mask=key_padding_mask
+            )
+            decoder_input = decoder_input + self.dropout(cross_attn_output)
+        else:
+            # Post-normalization
+            cross_attn_output, cross_attn_weights = self.cross_attention(
+                query=decoder_input,
+                key=encoder_output,
+                value=encoder_output,
+                mask=cross_attn_mask,
+                key_padding_mask=key_padding_mask
+            )
+            decoder_input = self.norm2(decoder_input + self.dropout(cross_attn_output))
+        
+        # Feed-forward network
+        if self.use_pre_norm:
+            # Pre-normalization
+            normed_input = self.norm3(decoder_input)
+            ff_output = self.feed_forward(normed_input)
+            output = decoder_input + self.dropout(ff_output)
+        else:
+            # Post-normalization
+            ff_output = self.feed_forward(decoder_input)
+            output = self.norm3(decoder_input + self.dropout(ff_output))
+        
+        return output, self_attn_weights, cross_attn_weights
+
+
+class EnhancedTransformerBlock(nn.Module):
+    """
+    Enhanced transformer block with multi-scale attention for ABR processing.
+    
+    Features:
+    - Multi-scale self-attention for different temporal patterns
+    - Optional cross-attention for encoder-decoder interaction
+    - Enhanced positional encoding
+    - Gated feed-forward network
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int = 8,
+        d_ff: Optional[int] = None,
+        dropout: float = 0.1,
+        activation: str = 'gelu',
+        use_multi_scale: bool = True,
+        use_cross_attention: bool = False,
+        use_gated_ffn: bool = True
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.use_multi_scale = use_multi_scale
+        self.use_cross_attention = use_cross_attention
+        
+        if d_ff is None:
+            d_ff = 4 * d_model
+        
+        # Multi-scale self-attention
+        if use_multi_scale:
+            self.multi_scale_attention = MultiScaleAttention(
+                d_model=d_model,
+                n_heads=n_heads,
+                dropout=dropout,
+                scales=[1, 3, 5]  # Different attention scales
+            )
+        else:
+            self.self_attention = MultiHeadAttention(
+                d_model=d_model,
+                n_heads=n_heads,
+                dropout=dropout
+            )
+        
+        # Cross-attention (optional)
+        if use_cross_attention:
+            self.cross_attention = MultiHeadAttention(
+                d_model=d_model,
+                n_heads=n_heads,
+                dropout=dropout,
+                is_cross_attention=True
+            )
+        
+        # Enhanced feed-forward network
+        if use_gated_ffn:
+            self.feed_forward = GatedFeedForward(
+                d_model=d_model,
+                d_ff=d_ff,
+                dropout=dropout,
+                activation=activation
+            )
+        else:
+            self.feed_forward = PositionwiseFeedForward(
+                d_model=d_model,
+                d_ff=d_ff,
+                dropout=dropout,
+                activation=activation
+            )
+        
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        if use_cross_attention:
+            self.norm2 = nn.LayerNorm(d_model)
+            self.norm3 = nn.LayerNorm(d_model)
+        else:
+            self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        encoder_output: Optional[torch.Tensor] = None,
+        mask: Optional[torch.Tensor] = None,
+        cross_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass through enhanced transformer block.
+        
+        Args:
+            x: Input tensor [batch, seq_len, d_model]
+            encoder_output: Encoder output for cross-attention [batch, enc_len, d_model]
+            mask: Self-attention mask
+            cross_mask: Cross-attention mask
+            
+        Returns:
+            Output tensor [batch, seq_len, d_model]
+        """
+        # Multi-scale self-attention
+        if self.use_multi_scale:
+            attn_output = self.multi_scale_attention(x, mask=mask)
+        else:
+            attn_output, _ = self.self_attention(x, mask=mask)
+        
+        # Residual connection and normalization
+        x = self.norm1(x + self.dropout(attn_output))
+        
+        # Cross-attention (if enabled and encoder output provided)
+        if self.use_cross_attention and encoder_output is not None:
+            cross_attn_output, _ = self.cross_attention(
+                query=x,
+                key=encoder_output,
+                value=encoder_output,
+                mask=cross_mask
+            )
+            x = self.norm2(x + self.dropout(cross_attn_output))
+            norm_idx = 3
+        else:
+            norm_idx = 2
+        
+        # Feed-forward network
+        ff_output = self.feed_forward(x)
+        
+        # Final residual connection and normalization
+        if norm_idx == 3:
+            x = self.norm3(x + self.dropout(ff_output))
+        else:
+            x = self.norm2(x + self.dropout(ff_output))
+        
+        return x 
+
+
+class MultiScaleAttention(nn.Module):
+    """
+    Multi-scale attention mechanism for capturing patterns at different temporal scales.
+    
+    This is particularly useful for ABR signals where peaks and morphology
+    exist at different time scales.
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int = 8,
+        dropout: float = 0.1,
+        scales: List[int] = [1, 3, 5, 7]
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.scales = scales
+        self.num_scales = len(scales)
+        
+        # Ensure we can divide heads among scales AND that d_model is divisible by heads_per_scale
+        valid_config_found = False
+        for possible_scales in [self.num_scales, 4, 2, 1]:  # Try original first, then common divisors
+            if n_heads % possible_scales == 0:
+                heads_per_scale = n_heads // possible_scales
+                if d_model % heads_per_scale == 0:  # Also check d_model divisibility
+                    self.num_scales = possible_scales
+                    self.scales = scales[:possible_scales]
+                    self.heads_per_scale = heads_per_scale
+                    valid_config_found = True
+                    break
+        
+        if not valid_config_found:
+            # Ultimate fallback: single scale with adjusted heads
+            self.num_scales = 1
+            self.scales = [scales[0]]
+            # Find the largest divisor of d_model that's <= n_heads
+            for h in range(min(n_heads, d_model), 0, -1):
+                if d_model % h == 0:
+                    self.heads_per_scale = h
+                    break
+            else:
+                self.heads_per_scale = 1  # Final fallback
+        
+        # Ensure num_scales matches the actual number of scales we're using
+        self.num_scales = len(self.scales)
+        
+        # Multi-scale attention heads
+        self.scale_attentions = nn.ModuleList([
+            MultiHeadAttention(
+                d_model=d_model,
+                n_heads=self.heads_per_scale,
+                dropout=dropout
+            )
+            for _ in self.scales
+        ])
+        
+        # Scale-specific 1D convolutions for multi-scale processing
+        self.scale_convs = nn.ModuleList([
+            nn.Conv1d(d_model, d_model, kernel_size=scale, padding=scale//2, groups=d_model)
+            for scale in self.scales
+        ])
+        
+        # Fusion mechanism
+        self.scale_fusion = nn.Sequential(
+            nn.Linear(d_model * self.num_scales, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        
+        # Output projection
+        self.output_proj = nn.Linear(d_model, d_model)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass through multi-scale attention.
+        
+        Args:
+            x: Input tensor [batch, seq_len, d_model]
+            mask: Attention mask
+            
+        Returns:
+            Output tensor [batch, seq_len, d_model]
+        """
+        batch_size, seq_len, d_model = x.shape
+        
+        # Apply multi-scale processing
+        scale_outputs = []
+        
+        for scale_conv, scale_attention in zip(self.scale_convs, self.scale_attentions):
+            # Apply scale-specific convolution
+            x_conv = x.transpose(1, 2)  # [batch, d_model, seq_len]
+            x_conv = scale_conv(x_conv)
+            x_conv = x_conv.transpose(1, 2)  # [batch, seq_len, d_model]
+            
+            # Apply attention at this scale
+            x_attn, _ = scale_attention(x_conv, mask=mask)
+            scale_outputs.append(x_attn)
+        
+        # Fuse multi-scale features
+        fused_features = torch.cat(scale_outputs, dim=-1)  # [batch, seq_len, d_model * num_scales]
+        fused_output = self.scale_fusion(fused_features)  # [batch, seq_len, d_model]
+        
+        # Final projection
+        output = self.output_proj(fused_output)
+        
+        return output
+
+
+class GatedFeedForward(nn.Module):
+    """
+    Gated feed-forward network with enhanced expressivity.
+    
+    Uses gating mechanism similar to GLU (Gated Linear Units)
+    for better information flow control.
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        dropout: float = 0.1,
+        activation: str = 'gelu'
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.d_ff = d_ff
+        
+        # Gated linear layers
+        self.gate_proj = nn.Linear(d_model, d_ff)
+        self.value_proj = nn.Linear(d_model, d_ff)
+        self.output_proj = nn.Linear(d_ff, d_model)
+        
+        # Activation function
+        if activation == 'gelu':
+            self.activation = nn.GELU()
+        elif activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'silu':
+            self.activation = nn.SiLU()
+        else:
+            self.activation = nn.GELU()  # Default
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+        
+        # Initialize weights
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights properly."""
+        for module in [self.gate_proj, self.value_proj, self.output_proj]:
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass through gated feed-forward network.
+        
+        Args:
+            x: Input tensor [batch, seq_len, d_model]
+            
+        Returns:
+            Output tensor [batch, seq_len, d_model]
+        """
+        # Compute gate and value
+        gate = self.activation(self.gate_proj(x))  # [batch, seq_len, d_ff]
+        value = self.value_proj(x)  # [batch, seq_len, d_ff]
+        
+        # Apply gating
+        gated_value = gate * value  # Element-wise multiplication
+        
+        # Apply dropout
+        gated_value = self.dropout(gated_value)
+        
+        # Output projection
+        output = self.output_proj(gated_value)
+        
+        return output
+
+
+class RelativePositionEncoding(nn.Module):
+    """
+    Relative positional encoding for transformer attention.
+    
+    Adds relative position information to attention scores
+    instead of absolute positions.
+    """
+    
+    def __init__(self, d_model: int, n_heads: int, max_len: int = 512):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.max_len = max_len
+        
+        # Relative position embeddings
+        self.relative_positions = nn.Parameter(
+            torch.randn(2 * max_len - 1, d_model // n_heads)
+        )
+        
+        # Initialize
+        nn.init.xavier_uniform_(self.relative_positions)
+    
+    def forward(self, seq_len: int) -> torch.Tensor:
+        """
+        Generate relative position encodings.
+        
+        Args:
+            seq_len: Sequence length
+            
+        Returns:
+            Relative position encodings [seq_len, seq_len, d_head]
+        """
+        device = self.relative_positions.device
+        
+        # Create relative position indices
+        positions = torch.arange(seq_len, device=device)
+        relative_indices = positions.unsqueeze(0) - positions.unsqueeze(1)  # [seq_len, seq_len]
+        relative_indices = relative_indices + self.max_len - 1  # Shift to positive indices
+        
+        # Clamp to valid range
+        relative_indices = torch.clamp(relative_indices, 0, 2 * self.max_len - 2)
+        
+        # Get relative position embeddings
+        relative_encodings = self.relative_positions[relative_indices]  # [seq_len, seq_len, d_head]
+        
+        return relative_encodings 
