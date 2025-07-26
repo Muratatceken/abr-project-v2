@@ -27,6 +27,16 @@ import warnings
 from io import BytesIO
 import base64
 
+# Suppress sklearn classification warnings globally
+warnings.filterwarnings("ignore", message="y_pred contains classes not in y_true")
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.metrics._classification")
+
+# Import our new modular utilities
+from .metrics_utils import MetricsCalculator
+from .visualization_utils import VisualizationEngine
+from .stat_utils import StatisticalAnalyzer
+from .report_generator import ReportGenerator
+
 # Scientific computing
 import scipy.stats
 from sklearn.metrics import (
@@ -102,10 +112,55 @@ class ABRComprehensiveEvaluator:
         (self.save_dir / "figures").mkdir(exist_ok=True)
         (self.save_dir / "data").mkdir(exist_ok=True)
         
+        # Initialize modular components
+        self.metrics_calculator = MetricsCalculator(class_names=self.class_names)
+        self.visualizer = VisualizationEngine(
+            class_names=self.class_names,
+            figsize=self.config.get('visualization', {}).get('figsize', (15, 10)),
+            dpi=self.config.get('visualization', {}).get('dpi', 150),
+            save_format=self.config.get('visualization', {}).get('save_format', 'png')
+        )
+        self.statistical_analyzer = StatisticalAnalyzer(
+            confidence_level=self.config.get('statistics', {}).get('confidence_level', 0.95),
+            n_bootstrap=self.config.get('statistics', {}).get('bootstrap', {}).get('n_samples', 1000)
+        )
+        self.report_generator = ReportGenerator(
+            class_names=self.class_names,
+            output_dir=self.save_dir
+        )
+        
         # Storage for batch results
         self.batch_results = []
         self.aggregate_metrics = {}
         self.failure_modes = defaultdict(int)
+        
+        # NEW: Storage for class-based analysis
+        self.class_data = {class_name: {
+            'signals_true': [],
+            'signals_pred': [],
+            'peaks_true': [],
+            'peaks_pred': [],
+            'peak_masks': [],
+            'thresholds_true': [],
+            'thresholds_pred': [],
+            'static_params': [],
+            'sample_indices': [],
+            'age_bins': [],
+            'intensity_bins': []
+        } for class_name in self.class_names}
+        
+        # Storage for stratified analysis
+        self.stratified_data = {
+            'class': {},
+            'age_bin': {},
+            'intensity_bin': {}
+        }
+        
+        # Storage for per-sample diagnostics
+        self.per_sample_data = []
+        
+        # Storage for clinical alerts
+        self.clinical_alerts = []
         
         # Set plotting style
         plt.style.use('seaborn-v0_8' if 'seaborn-v0_8' in plt.style.available else 'default')
@@ -281,7 +336,8 @@ class ABRComprehensiveEvaluator:
         exists_pred_binary = (exists_pred_np > 0.5).astype(int)
         
         metrics['existence_accuracy'] = accuracy_score(exists_true_np, exists_pred_binary)
-        metrics['existence_f1'] = f1_score(exists_true_np, exists_pred_binary)
+        # Binary f1_score with explicit labels
+        metrics['existence_f1'] = f1_score(exists_true_np, exists_pred_binary, labels=[0, 1], zero_division=0)
         
         # AUC if we have both classes
         if len(np.unique(exists_true_np)) > 1:
@@ -343,21 +399,29 @@ class ABRComprehensiveEvaluator:
         
         metrics = {}
         
-        # Basic classification metrics
+        # Define all possible labels to ensure consistency
+        all_labels = list(range(len(self.class_names)))
+        
+        # Basic classification metrics with explicit labels
         metrics['accuracy'] = accuracy_score(true_classes, pred_classes)
         metrics['balanced_accuracy'] = balanced_accuracy_score(true_classes, pred_classes)
-        metrics['macro_f1'] = f1_score(true_classes, pred_classes, average='macro')
-        metrics['micro_f1'] = f1_score(true_classes, pred_classes, average='micro')
-        metrics['weighted_f1'] = f1_score(true_classes, pred_classes, average='weighted')
         
-        # Per-class F1 scores
-        f1_per_class = f1_score(true_classes, pred_classes, average=None)
-        for i, class_name in enumerate(self.class_names):
-            if i < len(f1_per_class):
-                metrics[f'f1_{class_name.lower()}'] = f1_per_class[i]
-        
-        # Confusion matrix
-        cm = confusion_matrix(true_classes, pred_classes)
+        # F1 scores with explicit labels to avoid class mismatch warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # Suppress sklearn classification warnings
+            
+            metrics['macro_f1'] = f1_score(true_classes, pred_classes, average='macro', labels=all_labels, zero_division=0)
+            metrics['micro_f1'] = f1_score(true_classes, pred_classes, average='micro', labels=all_labels, zero_division=0)
+            metrics['weighted_f1'] = f1_score(true_classes, pred_classes, average='weighted', labels=all_labels, zero_division=0)
+            
+            # Per-class F1 scores with explicit labels
+            f1_per_class = f1_score(true_classes, pred_classes, average=None, labels=all_labels, zero_division=0)
+            for i, class_name in enumerate(self.class_names):
+                if i < len(f1_per_class):
+                    metrics[f'f1_{class_name.lower()}'] = f1_per_class[i]
+            
+            # Confusion matrix with explicit labels
+            cm = confusion_matrix(true_classes, pred_classes, labels=all_labels)
         metrics['confusion_matrix'] = cm.tolist()
         
         # Class distribution analysis
@@ -367,11 +431,11 @@ class ABRComprehensiveEvaluator:
         metrics['true_distribution'] = (true_dist / len(true_classes)).tolist()
         metrics['pred_distribution'] = (pred_dist / len(pred_classes)).tolist()
         
-        # Classification report
+        # Classification report with explicit labels
         report = classification_report(
             true_classes, pred_classes,
             target_names=self.class_names,
-            labels=list(range(len(self.class_names))),  # Explicitly specify all labels
+            labels=all_labels,  # Explicitly specify all labels
             output_dict=True,
             zero_division=0
         )
@@ -829,10 +893,17 @@ class ABRComprehensiveEvaluator:
         pred_classes = torch.argmax(model_outputs['class'], dim=1).detach().cpu().numpy()
         true_classes = batch_data['target'].detach().cpu().numpy()
         
-        cm = confusion_matrix(true_classes, pred_classes)
+        # Use explicit labels to ensure consistency
+        all_labels = list(range(len(self.class_names)))
+        cm = confusion_matrix(true_classes, pred_classes, labels=all_labels)
         
-        # Normalize confusion matrix
-        cm_norm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        # Safe normalization of confusion matrix
+        row_sums = cm.sum(axis=1)
+        # Avoid division by zero by replacing zeros with 1 (will result in 0/1 = 0)
+        row_sums_safe = np.where(row_sums == 0, 1, row_sums)
+        cm_norm = cm.astype('float') / row_sums_safe[:, np.newaxis]
+        
+        # Handle any remaining NaN values
         cm_norm = np.nan_to_num(cm_norm)
         
         sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues',
@@ -1041,7 +1112,351 @@ class ABRComprehensiveEvaluator:
         # Store batch results
         self.batch_results.append(batch_results)
         
+        # NEW: Accumulate class-based data for comprehensive analysis
+        self._accumulate_class_data(batch_data, model_outputs, batch_idx)
+        
+        # NEW: Accumulate stratified data
+        self._accumulate_stratified_data(batch_data, model_outputs, batch_idx)
+        
+        # NEW: Accumulate per-sample diagnostics
+        self._accumulate_per_sample_data(batch_data, model_outputs, batch_idx)
+        
+        # NEW: Identify clinical errors
+        self._identify_clinical_errors(batch_data, model_outputs, batch_idx)
+        
         return batch_results
+    
+    def _accumulate_class_data(
+        self,
+        batch_data: Dict[str, torch.Tensor],
+        model_outputs: Dict[str, torch.Tensor],
+        batch_idx: int
+    ) -> None:
+        """Accumulate data by class for comprehensive class-based analysis."""
+        if 'target' not in batch_data:
+            return
+        
+        batch_size = batch_data['signal'].size(0)
+        targets = batch_data['target'].cpu().numpy()
+        
+        for i in range(batch_size):
+            target_idx = targets[i]
+            if target_idx < len(self.class_names):
+                class_name = self.class_names[target_idx]
+                
+                # Store signals
+                if 'recon' in model_outputs:
+                    self.class_data[class_name]['signals_true'].append(
+                        batch_data['signal'][i].detach().cpu().numpy()
+                    )
+                    self.class_data[class_name]['signals_pred'].append(
+                        model_outputs['recon'][i].detach().cpu().numpy()
+                    )
+                
+                # Store peaks
+                if 'peak' in model_outputs and 'v_peak' in batch_data:
+                    self.class_data[class_name]['peaks_true'].append(
+                        batch_data['v_peak'][i].detach().cpu().numpy()
+                    )
+                    if len(model_outputs['peak']) >= 2:  # latency and amplitude
+                        peak_pred = np.array([
+                            model_outputs['peak'][1][i].detach().cpu().numpy(),  # latency
+                            model_outputs['peak'][2][i].detach().cpu().numpy()   # amplitude
+                        ])
+                        self.class_data[class_name]['peaks_pred'].append(peak_pred)
+                    
+                    if 'v_peak_mask' in batch_data:
+                        self.class_data[class_name]['peak_masks'].append(
+                            batch_data['v_peak_mask'][i].detach().cpu().numpy()
+                        )
+                
+                # Store thresholds
+                if 'threshold' in model_outputs:
+                    self.class_data[class_name]['thresholds_pred'].append(
+                        model_outputs['threshold'][i].detach().cpu().numpy()
+                    )
+                    
+                    if 'threshold' in batch_data:
+                        self.class_data[class_name]['thresholds_true'].append(
+                            batch_data['threshold'][i].detach().cpu().numpy()
+                        )
+                    else:
+                        # Use intensity as proxy
+                        proxy_thresh = batch_data['static_params'][i, 1].detach().cpu().numpy() * 100
+                        self.class_data[class_name]['thresholds_true'].append(proxy_thresh)
+                
+                # Store static parameters
+                self.class_data[class_name]['static_params'].append(
+                    batch_data['static_params'][i].detach().cpu().numpy()
+                )
+                
+                # Store sample index for tracking
+                sample_idx = batch_idx * batch_size + i
+                self.class_data[class_name]['sample_indices'].append(sample_idx)
+                
+                # Store age and intensity bins for stratified analysis
+                if 'static_params' in batch_data:
+                    age = batch_data['static_params'][i, 0].detach().cpu().numpy()
+                    intensity = batch_data['static_params'][i, 1].detach().cpu().numpy()
+                    
+                    # Create age bins (e.g., young, middle, old)
+                    age_bin = self._create_age_bin(age)
+                    self.class_data[class_name]['age_bins'].append(age_bin)
+                    
+                    # Create intensity bins (e.g., low, medium, high)
+                    intensity_bin = self._create_intensity_bin(intensity)
+                    self.class_data[class_name]['intensity_bins'].append(intensity_bin)
+    
+    def _create_age_bin(self, age: float) -> str:
+        """Create age bin for stratified analysis."""
+        # Assuming age is normalized, we need to convert back or use normalized bins
+        if age < -0.5:
+            return 'young'
+        elif age < 0.5:
+            return 'middle'
+        else:
+            return 'old'
+    
+    def _create_intensity_bin(self, intensity: float) -> str:
+        """Create intensity bin for stratified analysis."""
+        # Assuming intensity is normalized
+        if intensity < -0.5:
+            return 'low'
+        elif intensity < 0.5:
+            return 'medium'
+        else:
+            return 'high'
+    
+    def _accumulate_stratified_data(
+        self,
+        batch_data: Dict[str, torch.Tensor],
+        model_outputs: Dict[str, torch.Tensor],
+        batch_idx: int
+    ) -> None:
+        """Accumulate data for stratified analysis."""
+        if 'target' not in batch_data:
+            return
+        
+        batch_size = batch_data['signal'].size(0)
+        
+        for i in range(batch_size):
+            # Get stratification variables
+            class_idx = batch_data['target'][i].cpu().numpy()
+            
+            age_bin = 'unknown'
+            intensity_bin = 'unknown'
+            
+            if 'static_params' in batch_data:
+                age = batch_data['static_params'][i, 0].detach().cpu().numpy()
+                intensity = batch_data['static_params'][i, 1].detach().cpu().numpy()
+                age_bin = self._create_age_bin(age)
+                intensity_bin = self._create_intensity_bin(intensity)
+            
+            # Store data for each stratification
+            stratifications = {
+                'class': str(class_idx),
+                'age_bin': age_bin,
+                'intensity_bin': intensity_bin
+            }
+            
+            for strat_key, strat_value in stratifications.items():
+                if strat_value not in self.stratified_data[strat_key]:
+                    self.stratified_data[strat_key][strat_value] = {
+                        'signals_true': [],
+                        'signals_pred': [],
+                        'targets': [],
+                        'predictions': {},
+                        'indices': []
+                    }
+                
+                stratum = self.stratified_data[strat_key][strat_value]
+                
+                # Store data
+                stratum['signals_true'].append(batch_data['signal'][i].detach().cpu().numpy())
+                if 'recon' in model_outputs:
+                    stratum['signals_pred'].append(model_outputs['recon'][i].detach().cpu().numpy())
+                
+                stratum['targets'].append(class_idx)
+                
+                # Store predictions
+                for output_key, output_value in model_outputs.items():
+                    if output_key not in stratum['predictions']:
+                        stratum['predictions'][output_key] = []
+                    
+                    # Handle different output types
+                    if isinstance(output_value, (list, tuple)):
+                        # For peak outputs which are lists/tuples
+                        if len(output_value) > 0 and i < len(output_value[0]):
+                            stratum['predictions'][output_key].append([
+                                item[i].detach().cpu().numpy() if i < len(item) else None 
+                                for item in output_value
+                            ])
+                        else:
+                            stratum['predictions'][output_key].append(None)
+                    else:
+                        # For regular tensor outputs
+                        if i < len(output_value):
+                            stratum['predictions'][output_key].append(output_value[i].detach().cpu().numpy())
+                        else:
+                            stratum['predictions'][output_key].append(None)
+                
+                stratum['indices'].append(batch_idx * batch_size + i)
+    
+    def _accumulate_per_sample_data(
+        self,
+        batch_data: Dict[str, torch.Tensor],
+        model_outputs: Dict[str, torch.Tensor],
+        batch_idx: int
+    ) -> None:
+        """Accumulate per-sample diagnostic data."""
+        batch_size = batch_data['signal'].size(0)
+        
+        for i in range(batch_size):
+            sample_data = {
+                'sample_id': f'batch_{batch_idx}_sample_{i}',
+                'batch_idx': batch_idx,
+                'sample_idx': i
+            }
+            
+            # Add ground truth data
+            if 'target' in batch_data:
+                sample_data['true_class'] = int(batch_data['target'][i].cpu().numpy())
+                if sample_data['true_class'] < len(self.class_names):
+                    sample_data['true_class_name'] = self.class_names[sample_data['true_class']]
+            
+            if 'static_params' in batch_data:
+                static_params = batch_data['static_params'][i].detach().cpu().numpy()
+                sample_data['age_normalized'] = float(static_params[0])
+                sample_data['intensity_normalized'] = float(static_params[1])
+                sample_data['age_bin'] = self._create_age_bin(static_params[0])
+                sample_data['intensity_bin'] = self._create_intensity_bin(static_params[1])
+            
+            if 'threshold' in batch_data:
+                sample_data['true_threshold'] = float(batch_data['threshold'][i].detach().cpu().numpy())
+            
+            if 'v_peak' in batch_data:
+                v_peak = batch_data['v_peak'][i].detach().cpu().numpy()
+                sample_data['true_peak_latency'] = float(v_peak[0])
+                sample_data['true_peak_amplitude'] = float(v_peak[1])
+            
+            if 'v_peak_mask' in batch_data:
+                sample_data['true_peak_exists'] = bool(batch_data['v_peak_mask'][i].any().cpu().numpy())
+            
+            # Add predictions
+            if 'class' in model_outputs:
+                pred_class = torch.argmax(model_outputs['class'][i]).item()
+                sample_data['pred_class'] = pred_class
+                if pred_class < len(self.class_names):
+                    sample_data['pred_class_name'] = self.class_names[pred_class]
+                sample_data['class_confidence'] = float(torch.max(torch.softmax(model_outputs['class'][i], dim=0)).cpu().numpy())
+            
+            if 'threshold' in model_outputs:
+                sample_data['pred_threshold'] = float(model_outputs['threshold'][i].detach().cpu().numpy())
+                
+                # Calculate threshold error
+                if 'true_threshold' in sample_data:
+                    sample_data['threshold_error'] = abs(sample_data['pred_threshold'] - sample_data['true_threshold'])
+            
+            if 'peak' in model_outputs and len(model_outputs['peak']) >= 3:
+                sample_data['pred_peak_exists'] = float(model_outputs['peak'][0][i].detach().cpu().numpy()) > 0.5
+                sample_data['pred_peak_latency'] = float(model_outputs['peak'][1][i].detach().cpu().numpy())
+                sample_data['pred_peak_amplitude'] = float(model_outputs['peak'][2][i].detach().cpu().numpy())
+                
+                # Calculate peak errors
+                if 'true_peak_latency' in sample_data:
+                    sample_data['peak_latency_error'] = abs(sample_data['pred_peak_latency'] - sample_data['true_peak_latency'])
+                if 'true_peak_amplitude' in sample_data:
+                    sample_data['peak_amplitude_error'] = abs(sample_data['pred_peak_amplitude'] - sample_data['true_peak_amplitude'])
+            
+            # Calculate signal reconstruction metrics
+            if 'recon' in model_outputs:
+                true_signal = batch_data['signal'][i].detach().cpu().numpy().flatten()
+                pred_signal = model_outputs['recon'][i].detach().cpu().numpy().flatten()
+                
+                sample_data['signal_mse'] = float(np.mean((true_signal - pred_signal) ** 2))
+                sample_data['signal_mae'] = float(np.mean(np.abs(true_signal - pred_signal)))
+                
+                if np.std(pred_signal) > 1e-8:
+                    sample_data['signal_correlation'] = float(np.corrcoef(true_signal, pred_signal)[0, 1])
+                else:
+                    sample_data['signal_correlation'] = 0.0
+                
+                # SNR
+                signal_power = np.mean(true_signal ** 2)
+                noise_power = sample_data['signal_mse']
+                sample_data['signal_snr'] = float(10 * np.log10(signal_power / (noise_power + 1e-8)))
+            
+            self.per_sample_data.append(sample_data)
+    
+    def _identify_clinical_errors(
+        self,
+        batch_data: Dict[str, torch.Tensor],
+        model_outputs: Dict[str, torch.Tensor],
+        batch_idx: int
+    ) -> None:
+        """Identify clinical errors and generate alerts."""
+        batch_size = batch_data['signal'].size(0)
+        
+        # Clinical error thresholds
+        thresholds = self.config.get('clinical_thresholds', {
+            'threshold_error': 20.0,  # dB
+            'peak_latency_tolerance': 0.5,   # ms
+            'peak_amplitude_tolerance': 0.1  # μV
+        })
+        
+        for i in range(batch_size):
+            sample_alerts = []
+            sample_id = f'batch_{batch_idx}_sample_{i}'
+            
+            # Check threshold errors
+            if 'threshold' in model_outputs and 'threshold' in batch_data:
+                pred_thresh = float(model_outputs['threshold'][i].detach().cpu().numpy())
+                true_thresh = float(batch_data['threshold'][i].detach().cpu().numpy())
+                thresh_error = abs(pred_thresh - true_thresh)
+                
+                if thresh_error > thresholds['threshold_error']:
+                    if pred_thresh < true_thresh - thresholds['threshold_error']:
+                        sample_alerts.append('false_clear')
+                    elif pred_thresh > true_thresh + thresholds['threshold_error']:
+                        sample_alerts.append('false_impairment')
+                    else:
+                        sample_alerts.append('threshold_error_>20')
+            
+            # Check peak detection errors
+            if 'peak' in model_outputs and len(model_outputs['peak']) > 0:
+                if 'v_peak_mask' in batch_data:
+                    pred_peak_exists = float(model_outputs['peak'][0][i].detach().cpu().numpy()) > 0.5
+                    true_peak_exists = bool(batch_data['v_peak_mask'][i].any().cpu().numpy())
+                    
+                    if pred_peak_exists and not true_peak_exists:
+                        sample_alerts.append('false_peak_detection')
+                    elif not pred_peak_exists and true_peak_exists:
+                        sample_alerts.append('missed_peak')
+                    
+                    # Check peak parameter errors if both peaks exist
+                    if pred_peak_exists and true_peak_exists and len(model_outputs['peak']) >= 3:
+                        if 'v_peak' in batch_data:
+                            true_latency = float(batch_data['v_peak'][i, 0].detach().cpu().numpy())
+                            pred_latency = float(model_outputs['peak'][1][i].detach().cpu().numpy())
+                            
+                            if abs(pred_latency - true_latency) > thresholds['peak_latency_tolerance']:
+                                sample_alerts.append('peak_latency_error')
+                            
+                            true_amplitude = float(batch_data['v_peak'][i, 1].detach().cpu().numpy())
+                            pred_amplitude = float(model_outputs['peak'][2][i].detach().cpu().numpy())
+                            
+                            if abs(pred_amplitude - true_amplitude) > thresholds['peak_amplitude_tolerance']:
+                                sample_alerts.append('peak_amplitude_error')
+            
+            # Add alert if any errors found
+            if sample_alerts:
+                self.clinical_alerts.append({
+                    'sample_id': sample_id,
+                    'batch_idx': batch_idx,
+                    'sample_idx': i,
+                    'error_flags': sample_alerts,
+                    'timestamp': batch_idx  # Use batch_idx as simple timestamp
+                })
     
     def compute_aggregate_metrics(self) -> Dict[str, Any]:
         """Compute aggregate metrics across all evaluated batches with enhanced features."""
@@ -1671,6 +2086,474 @@ class ABRComprehensiveEvaluator:
             plt.close(fig)
         
         return cards
+    
+    def create_class_based_visualizations(
+        self,
+        max_samples_per_class: int = 10
+    ) -> Dict[str, bytes]:
+        """
+        Create comprehensive class-based visualizations using all accumulated data.
+        
+        Args:
+            max_samples_per_class: Maximum number of samples to show per class
+            
+        Returns:
+            Dictionary of visualization bytes
+        """
+        visualizations = {}
+        
+        # Check if we have accumulated class data
+        total_samples = sum(len(data['signals_true']) for data in self.class_data.values())
+        if total_samples == 0:
+            print("⚠️ No class-based data accumulated. Make sure to run evaluation first.")
+            return visualizations
+        
+        print(f"📊 Creating class-based visualizations for {total_samples} total samples")
+        
+        # 1. Class-based signal reconstruction
+        if any(len(data['signals_true']) > 0 for data in self.class_data.values()):
+            fig = self._plot_class_based_signal_reconstruction(max_samples_per_class)
+            visualizations['class_based_signal_reconstruction'] = self._fig_to_bytes(fig)
+            plt.close(fig)
+        
+        # 2. Class-based peak analysis
+        if any(len(data['peaks_true']) > 0 for data in self.class_data.values()):
+            fig = self._plot_class_based_peak_analysis(max_samples_per_class)
+            visualizations['class_based_peak_analysis'] = self._fig_to_bytes(fig)
+            plt.close(fig)
+        
+        # 3. Class-based threshold analysis
+        if any(len(data['thresholds_true']) > 0 for data in self.class_data.values()):
+            fig = self._plot_class_based_threshold_analysis()
+            visualizations['class_based_threshold_analysis'] = self._fig_to_bytes(fig)
+            plt.close(fig)
+        
+        # 4. Class-based error distributions
+        fig = self._plot_class_based_error_distributions()
+        visualizations['class_based_error_distributions'] = self._fig_to_bytes(fig)
+        plt.close(fig)
+        
+        # 5. Class comparison summary
+        fig = self._plot_class_comparison_summary()
+        visualizations['class_comparison_summary'] = self._fig_to_bytes(fig)
+        plt.close(fig)
+        
+        print(f"✅ Generated {len(visualizations)} class-based visualizations")
+        return visualizations
+    
+    def _plot_class_based_signal_reconstruction(self, max_samples_per_class: int) -> plt.Figure:
+        """Create class-based signal reconstruction plots."""
+        # Count classes with data
+        classes_with_data = [name for name, data in self.class_data.items() 
+                           if len(data['signals_true']) > 0]
+        n_classes = len(classes_with_data)
+        
+        if n_classes == 0:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, 'No signal data available', ha='center', va='center')
+            return fig
+        
+        # Create subplots: one row per class, multiple columns for samples
+        fig, axes = plt.subplots(n_classes, max_samples_per_class, 
+                               figsize=(4*max_samples_per_class, 4*n_classes))
+        
+        if n_classes == 1:
+            axes = axes.reshape(1, -1)
+        if max_samples_per_class == 1:
+            axes = axes.reshape(-1, 1)
+        
+        time_axis = np.linspace(0, 10, 200)  # Assuming 200 time points for 10ms
+        
+        for class_idx, class_name in enumerate(classes_with_data):
+            data = self.class_data[class_name]
+            n_samples = min(len(data['signals_true']), max_samples_per_class)
+            
+            for sample_idx in range(max_samples_per_class):
+                ax = axes[class_idx, sample_idx]
+                
+                if sample_idx < n_samples:
+                    true_signal = data['signals_true'][sample_idx].squeeze()
+                    pred_signal = data['signals_pred'][sample_idx].squeeze()
+                    
+                    # Ensure signals have correct length
+                    if len(true_signal) != len(time_axis):
+                        time_axis_adj = np.linspace(0, 10, len(true_signal))
+                    else:
+                        time_axis_adj = time_axis
+                    
+                    # Plot signals
+                    ax.plot(time_axis_adj, true_signal, 'b-', label='True', linewidth=2, alpha=0.8)
+                    ax.plot(time_axis_adj, pred_signal, 'r--', label='Predicted', linewidth=2, alpha=0.8)
+                    
+                    # Compute metrics
+                    corr = np.corrcoef(true_signal, pred_signal)[0, 1] if np.std(pred_signal) > 1e-8 else 0.0
+                    mse = np.mean((true_signal - pred_signal) ** 2)
+                    
+                    ax.set_title(f'{class_name}\nSample {sample_idx+1}\nCorr: {corr:.3f}, MSE: {mse:.4f}')
+                    
+                    if sample_idx == 0:  # Only show legend on first sample
+                        ax.legend()
+                else:
+                    ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+                    ax.set_title(f'{class_name}\nNo data')
+                
+                ax.set_xlabel('Time (ms)')
+                ax.set_ylabel('Amplitude (μV)')
+                ax.grid(True, alpha=0.3)
+        
+        plt.suptitle('Class-Based Signal Reconstruction Analysis', fontsize=16, y=0.98)
+        plt.tight_layout()
+        return fig
+    
+    def _plot_class_based_peak_analysis(self, max_samples_per_class: int) -> plt.Figure:
+        """Create class-based peak analysis plots."""
+        classes_with_data = [name for name, data in self.class_data.items() 
+                           if len(data['peaks_true']) > 0]
+        n_classes = len(classes_with_data)
+        
+        if n_classes == 0:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, 'No peak data available', ha='center', va='center')
+            return fig
+        
+        fig, axes = plt.subplots(2, n_classes, figsize=(5*n_classes, 10))
+        if n_classes == 1:
+            axes = axes.reshape(-1, 1)
+        
+        for class_idx, class_name in enumerate(classes_with_data):
+            data = self.class_data[class_name]
+            
+            if len(data['peaks_true']) > 0 and len(data['peaks_pred']) > 0:
+                peaks_true = np.array(data['peaks_true'])
+                peaks_pred = np.array(data['peaks_pred'])
+                
+                # Peak latency comparison
+                ax1 = axes[0, class_idx]
+                if peaks_true.shape[1] >= 1 and peaks_pred.shape[1] >= 1:
+                    latency_true = peaks_true[:, 0]
+                    latency_pred = peaks_pred[:, 0] if len(peaks_pred.shape) > 1 else peaks_pred
+                    
+                    ax1.scatter(latency_true, latency_pred, alpha=0.6, s=50)
+                    min_val, max_val = min(latency_true.min(), latency_pred.min()), max(latency_true.max(), latency_pred.max())
+                    ax1.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
+                    
+                    # Compute correlation
+                    try:
+                        if len(latency_true) > 1 and np.std(latency_pred) > 1e-8 and np.std(latency_true) > 1e-8:
+                            corr_matrix = np.corrcoef(latency_true, latency_pred)
+                            corr = corr_matrix[0, 1] if not np.isnan(corr_matrix[0, 1]) else 0.0
+                        else:
+                            corr = 0.0
+                    except:
+                        corr = 0.0
+                    mae = np.mean(np.abs(latency_true - latency_pred))
+                    
+                    ax1.set_title(f'{class_name} - Peak Latency\nCorr: {corr:.3f}, MAE: {mae:.3f}ms')
+                    ax1.set_xlabel('True Latency (ms)')
+                    ax1.set_ylabel('Predicted Latency (ms)')
+                    ax1.grid(True, alpha=0.3)
+                
+                # Peak amplitude comparison
+                ax2 = axes[1, class_idx]
+                if peaks_true.shape[1] >= 2 and peaks_pred.shape[1] >= 2:
+                    amplitude_true = peaks_true[:, 1]
+                    amplitude_pred = peaks_pred[:, 1]
+                    
+                    ax2.scatter(amplitude_true, amplitude_pred, alpha=0.6, s=50)
+                    min_val, max_val = min(amplitude_true.min(), amplitude_pred.min()), max(amplitude_true.max(), amplitude_pred.max())
+                    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
+                    
+                    # Compute correlation
+                    try:
+                        if len(amplitude_true) > 1 and np.std(amplitude_pred) > 1e-8 and np.std(amplitude_true) > 1e-8:
+                            corr_matrix = np.corrcoef(amplitude_true, amplitude_pred)
+                            corr = corr_matrix[0, 1] if not np.isnan(corr_matrix[0, 1]) else 0.0
+                        else:
+                            corr = 0.0
+                    except:
+                        corr = 0.0
+                    mae = np.mean(np.abs(amplitude_true - amplitude_pred))
+                    
+                    ax2.set_title(f'{class_name} - Peak Amplitude\nCorr: {corr:.3f}, MAE: {mae:.3f}μV')
+                    ax2.set_xlabel('True Amplitude (μV)')
+                    ax2.set_ylabel('Predicted Amplitude (μV)')
+                    ax2.grid(True, alpha=0.3)
+        
+        plt.suptitle('Class-Based Peak Analysis', fontsize=16, y=0.95)
+        plt.tight_layout()
+        return fig
+    
+    def _plot_class_based_threshold_analysis(self) -> plt.Figure:
+        """Create class-based threshold analysis plots."""
+        classes_with_data = [name for name, data in self.class_data.items() 
+                           if len(data['thresholds_true']) > 0]
+        n_classes = len(classes_with_data)
+        
+        if n_classes == 0:
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, 'No threshold data available', ha='center', va='center')
+            return fig
+        
+        fig, axes = plt.subplots(1, n_classes, figsize=(5*n_classes, 5))
+        if n_classes == 1:
+            axes = [axes]
+        
+        for class_idx, class_name in enumerate(classes_with_data):
+            data = self.class_data[class_name]
+            
+            if len(data['thresholds_true']) > 0 and len(data['thresholds_pred']) > 0:
+                thresholds_true = np.array(data['thresholds_true'])
+                thresholds_pred = np.array(data['thresholds_pred'])
+                
+                ax = axes[class_idx]
+                ax.scatter(thresholds_true, thresholds_pred, alpha=0.6, s=50)
+                
+                min_val = min(thresholds_true.min(), thresholds_pred.min())
+                max_val = max(thresholds_true.max(), thresholds_pred.max())
+                ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8)
+                
+                # Compute metrics
+                thresholds_true_flat = thresholds_true.flatten()
+                thresholds_pred_flat = thresholds_pred.flatten()
+                
+                # Ensure same length
+                min_len = min(len(thresholds_true_flat), len(thresholds_pred_flat))
+                thresholds_true_flat = thresholds_true_flat[:min_len]
+                thresholds_pred_flat = thresholds_pred_flat[:min_len]
+                
+                try:
+                    if len(thresholds_true_flat) > 1 and np.std(thresholds_pred_flat) > 1e-8 and np.std(thresholds_true_flat) > 1e-8:
+                        corr_matrix = np.corrcoef(thresholds_true_flat, thresholds_pred_flat)
+                        corr = corr_matrix[0, 1] if not np.isnan(corr_matrix[0, 1]) else 0.0
+                    else:
+                        corr = 0.0
+                except:
+                    corr = 0.0
+                mae = np.mean(np.abs(thresholds_true_flat - thresholds_pred_flat))
+                try:
+                    r2 = r2_score(thresholds_true_flat, thresholds_pred_flat) if len(thresholds_true_flat) > 1 else 0.0
+                except:
+                    r2 = 0.0
+                
+                ax.set_title(f'{class_name} - Hearing Thresholds\n'
+                           f'Corr: {corr:.3f}, MAE: {mae:.1f}dB, R²: {r2:.3f}')
+                ax.set_xlabel('True Threshold (dB HL)')
+                ax.set_ylabel('Predicted Threshold (dB HL)')
+                ax.grid(True, alpha=0.3)
+        
+        plt.suptitle('Class-Based Hearing Threshold Analysis', fontsize=16, y=0.95)
+        plt.tight_layout()
+        return fig
+    
+    def _plot_class_based_error_distributions(self) -> plt.Figure:
+        """Create class-based error distribution plots."""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # Signal reconstruction errors
+        ax1 = axes[0, 0]
+        signal_errors_by_class = {}
+        for class_name, data in self.class_data.items():
+            if len(data['signals_true']) > 0 and len(data['signals_pred']) > 0:
+                errors = []
+                for i in range(len(data['signals_true'])):
+                    true_sig = data['signals_true'][i].flatten()
+                    pred_sig = data['signals_pred'][i].flatten()
+                    mse = np.mean((true_sig - pred_sig) ** 2)
+                    errors.append(mse)
+                signal_errors_by_class[class_name] = errors
+        
+        if signal_errors_by_class:
+            ax1.boxplot([errors for errors in signal_errors_by_class.values()], 
+                       labels=list(signal_errors_by_class.keys()))
+            ax1.set_title('Signal Reconstruction MSE by Class')
+            ax1.set_ylabel('MSE')
+            ax1.tick_params(axis='x', rotation=45)
+        
+        # Peak latency errors
+        ax2 = axes[0, 1]
+        peak_errors_by_class = {}
+        for class_name, data in self.class_data.items():
+            if len(data['peaks_true']) > 0 and len(data['peaks_pred']) > 0:
+                errors = []
+                peaks_true = np.array(data['peaks_true'])
+                peaks_pred = np.array(data['peaks_pred'])
+                if peaks_true.shape[1] >= 1 and peaks_pred.shape[1] >= 1:
+                    errors = np.abs(peaks_true[:, 0] - peaks_pred[:, 0])
+                    peak_errors_by_class[class_name] = errors
+        
+        if peak_errors_by_class:
+            ax2.boxplot([errors for errors in peak_errors_by_class.values()], 
+                       labels=list(peak_errors_by_class.keys()))
+            ax2.set_title('Peak Latency MAE by Class')
+            ax2.set_ylabel('Latency Error (ms)')
+            ax2.tick_params(axis='x', rotation=45)
+        
+        # Threshold errors
+        ax3 = axes[1, 0]
+        threshold_errors_by_class = {}
+        for class_name, data in self.class_data.items():
+            if len(data['thresholds_true']) > 0 and len(data['thresholds_pred']) > 0:
+                thresholds_true = np.array(data['thresholds_true']).flatten()
+                thresholds_pred = np.array(data['thresholds_pred']).flatten()
+                
+                # Ensure same length
+                min_len = min(len(thresholds_true), len(thresholds_pred))
+                thresholds_true = thresholds_true[:min_len]
+                thresholds_pred = thresholds_pred[:min_len]
+                
+                errors = np.abs(thresholds_true - thresholds_pred)
+                threshold_errors_by_class[class_name] = errors
+        
+        if threshold_errors_by_class:
+            ax3.boxplot([errors for errors in threshold_errors_by_class.values()], 
+                       labels=list(threshold_errors_by_class.keys()))
+            ax3.set_title('Hearing Threshold MAE by Class')
+            ax3.set_ylabel('Threshold Error (dB)')
+            ax3.tick_params(axis='x', rotation=45)
+        
+        # Sample count by class
+        ax4 = axes[1, 1]
+        class_counts = {name: len(data['signals_true']) for name, data in self.class_data.items()}
+        if any(count > 0 for count in class_counts.values()):
+            bars = ax4.bar(class_counts.keys(), class_counts.values())
+            ax4.set_title('Sample Count by Class')
+            ax4.set_ylabel('Number of Samples')
+            ax4.tick_params(axis='x', rotation=45)
+            
+            # Add count labels on bars
+            for bar, count in zip(bars, class_counts.values()):
+                ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
+                        str(count), ha='center', va='bottom')
+        
+        plt.suptitle('Class-Based Error Analysis', fontsize=16, y=0.95)
+        plt.tight_layout()
+        return fig
+    
+    def _plot_class_comparison_summary(self) -> plt.Figure:
+        """Create a comprehensive class comparison summary."""
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        # Prepare data
+        class_metrics = {}
+        for class_name, data in self.class_data.items():
+            metrics = {'count': len(data['signals_true'])}
+            
+            if len(data['signals_true']) > 0:
+                # Signal reconstruction metrics
+                signal_correlations = []
+                signal_mses = []
+                for i in range(len(data['signals_true'])):
+                    true_sig = data['signals_true'][i].flatten()
+                    pred_sig = data['signals_pred'][i].flatten()
+                    if np.std(pred_sig) > 1e-8:
+                        corr = np.corrcoef(true_sig, pred_sig)[0, 1]
+                        signal_correlations.append(corr)
+                    signal_mses.append(np.mean((true_sig - pred_sig) ** 2))
+                
+                metrics['signal_corr_mean'] = np.mean(signal_correlations) if signal_correlations else 0
+                metrics['signal_mse_mean'] = np.mean(signal_mses)
+            
+            if len(data['peaks_true']) > 0 and len(data['peaks_pred']) > 0:
+                # Peak metrics
+                peaks_true = np.array(data['peaks_true'])
+                peaks_pred = np.array(data['peaks_pred'])
+                if peaks_true.shape[1] >= 1 and peaks_pred.shape[1] >= 1:
+                    metrics['peak_latency_mae'] = np.mean(np.abs(peaks_true[:, 0] - peaks_pred[:, 0]))
+            
+            if len(data['thresholds_true']) > 0 and len(data['thresholds_pred']) > 0:
+                # Threshold metrics
+                thresholds_true = np.array(data['thresholds_true']).flatten()
+                thresholds_pred = np.array(data['thresholds_pred']).flatten()
+                
+                # Ensure same length
+                min_len = min(len(thresholds_true), len(thresholds_pred))
+                thresholds_true = thresholds_true[:min_len]
+                thresholds_pred = thresholds_pred[:min_len]
+                
+                metrics['threshold_mae'] = np.mean(np.abs(thresholds_true - thresholds_pred))
+            
+            class_metrics[class_name] = metrics
+        
+        # Plot comparisons
+        classes = list(class_metrics.keys())
+        
+        # 1. Sample counts
+        ax1 = axes[0, 0]
+        counts = [class_metrics[cls]['count'] for cls in classes]
+        bars = ax1.bar(classes, counts)
+        ax1.set_title('Sample Count by Class')
+        ax1.set_ylabel('Number of Samples')
+        ax1.tick_params(axis='x', rotation=45)
+        for bar, count in zip(bars, counts):
+            ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
+                    str(count), ha='center', va='bottom')
+        
+        # 2. Signal correlation
+        ax2 = axes[0, 1]
+        corrs = [class_metrics[cls].get('signal_corr_mean', 0) for cls in classes]
+        ax2.bar(classes, corrs)
+        ax2.set_title('Mean Signal Correlation by Class')
+        ax2.set_ylabel('Correlation')
+        ax2.tick_params(axis='x', rotation=45)
+        ax2.set_ylim(0, 1)
+        
+        # 3. Signal MSE
+        ax3 = axes[0, 2]
+        mses = [class_metrics[cls].get('signal_mse_mean', 0) for cls in classes]
+        ax3.bar(classes, mses)
+        ax3.set_title('Mean Signal MSE by Class')
+        ax3.set_ylabel('MSE')
+        ax3.tick_params(axis='x', rotation=45)
+        
+        # 4. Peak latency MAE
+        ax4 = axes[1, 0]
+        peak_maes = [class_metrics[cls].get('peak_latency_mae', 0) for cls in classes]
+        ax4.bar(classes, peak_maes)
+        ax4.set_title('Peak Latency MAE by Class')
+        ax4.set_ylabel('MAE (ms)')
+        ax4.tick_params(axis='x', rotation=45)
+        
+        # 5. Threshold MAE
+        ax5 = axes[1, 1]
+        thresh_maes = [class_metrics[cls].get('threshold_mae', 0) for cls in classes]
+        ax5.bar(classes, thresh_maes)
+        ax5.set_title('Hearing Threshold MAE by Class')
+        ax5.set_ylabel('MAE (dB)')
+        ax5.tick_params(axis='x', rotation=45)
+        
+        # 6. Overall performance radar chart (simplified as bar chart)
+        ax6 = axes[1, 2]
+        # Normalize metrics for comparison (0-1 scale, higher is better)
+        normalized_metrics = []
+        for cls in classes:
+            metrics = class_metrics[cls]
+            score = 0
+            count = 0
+            
+            if 'signal_corr_mean' in metrics:
+                score += metrics['signal_corr_mean']  # Higher is better
+                count += 1
+            if 'signal_mse_mean' in metrics and metrics['signal_mse_mean'] > 0:
+                score += 1 / (1 + metrics['signal_mse_mean'])  # Lower MSE is better
+                count += 1
+            if 'peak_latency_mae' in metrics and metrics['peak_latency_mae'] > 0:
+                score += 1 / (1 + metrics['peak_latency_mae'])  # Lower MAE is better
+                count += 1
+            if 'threshold_mae' in metrics and metrics['threshold_mae'] > 0:
+                score += 1 / (1 + metrics['threshold_mae'])  # Lower MAE is better
+                count += 1
+            
+            normalized_metrics.append(score / count if count > 0 else 0)
+        
+        ax6.bar(classes, normalized_metrics)
+        ax6.set_title('Overall Performance Score by Class')
+        ax6.set_ylabel('Normalized Score (0-1)')
+        ax6.tick_params(axis='x', rotation=45)
+        ax6.set_ylim(0, 1)
+        
+        plt.suptitle('Comprehensive Class Performance Comparison', fontsize=16, y=0.95)
+        plt.tight_layout()
+        return fig
     
     def _create_single_diagnostic_card(
         self,

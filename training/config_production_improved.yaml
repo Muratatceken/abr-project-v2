@@ -1,0 +1,175 @@
+# ABR Production Training Configuration - Improved
+# Addresses training issues: F1 score problems, loss monitoring, validation improvements
+
+# Dataset Configuration
+dataset:
+  path: "data/processed/ultimate_dataset.pkl"
+  valid_peaks_only: false
+  patient_stratified: true
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 42
+
+# Model Architecture
+model:
+  input_channels: 1
+  static_dim: 4
+  base_channels: 64
+  n_levels: 4
+  sequence_length: 200
+  signal_length: 200
+  num_classes: 5
+  
+  # Enhanced architecture features
+  num_transformer_layers: 3
+  use_cross_attention: true
+  use_positional_encoding: true
+  film_dropout: 0.1  # Reduced from 0.15
+  use_cfg: true
+  dropout: 0.1
+  use_attention_heads: true
+  predict_uncertainty: false
+
+# Training Configuration
+training:
+  batch_size: 32
+  learning_rate: 5e-5  # Reduced from 1e-4
+  num_epochs: 100
+  weight_decay: 0.01
+  use_amp: true
+  gradient_clip_norm: 1.0
+  gradient_accumulation_steps: 2
+  
+  # Early stopping
+  patience: 25
+  min_delta: 1e-4
+
+# Optimizer Configuration
+optimizer:
+  type: "adamw"
+  betas: [0.9, 0.999]
+  eps: 1e-8
+  amsgrad: false
+
+# Learning Rate Scheduler
+scheduler:
+  type: "cosine_annealing_warm_restarts"
+  T_0: 15  # Increased for more stable learning
+  T_mult: 2
+  eta_min: 1e-7  # Lower minimum LR
+
+# Loss Configuration - IMPROVED WEIGHTS
+loss:
+  loss_weights:
+    signal: 0.8          # Reduced signal weight
+    peak_exist: 0.6      # Increased peak weights
+    peak_latency: 1.2    # Increased peak weights
+    peak_amplitude: 1.2  # Increased peak weights
+    classification: 2.5  # SIGNIFICANTLY INCREASED classification weight
+    threshold: 1.0       # Increased threshold weight
+  
+  use_focal_loss: true   # Enable focal loss for class imbalance
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  
+  peak_loss_type: "huber"  # More robust than MSE
+  use_log_threshold: true
+  threshold_temperature: 0.1
+
+# Class Handling
+class_handling:
+  use_class_weights: true
+  class_weight_strategy: "balanced"  # or "custom"
+  use_balanced_sampler: false  # Keep false for patient stratification
+
+# Data Augmentation
+augmentation:
+  enabled: true
+  augment_prob: 0.4  # Increased augmentation
+  noise_scale: 0.015  # Reduced noise
+  time_shift_range: 3
+  amplitude_scale_range: [0.95, 1.05]
+  
+  # Advanced augmentation
+  use_mixup: false
+  mixup_alpha: 0.2
+
+# Validation Configuration - ENHANCED
+validation:
+  fast_mode: false  # Disable fast mode for better metrics
+  full_validation_every: 5  # More frequent full validation
+  skip_generation: true  # Skip generation during training for speed
+  ddim_steps: 25  # Reduced steps for faster validation
+  
+  # Enhanced metrics
+  compute_per_class_metrics: true
+  log_classification_report: true
+  log_confusion_matrix: true
+
+# Curriculum Learning - IMPROVED
+advanced:
+  curriculum:
+    enabled: true
+    ramp_epochs: 8  # Longer ramp for stability
+    class_start: 0  # Start classification immediately
+    peak_start: 3   # Start peak prediction early
+    threshold_start: 8
+    signal_start: 0
+
+# Memory Optimization
+memory:
+  use_memory_efficient_attention: true
+  clear_cache_every: 50  # More frequent cache clearing
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+
+# Logging and Monitoring - ENHANCED
+logging:
+  log_every: 5  # More frequent logging
+  save_every: 10
+  plot_every: 5
+  
+  # Enhanced monitoring
+  log_loss_components: true
+  log_classification_metrics: true
+  log_per_class_f1: true
+  log_loss_ratios: true
+  log_gradient_norms: true
+
+# Checkpointing
+checkpointing:
+  save_best_f1: true
+  save_best_loss: true
+  save_formats: ["pytorch"]  # Remove ONNX for now
+  milestone_epochs: [25, 50, 75]
+
+# Visualization
+visualization:
+  enabled: true
+  plot_dir: "plots/production"
+  create_loss_plots: true
+  create_metric_plots: true
+  create_confusion_matrix: true
+  plot_predictions: true
+
+# System Configuration
+system:
+  num_workers: 6
+  pin_memory: true
+  persistent_workers: true
+  benchmark: true
+  deterministic: false  # Allow for better performance
+  
+# Weights & Biases (optional)
+wandb:
+  enabled: false
+  project: "abr-production"
+  entity: null
+  tags: ["production", "improved-config"]
+
+# Output Configuration
+output:
+  base_dir: "outputs/production_improved"
+  experiment_name: "abr_production_improved"
+  create_subdirs: true 

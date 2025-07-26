@@ -107,6 +107,13 @@ class ABRDataset(Dataset):
         v_peak_mask = torch.BoolTensor(sample['v_peak_mask'])       # [2] - validity mask
         target = torch.LongTensor([sample['target']])[0]            # scalar
         
+        # Clinical threshold (if available)
+        if 'clinical_threshold' in sample:
+            clinical_threshold = torch.FloatTensor([sample['clinical_threshold']])[0]
+        else:
+            # Fallback to old method (but this should be avoided)
+            clinical_threshold = torch.FloatTensor([0.0])[0]  # Placeholder
+        
         # Data augmentation for training
         if self.augment and self.mode == 'train':
             signal = self._augment_signal(signal)
@@ -124,6 +131,7 @@ class ABRDataset(Dataset):
             'v_peak': v_peak,
             'v_peak_mask': v_peak_mask,
             'target': target,
+            'threshold': clinical_threshold,  # Add clinical threshold
             'force_uncond': force_uncond
         }
     
@@ -403,6 +411,7 @@ class ABRTrainer:
         """Train for one epoch."""
         self.model.train()
         epoch_metrics = defaultdict(float)
+        detailed_metrics = defaultdict(list)  # For detailed component tracking
         num_batches = 0
         
         # Apply curriculum learning weights
@@ -438,63 +447,84 @@ class ABRTrainer:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
-            
+                
             # Optimizer step only after accumulation_steps
             if (batch_idx + 1) % accumulation_steps == 0:
                 if self.config.get('use_amp', False):
-                    # Gradient clipping
+                # Gradient clipping
                     if self.config.get('gradient_clip_norm', 0) > 0:
                         self.scaler.unscale_(self.optimizer)
                         torch.nn.utils.clip_grad_norm_(
                             self.model.parameters(), 
                             self.config.get('gradient_clip_norm', 1.0)
                         )
-                    
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    # Gradient clipping
-                    if self.config.get('gradient_clip_norm', 0) > 0:
-                        torch.nn.utils.clip_grad_norm_(
-                            self.model.parameters(), 
-                            self.config.get('gradient_clip_norm', 1.0)
-                        )
-                    
-                    self.optimizer.step()
+                
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                # Gradient clipping
+                if self.config.get('gradient_clip_norm', 0) > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), 
+                        self.config.get('gradient_clip_norm', 1.0)
+                    )
+                
+                self.optimizer.step()
                 
                 # Zero gradients after optimizer step
                 self.optimizer.zero_grad()
             
-            # Update metrics
+            # Update metrics with detailed tracking
             for key, value in loss_dict.items():
                 epoch_metrics[key] += value.item()
+                detailed_metrics[key].append(value.item())
+            
             num_batches += 1
             
             # Memory optimization: clear cache periodically
             if batch_idx % self.clear_cache_every == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            # Update progress bar
+            # Enhanced progress bar with more loss details
             if batch_idx % self.config.get('log_every', 10) == 0:
                 current_lr = self.optimizer.param_groups[0]['lr']
+                # Show key loss components in progress bar
+                signal_loss = loss_dict.get('signal_loss', torch.tensor(0.0)).item()
+                class_loss = loss_dict.get('classification_loss', torch.tensor(0.0)).item()
+                peak_loss = loss_dict.get('peak_loss', torch.tensor(0.0)).item()
+                
                 progress_bar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'lr': f'{current_lr:.2e}',
-                    'signal_w': f'{curriculum_weights["signal"]:.2f}',
-                    'class_w': f'{curriculum_weights["classification"]:.2f}'
+                    'total': f'{loss.item():.3f}',
+                    'signal': f'{signal_loss:.3f}',
+                    'class': f'{class_loss:.3f}',
+                    'peak': f'{peak_loss:.3f}',
+                    'lr': f'{current_lr:.2e}'
                 })
         
-        # Average metrics
+        # Average metrics and compute additional statistics
+        final_metrics = {}
         for key in epoch_metrics:
-            epoch_metrics[key] /= num_batches
+            final_metrics[key] = epoch_metrics[key] / num_batches
+            # Add standard deviation for loss components
+            if key in detailed_metrics:
+                values = detailed_metrics[key]
+                final_metrics[f'{key}_std'] = np.std(values)
+                final_metrics[f'{key}_min'] = np.min(values)
+                final_metrics[f'{key}_max'] = np.max(values)
         
-        return dict(epoch_metrics)
+        return final_metrics
     
     def validate_epoch(self) -> Dict[str, float]:
-        """Validate for one epoch with optional DDIM sampling."""
+        """Validate for one epoch with detailed metrics and optional DDIM sampling."""
         self.model.eval()
         epoch_metrics = defaultdict(float)
+        detailed_metrics = defaultdict(list)
         num_batches = 0
+        
+        # Storage for computing classification metrics
+        all_predictions = []
+        all_targets = []
+        all_class_probs = []
         
         # Check if we should do fast validation
         validation_config = self.config.get('validation', {})
@@ -537,9 +567,20 @@ class ABRTrainer:
                 direct_outputs = self.model(batch['signal'], batch['static_params'])
                 direct_loss, direct_loss_dict = self.loss_fn(direct_outputs, batch)
                 
+                # Extract predictions and targets for metrics
+                if 'classification_logits' in direct_outputs:
+                    class_logits = direct_outputs['classification_logits']
+                    class_probs = F.softmax(class_logits, dim=-1)
+                    class_preds = torch.argmax(class_logits, dim=-1)
+                    
+                    all_predictions.extend(class_preds.cpu().numpy())
+                    all_targets.extend(batch['target'].cpu().numpy())
+                    all_class_probs.extend(class_probs.cpu().numpy())
+                
                 # Update metrics with direct outputs
                 for key, value in direct_loss_dict.items():
                     epoch_metrics[f'direct_{key}'] += value.item()
+                    detailed_metrics[f'direct_{key}'].append(value.item())
                 
                 # Conditionally do generation-based evaluation
                 if do_generation and ddim_sampler is not None:
@@ -552,25 +593,30 @@ class ABRTrainer:
                         num_steps=ddim_steps,  # Use configurable steps
                         progress=False
                     )
-                    
+                
                     # Get predictions from generated signals
                     outputs = self.model(generated_signals, batch['static_params'])
                     gen_loss, gen_loss_dict = self.loss_fn(outputs, batch)
-                    
+                
                     # Update metrics with generated outputs
                     for key, value in gen_loss_dict.items():
                         epoch_metrics[f'gen_{key}'] += value.item()
-                    
+                        detailed_metrics[f'gen_{key}'].append(value.item())
+                
                     # Update progress bar with both metrics
+                    signal_diff = torch.mean((generated_signals - batch["signal"])**2).item()
                     progress_bar.set_postfix({
-                        'gen_loss': f'{gen_loss.item():.4f}',
-                        'direct_loss': f'{direct_loss.item():.4f}',
-                        'signal_diff': f'{torch.mean((generated_signals - batch["signal"])**2).item():.4f}'
+                        'gen_total': f'{gen_loss.item():.3f}',
+                        'direct_total': f'{direct_loss.item():.3f}',
+                        'gen_class': f'{gen_loss_dict.get("classification_loss", torch.tensor(0.0)).item():.3f}',
+                        'signal_diff': f'{signal_diff:.4f}'
                     })
                 else:
                     # Update progress bar with only direct metrics
+                    direct_class_loss = direct_loss_dict.get('classification_loss', torch.tensor(0.0)).item()
                     progress_bar.set_postfix({
-                        'direct_loss': f'{direct_loss.item():.4f}',
+                        'direct_total': f'{direct_loss.item():.3f}',
+                        'direct_class': f'{direct_class_loss:.3f}',
                         'mode': 'fast'
                     })
                 
@@ -583,14 +629,67 @@ class ABRTrainer:
                 
                 num_batches += 1
         
-        # Average metrics
+        # Average metrics and add statistics
+        final_metrics = {}
         for key in epoch_metrics:
-            epoch_metrics[key] /= num_batches
+            final_metrics[key] = epoch_metrics[key] / num_batches
+            # Add standard deviation for loss components
+            if key in detailed_metrics:
+                values = detailed_metrics[key]
+                final_metrics[f'{key}_std'] = np.std(values)
+        
+        # Compute classification metrics if we have predictions
+        if all_predictions and all_targets:
+            from sklearn.metrics import f1_score, balanced_accuracy_score, classification_report
+            
+            all_predictions = np.array(all_predictions)
+            all_targets = np.array(all_targets)
+            
+            # Define all possible labels to ensure consistency
+            all_labels = list(range(self.config.get('num_classes', 5)))
+            
+            # Compute F1 scores with explicit labels
+            f1_macro = f1_score(all_targets, all_predictions, average='macro', labels=all_labels, zero_division=0)
+            f1_weighted = f1_score(all_targets, all_predictions, average='weighted', labels=all_labels, zero_division=0)
+            f1_micro = f1_score(all_targets, all_predictions, average='micro', labels=all_labels, zero_division=0)
+            
+            # Compute balanced accuracy
+            balanced_acc = balanced_accuracy_score(all_targets, all_predictions)
+            
+            # Compute per-class F1 scores with explicit labels
+            f1_per_class = f1_score(all_targets, all_predictions, average=None, labels=all_labels, zero_division=0)
+            
+            # Add to metrics
+            final_metrics['direct_f1_macro'] = f1_macro
+            final_metrics['direct_f1_weighted'] = f1_weighted
+            final_metrics['direct_f1_micro'] = f1_micro
+            final_metrics['direct_balanced_accuracy'] = balanced_acc
+            
+            # Add per-class metrics
+            for i, f1_class in enumerate(f1_per_class):
+                final_metrics[f'direct_f1_class_{i}'] = f1_class
+            
+            # Compute accuracy
+            accuracy = np.mean(all_predictions == all_targets)
+            final_metrics['direct_accuracy'] = accuracy
+            
+            # Log detailed classification report every few epochs
+            if self.epoch % 5 == 0:
+                if len(all_labels) > 1:
+                    report = classification_report(
+                        all_targets, all_predictions, 
+                        target_names=[f'Class_{i}' for i in all_labels],
+                        labels=all_labels,
+                        zero_division=0
+                    )
+                    self.logger.info(f"Classification Report (Epoch {self.epoch}):\n{report}")
+        else:
+            self.logger.warning("No predictions available for classification metrics computation")
         
         # Reset random seed
         torch.manual_seed(torch.initial_seed())
         
-        return dict(epoch_metrics)
+        return final_metrics
     
     def train(self):
         """Main training loop."""
@@ -668,7 +767,7 @@ class ABRTrainer:
             if self.patience_counter >= self.patience:
                 self.logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
-        
+            
         # Training completed - final saves and visualization
         self.logger.info("Training completed!")
         
@@ -697,18 +796,76 @@ class ABRTrainer:
             wandb.finish()
     
     def log_metrics(self, train_metrics: Dict, val_metrics: Dict, epoch_time: float):
-        """Log training metrics."""
-        # Console logging
+        """Log training metrics with detailed component breakdown."""
+        # Extract key metrics with fallbacks
         val_loss = val_metrics.get('gen_total_loss', val_metrics.get('direct_total_loss', 0.0))
         val_f1 = val_metrics.get('gen_f1_macro', val_metrics.get('direct_f1_macro', 0.0))
+        val_accuracy = val_metrics.get('direct_accuracy', 0.0)
         
+        # Enhanced console logging with loss components
+        train_total = train_metrics.get('total_loss', 0.0)
+        train_signal = train_metrics.get('signal_loss', 0.0)
+        train_class = train_metrics.get('classification_loss', 0.0)
+        train_peak = train_metrics.get('peak_loss', 0.0)
+        
+        val_signal = val_metrics.get('direct_signal_loss', 0.0)
+        val_class = val_metrics.get('direct_classification_loss', 0.0)
+        val_peak = val_metrics.get('direct_peak_loss', 0.0)
+        
+        # Main training summary
         self.logger.info(
             f"Epoch {self.epoch + 1:3d} | "
-            f"Train Loss: {train_metrics['total_loss']:.4f} | "
-            f"Val Loss: {val_loss:.4f} | "
-            f"Val F1: {val_f1:.4f} | "
+            f"Train: {train_total:.4f} | "
+            f"Val: {val_loss:.4f} | "
+            f"F1: {val_f1:.4f} | "
+            f"Acc: {val_accuracy:.4f} | "
             f"Time: {epoch_time:.1f}s"
         )
+        
+        # Detailed loss component breakdown
+        self.logger.info(
+            f"  └─ Loss Components - Train: Signal={train_signal:.4f}, Class={train_class:.4f}, Peak={train_peak:.4f}"
+        )
+        self.logger.info(
+            f"  └─ Loss Components - Val:   Signal={val_signal:.4f}, Class={val_class:.4f}, Peak={val_peak:.4f}"
+        )
+        
+        # Classification metrics breakdown (if available)
+        if val_metrics.get('direct_f1_weighted') is not None:
+            f1_weighted = val_metrics.get('direct_f1_weighted', 0.0)
+            balanced_acc = val_metrics.get('direct_balanced_accuracy', 0.0)
+            self.logger.info(
+                f"  └─ Classification: F1_macro={val_f1:.4f}, F1_weighted={f1_weighted:.4f}, Balanced_Acc={balanced_acc:.4f}"
+            )
+        
+        # Per-class F1 scores (if available)
+        per_class_f1 = []
+        for i in range(5):  # Assuming 5 classes
+            class_f1 = val_metrics.get(f'direct_f1_class_{i}')
+            if class_f1 is not None:
+                per_class_f1.append(f"C{i}={class_f1:.3f}")
+        
+        if per_class_f1:
+            self.logger.info(f"  └─ Per-class F1: {', '.join(per_class_f1)}")
+        
+        # Loss variance analysis (every 10 epochs)
+        if self.epoch % 10 == 0:
+            train_std_info = []
+            val_std_info = []
+            
+            for component in ['total_loss', 'signal_loss', 'classification_loss', 'peak_loss']:
+                train_std = train_metrics.get(f'{component}_std')
+                val_std = val_metrics.get(f'direct_{component}_std')
+                
+                if train_std is not None:
+                    train_std_info.append(f"{component.replace('_loss', '')}±{train_std:.3f}")
+                if val_std is not None:
+                    val_std_info.append(f"{component.replace('_loss', '')}±{val_std:.3f}")
+            
+            if train_std_info:
+                self.logger.info(f"  └─ Train Loss Std: {', '.join(train_std_info)}")
+            if val_std_info:
+                self.logger.info(f"  └─ Val Loss Std: {', '.join(val_std_info)}")
         
         # TensorBoard logging with enhanced diagnostics
         if self.writer:
@@ -717,16 +874,33 @@ class ABRTrainer:
                 for weight_name, weight_value in self.curriculum_weights.items():
                     self.writer.add_scalar(f'curriculum/{weight_name}', weight_value, self.epoch)
             
-            # Log training metrics
+            # Log all training metrics with organized hierarchy
             for key, value in train_metrics.items():
-                self.writer.add_scalar(f'train/{key}', value, self.epoch)
+                if not key.endswith('_std') and not key.endswith('_min') and not key.endswith('_max'):
+                    self.writer.add_scalar(f'train/{key}', value, self.epoch)
+                elif key.endswith('_std'):
+                    self.writer.add_scalar(f'train_variance/{key}', value, self.epoch)
             
-            # Log validation metrics
+            # Log all validation metrics with organized hierarchy
             for key, value in val_metrics.items():
-                self.writer.add_scalar(f'val/{key}', value, self.epoch)
+                if not key.endswith('_std') and not key.endswith('_min') and not key.endswith('_max'):
+                    self.writer.add_scalar(f'val/{key}', value, self.epoch)
+                elif key.endswith('_std'):
+                    self.writer.add_scalar(f'val_variance/{key}', value, self.epoch)
             
-            # Log learning rate
+            # Log learning rate and optimization metrics
             self.writer.add_scalar('optimizer/learning_rate', self.optimizer.param_groups[0]['lr'], self.epoch)
+            
+            # Log loss component ratios for analysis
+            if train_total > 0:
+                self.writer.add_scalar('ratios/train_signal_ratio', train_signal / train_total, self.epoch)
+                self.writer.add_scalar('ratios/train_class_ratio', train_class / train_total, self.epoch)
+                self.writer.add_scalar('ratios/train_peak_ratio', train_peak / train_total, self.epoch)
+            
+            if val_loss > 0:
+                self.writer.add_scalar('ratios/val_signal_ratio', val_signal / val_loss, self.epoch)
+                self.writer.add_scalar('ratios/val_class_ratio', val_class / val_loss, self.epoch)
+                self.writer.add_scalar('ratios/val_peak_ratio', val_peak / val_loss, self.epoch)
             
             # Enhanced diagnostic logging every few epochs
             if hasattr(self, 'evaluator') and self.epoch % 5 == 0:
@@ -735,19 +909,31 @@ class ABRTrainer:
                 except Exception as e:
                     self.logger.warning(f"Failed to log diagnostics to TensorBoard: {str(e)}")
         
-        # Weights & Biases logging
+        # Weights & Biases logging with comprehensive metrics
         if self.config.get('use_wandb', False) and WANDB_AVAILABLE:
             curriculum_dict = {f'curriculum_{k}': v for k, v in self.curriculum_weights.items()} if hasattr(self, 'curriculum_weights') else {}
             
+            # Organize metrics by category
             log_dict = {
                 'epoch': self.epoch,
-                'train_loss': train_metrics.get('total_loss', 0),
-                'val_loss': val_metrics.get('gen_total_loss', val_metrics.get('total_loss', 0)),
                 'learning_rate': self.optimizer.param_groups[0]['lr'],
-                **{f'train_{k}': v for k, v in train_metrics.items()},
-                **{f'val_{k}': v for k, v in val_metrics.items()},
+                'epoch_time': epoch_time,
                 **curriculum_dict
             }
+            
+            # Add training metrics
+            for key, value in train_metrics.items():
+                log_dict[f'train_{key}'] = value
+            
+            # Add validation metrics
+            for key, value in val_metrics.items():
+                log_dict[f'val_{key}'] = value
+            
+            # Add loss ratios
+            if train_total > 0:
+                log_dict['ratios_train_signal'] = train_signal / train_total
+                log_dict['ratios_train_class'] = train_class / train_total
+                log_dict['ratios_train_peak'] = train_peak / train_total
             
             # Add diagnostic visualizations to wandb
             if hasattr(self, 'evaluator') and self.epoch % 10 == 0:

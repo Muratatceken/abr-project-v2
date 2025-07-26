@@ -172,17 +172,19 @@ class ABREvaluator:
         y_true = np.array(self.targets['class'])
         y_pred = np.array(self.predictions['class'])
         
-        # Basic metrics
-        f1_macro = f1_score(y_true, y_pred, average='macro')
-        f1_weighted = f1_score(y_true, y_pred, average='weighted')
-        f1_per_class = f1_score(y_true, y_pred, average=None)
+        # Define all possible labels to ensure consistency
+        labels = list(range(len(self.class_names)))  # Use all possible class labels
+        
+        # Basic metrics with explicit labels
+        f1_macro = f1_score(y_true, y_pred, average='macro', labels=labels, zero_division=0)
+        f1_weighted = f1_score(y_true, y_pred, average='weighted', labels=labels, zero_division=0)
+        f1_per_class = f1_score(y_true, y_pred, average=None, labels=labels, zero_division=0)
         balanced_acc = balanced_accuracy_score(y_true, y_pred)
         
-        # Confusion matrix
-        cm = confusion_matrix(y_true, y_pred)
+        # Confusion matrix with explicit labels
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
         
         # Classification report
-        labels = list(range(len(self.class_names)))  # Use all possible class labels
         report = classification_report(
             y_true, y_pred,
             labels=labels,  # Specify all possible labels
@@ -212,7 +214,8 @@ class ABREvaluator:
         exists_true = np.array(self.targets['peak_exists'])
         exists_pred = np.array(self.predictions['peak_exists'])
         
-        exists_f1 = f1_score(exists_true, exists_pred)
+        # Binary f1_score with explicit labels
+        exists_f1 = f1_score(exists_true, exists_pred, labels=[0, 1], zero_division=0)
         exists_acc = (exists_pred == exists_true).mean()
         
         # Peak regression metrics (only for valid peaks)
@@ -422,10 +425,16 @@ class ABREvaluator:
         """
         y_true = np.array(self.targets['class'])
         y_pred = np.array(self.predictions['class'])
-        cm = confusion_matrix(y_true, y_pred)
         
-        # Normalize confusion matrix
-        cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        # Use explicit labels for consistency
+        labels = list(range(len(self.class_names)))
+        cm = confusion_matrix(y_true, y_pred, labels=labels)
+        
+        # Safe normalization of confusion matrix
+        row_sums = cm.sum(axis=1)
+        row_sums_safe = np.where(row_sums == 0, 1, row_sums)
+        cm_normalized = cm.astype('float') / row_sums_safe[:, np.newaxis]
+        cm_normalized = np.nan_to_num(cm_normalized)
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
@@ -907,7 +916,9 @@ class ABREvaluator:
             pred_classes = [torch.argmax(pred).item() for pred in self.predictions['class']]
             true_classes = [target.item() if hasattr(target, 'item') else target for target in self.targets['class']]
             
-            cm = confusion_matrix(true_classes, pred_classes)
+            # Use explicit labels for consistency
+            labels = list(range(len(self.class_names)))
+            cm = confusion_matrix(true_classes, pred_classes, labels=labels)
             
             plt.figure(figsize=(10, 8))
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 

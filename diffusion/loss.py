@@ -215,11 +215,11 @@ class ABRDiffusionLoss(nn.Module):
         true_threshold: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute threshold regression loss with log-scale option.
+        Compute threshold regression loss with clinical thresholds.
         
         Args:
             pred_threshold: [B, 1] or [B, 2] predicted threshold (μ, σ if uncertainty)
-            true_threshold: [B] true threshold values
+            true_threshold: [B] true clinical threshold values in dB HL
             
         Returns:
             Threshold loss tensor
@@ -235,16 +235,18 @@ class ABRDiffusionLoss(nn.Module):
             return nll.mean()
         
         else:
-            # Standard regression loss
+            # Standard regression loss for clinical thresholds
             pred_threshold = pred_threshold.squeeze(-1)
             
             if self.use_log_threshold:
                 # Log-scale loss for better threshold regression
+                # Both pred and true should be in [0, 120] dB HL range
                 return F.mse_loss(
                     torch.log1p(torch.clamp(pred_threshold, min=0)),
                     torch.log1p(torch.clamp(true_threshold, min=0))
                 )
             else:
+                # Standard MSE loss for clinical thresholds
                 return F.mse_loss(pred_threshold, true_threshold)
     
     def forward(

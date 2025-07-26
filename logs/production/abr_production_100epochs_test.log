@@ -155,3 +155,34 @@ OSError: 'seaborn-v0_8' not found in the style library and input is not a valid 
 2025-07-25 19:26:28,962 - training.enhanced_train - INFO - Starting training...
 2025-07-25 19:26:28,964 - training.enhanced_train - INFO - Model parameters: 46,371,139
 2025-07-25 19:26:28,967 - training.enhanced_train - INFO - Epoch 0 curriculum weights: {'signal': 1.0, 'peak_exist': 0.5, 'peak_latency': 1.0, 'peak_amplitude': 1.0, 'classification': 1.5, 'threshold': 0.8}
+2025-07-25 19:29:58,187 - ABR_Production_Training - INFO - Training interrupted by user
+2025-07-25 20:23:39,310 - ABR_Production_Training - INFO - Starting production training: abr_production_100epochs_test
+2025-07-25 20:23:39,311 - ABR_Production_Training - INFO - Log file: logs/production/abr_production_100epochs_test.log
+2025-07-25 20:23:39,311 - ABR_Production_Training - INFO - Starting production training...
+2025-07-25 20:23:46,442 - root - INFO - Loaded 51961 samples from data/processed/ultimate_dataset.pkl
+2025-07-25 20:23:46,442 - root - INFO - Data validation passed
+2025-07-25 20:23:46,636 - root - INFO - Found 2038 unique patients
+2025-07-25 20:23:46,636 - root - INFO - Patient-level target distribution: {0: 1643, 2: 180, 4: 92, 3: 104, 1: 19}
+2025-07-25 20:23:46,636 - root - INFO - ABRDataset initialized with 51961 samples from 51961 patients
+2025-07-25 20:23:46,636 - root - INFO - Signal shape: (200,)
+2025-07-25 20:23:46,637 - root - INFO - Static params shape: (4,)
+2025-07-25 20:23:46,645 - root - INFO - Target distribution: {0: 41391, 3: 1715, 2: 5513, 4: 2925, 1: 417}
+2025-07-25 20:23:47,440 - root - INFO - Train: 36507 samples, 1426 patients
+2025-07-25 20:23:47,446 - root - INFO -   Class distribution: {0: 29096, 3: 1218, 2: 3847, 4: 2019, 1: 327}
+2025-07-25 20:23:47,449 - root - INFO - Validation: 7685 samples, 306 patients
+2025-07-25 20:23:47,449 - root - INFO -   Class distribution: {0: 6050, 2: 863, 3: 244, 4: 477, 1: 51}
+2025-07-25 20:23:47,453 - root - INFO - Test: 7769 samples, 306 patients
+2025-07-25 20:23:47,454 - root - INFO -   Class distribution: {2: 803, 0: 6245, 3: 253, 4: 429, 1: 39}
+2025-07-25 20:23:47,462 - root - INFO - ✅ Patient-stratified split completed successfully - no patient overlap
+2025-07-25 20:23:47,463 - root - INFO - ============================================================
+2025-07-25 20:23:47,463 - root - INFO - DATASET LOADING COMPLETE
+2025-07-25 20:23:47,463 - root - INFO - ============================================================
+2025-07-25 20:23:47,463 - root - INFO - Total samples: 51961
+2025-07-25 20:23:47,463 - root - INFO - Unique patients: 2038
+2025-07-25 20:23:47,463 - root - INFO - Training samples: 36507
+2025-07-25 20:23:47,463 - root - INFO - Validation samples: 7685
+2025-07-25 20:23:47,463 - root - INFO - Test samples: 7769
+2025-07-25 20:23:52,762 - training.enhanced_train - INFO - Visualization enabled: plots will be saved to plots/production
+2025-07-25 20:23:52,763 - training.enhanced_train - INFO - Starting training...
+2025-07-25 20:23:52,765 - training.enhanced_train - INFO - Model parameters: 46,371,139
+2025-07-25 20:23:52,768 - training.enhanced_train - INFO - Epoch 0 curriculum weights: {'signal': 1.0, 'peak_exist': 0.5, 'peak_latency': 1.0, 'peak_amplitude': 1.0, 'classification': 1.5, 'threshold': 0.8}
