@@ -130,10 +130,10 @@ hardware:
 
 # Validation Configuration
 validation:
-  fast_mode: false
-  full_validation_every: 5
-  ddim_steps: 50
-  skip_generation: false
+  fast_mode: true  # Skip generation during regular validation
+  full_validation_every: 10  # Do full validation less frequently
+  ddim_steps: 20  # Reduce DDIM steps when generation is needed
+  skip_generation: true  # Skip generation for speed
   use_cv: false
   cv_folds: 5
   cv_strategy: "StratifiedGroupKFold"

@@ -25,11 +25,13 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import joblib
 import argparse
+import math
 import os
 import json
 import time
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from collections import defaultdict
 from sklearn.model_selection import train_test_split
@@ -226,9 +228,11 @@ class ABRTrainer:
         self.val_losses = []
         self.val_f1_scores = []
         
-        # Early stopping
-        self.patience = config.get('patience', 15)
-        self.patience_counter = 0
+        # Enhanced early stopping
+        self.setup_early_stopping()
+        
+        # Model checkpointing
+        self.setup_checkpointing()
         
         # CFG wrapper
         if hasattr(model, 'cfg_wrapper') and model.cfg_wrapper is not None:
@@ -298,13 +302,27 @@ class ABRTrainer:
         scheduler_config = self.config.get('scheduler', {})
         scheduler_type = scheduler_config.get('type', 'cosine_warm_restarts')
         
-        if scheduler_type == 'cosine_warm_restarts' or scheduler_type == 'cosine_annealing_warm_restarts':
+        if scheduler_type == 'cosine_warm_restarts' or scheduler_type == 'cosine_annealing_warm_restarts' or scheduler_type == 'cosine_with_restarts':
             self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 self.optimizer,
                 T_0=int(scheduler_config.get('T_0', 10)),
                 T_mult=int(scheduler_config.get('T_mult', 2)),
                 eta_min=float(scheduler_config.get('eta_min', 1e-6))
             )
+        elif scheduler_type == 'cosine_with_warmup':
+            # Custom implementation for cosine with warmup
+            from torch.optim.lr_scheduler import LambdaLR
+            warmup_steps = scheduler_config.get('warmup_steps', 1000)
+            total_steps = self.config.get('training', {}).get('num_epochs', 100) * 1000  # Approximate
+            
+            def lr_lambda(step):
+                if step < warmup_steps:
+                    return step / warmup_steps
+                else:
+                    progress = (step - warmup_steps) / (total_steps - warmup_steps)
+                    return 0.5 * (1 + math.cos(math.pi * progress))
+            
+            self.scheduler = LambdaLR(self.optimizer, lr_lambda)
         elif scheduler_type == 'reduce_on_plateau':
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 self.optimizer,
@@ -322,6 +340,67 @@ class ABRTrainer:
             )
         else:
             self.scheduler = None
+    
+    def setup_early_stopping(self):
+        """Setup early stopping configuration."""
+        early_stopping_config = self.config.get('early_stopping', {})
+        
+        self.early_stopping_enabled = early_stopping_config.get('enabled', False)
+        self.patience = early_stopping_config.get('patience', self.config.get('patience', 15))
+        self.min_delta = early_stopping_config.get('min_delta', 1e-5)
+        self.monitor = early_stopping_config.get('monitor', 'val_loss')
+        self.mode = early_stopping_config.get('mode', 'min')
+        self.restore_best_weights = early_stopping_config.get('restore_best_weights', True)
+        
+        # Initialize early stopping state
+        self.patience_counter = 0
+        self.best_score = float('inf') if self.mode == 'min' else -float('inf')
+        self.best_model_state = None
+        
+        # Secondary monitors for multi-metric early stopping
+        self.secondary_monitors = early_stopping_config.get('secondary_monitors', [])
+        
+        if self.early_stopping_enabled:
+            print(f"✓ Early stopping enabled: monitor={self.monitor}, patience={self.patience}, mode={self.mode}")
+    
+    def setup_checkpointing(self):
+        """Setup model checkpointing configuration."""
+        checkpoint_config = self.config.get('checkpointing', {})
+        
+        self.save_best = checkpoint_config.get('save_best', True)
+        self.save_last = checkpoint_config.get('save_last', True)
+        self.save_top_k = checkpoint_config.get('save_top_k', 1)
+        self.checkpoint_monitor = checkpoint_config.get('monitor', 'val_loss')
+        self.checkpoint_mode = checkpoint_config.get('mode', 'min')
+        
+        # Checkpoint strategies
+        self.checkpoint_strategies = checkpoint_config.get('checkpoint_strategies', [])
+        
+        # Initialize checkpoint tracking
+        self.best_checkpoints = {}
+        self.checkpoint_scores = []
+        
+        # Create checkpoint directory
+        self.checkpoint_dir = Path("checkpoints") / self.config.get('experiment', {}).get('name', 'default')
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        print(f"✓ Checkpointing enabled: directory={self.checkpoint_dir}")
+        
+        # Default checkpoint strategies if none specified
+        if not self.checkpoint_strategies:
+            self.checkpoint_strategies = [
+                {
+                    'name': 'best_loss',
+                    'monitor': 'val_loss',
+                    'mode': 'min',
+                    'save_path': self.checkpoint_dir / 'best_loss.pth'
+                },
+                {
+                    'name': 'latest',
+                    'save_every': 10,
+                    'save_path': self.checkpoint_dir / 'latest_epoch_{epoch}.pth'
+                }
+            ]
     
     def setup_memory_optimization(self):
         """Setup memory optimization features."""
@@ -783,13 +862,13 @@ class ABRTrainer:
                     except Exception as e:
                         self.logger.warning(f"Failed to create visualization plots: {str(e)}")
             
-            # Save best model
+            # Check early stopping and save checkpoints
+            should_stop = self.check_early_stopping(val_metrics)
+            self.save_checkpoints(val_metrics)
+            
+            # Legacy best model saving (keeping for compatibility)
             if val_f1 > self.best_val_f1:
                 self.best_val_f1 = val_f1
-                self.save_checkpoint('best_f1.pth', val_metrics)
-                self.patience_counter = 0
-            else:
-                self.patience_counter += 1
             
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
@@ -809,7 +888,7 @@ class ABRTrainer:
                 self.save_checkpoint(regular_filename, val_metrics)
             
             # Early stopping
-            if self.patience_counter >= self.patience:
+            if should_stop:
                 self.logger.info(f"Early stopping at epoch {epoch + 1}")
                 break
             
@@ -1158,6 +1237,161 @@ class ABRTrainer:
         }
         
         return curriculum_weights
+    
+    def check_early_stopping(self, val_metrics: Dict[str, float]) -> bool:
+        """Check if training should stop early based on validation metrics."""
+        if not self.early_stopping_enabled:
+            return False
+        
+        # Get current score for primary monitor
+        current_score = val_metrics.get(self.monitor, 0.0)
+        
+        # Check if this is an improvement
+        is_improvement = False
+        if self.mode == 'min':
+            if current_score < self.best_score - self.min_delta:
+                is_improvement = True
+                self.best_score = current_score
+        else:  # mode == 'max'
+            if current_score > self.best_score + self.min_delta:
+                is_improvement = True
+                self.best_score = current_score
+        
+        if is_improvement:
+            self.patience_counter = 0
+            if self.restore_best_weights:
+                self.best_model_state = self.model.state_dict().copy()
+            self.logger.info(f"New best {self.monitor}: {current_score:.6f}")
+        else:
+            self.patience_counter += 1
+            self.logger.info(f"No improvement for {self.patience_counter}/{self.patience} epochs")
+        
+        # Check secondary monitors for additional stopping criteria
+        if self.secondary_monitors:
+            secondary_signals = []
+            for monitor_config in self.secondary_monitors:
+                metric = monitor_config.get('metric')
+                mode = monitor_config.get('mode', 'min')
+                weight = monitor_config.get('weight', 1.0)
+                
+                if metric in val_metrics:
+                    score = val_metrics[metric]
+                    # Normalize to 0-1 range based on mode for comparison
+                    if mode == 'min':
+                        signal = 1.0 / (1.0 + score)  # Higher is better when minimizing
+                    else:
+                        signal = score  # Higher is better when maximizing
+                    secondary_signals.append(signal * weight)
+            
+            if secondary_signals:
+                avg_secondary_signal = sum(secondary_signals) / len(secondary_signals)
+                self.logger.debug(f"Secondary signals average: {avg_secondary_signal:.4f}")
+        
+        # Decide whether to stop
+        should_stop = self.patience_counter >= self.patience
+        
+        if should_stop:
+            self.logger.info(f"Early stopping triggered after {self.patience} epochs without improvement")
+            if self.restore_best_weights and self.best_model_state is not None:
+                self.model.load_state_dict(self.best_model_state)
+                self.logger.info("Restored best model weights")
+        
+        return should_stop
+    
+    def save_checkpoints(self, val_metrics: Dict[str, float]) -> None:
+        """Save model checkpoints based on configured strategies."""
+        for strategy in self.checkpoint_strategies:
+            strategy_name = strategy.get('name', 'unnamed')
+            
+            # Handle different checkpoint strategies
+            if 'monitor' in strategy:
+                # Monitor-based checkpoint
+                monitor = strategy['monitor']
+                mode = strategy.get('mode', 'min')
+                save_path = strategy.get('save_path', f'{strategy_name}.pth')
+                
+                if monitor in val_metrics:
+                    current_score = val_metrics[monitor]
+                    
+                    # Check if this is the best score for this strategy
+                    if strategy_name not in self.best_checkpoints:
+                        self.best_checkpoints[strategy_name] = {
+                            'score': float('inf') if mode == 'min' else -float('inf'),
+                            'epoch': -1
+                        }
+                    
+                    best_info = self.best_checkpoints[strategy_name]
+                    is_best = False
+                    
+                    if mode == 'min':
+                        is_best = current_score < best_info['score']
+                    else:  # mode == 'max'
+                        is_best = current_score > best_info['score']
+                    
+                    if is_best:
+                        best_info['score'] = current_score
+                        best_info['epoch'] = self.epoch
+                        
+                        # Create directory if needed
+                        save_dir = os.path.dirname(save_path) if os.path.dirname(save_path) else str(self.checkpoint_dir)
+                        os.makedirs(save_dir, exist_ok=True)
+                        
+                        # Save checkpoint
+                        filename = os.path.basename(save_path)
+                        self.save_checkpoint(filename, val_metrics)
+                        
+                        self.logger.info(f"Saved {strategy_name} checkpoint: {monitor}={current_score:.6f}")
+            
+            elif 'save_every' in strategy:
+                # Periodic checkpoint
+                save_every = strategy['save_every']
+                save_path_template = strategy.get('save_path', f'{strategy_name}_epoch_{{epoch}}.pth')
+                
+                if (self.epoch + 1) % save_every == 0:
+                    save_path = save_path_template.format(epoch=self.epoch + 1)
+                    save_dir = os.path.dirname(save_path) if os.path.dirname(save_path) else str(self.checkpoint_dir)
+                    os.makedirs(save_dir, exist_ok=True)
+                    
+                    filename = os.path.basename(save_path)
+                    self.save_checkpoint(filename, val_metrics)
+                    
+                    self.logger.info(f"Saved periodic checkpoint: {filename}")
+        
+        # Maintain only top-k checkpoints if specified
+        if self.save_top_k > 0:
+            self.maintain_top_k_checkpoints(val_metrics)
+    
+    def maintain_top_k_checkpoints(self, val_metrics: Dict[str, float]) -> None:
+        """Maintain only the top-k best checkpoints to save disk space."""
+        monitor_score = val_metrics.get(self.checkpoint_monitor, 0.0)
+        
+        # Add current checkpoint to tracking
+        self.checkpoint_scores.append({
+            'epoch': self.epoch,
+            'score': monitor_score,
+            'filename': f'epoch_{self.epoch + 1}.pth'
+        })
+        
+        # Sort checkpoints by score
+        if self.checkpoint_mode == 'min':
+            self.checkpoint_scores.sort(key=lambda x: x['score'])
+        else:
+            self.checkpoint_scores.sort(key=lambda x: x['score'], reverse=True)
+        
+        # Remove checkpoints beyond top-k
+        if len(self.checkpoint_scores) > self.save_top_k:
+            checkpoints_to_remove = self.checkpoint_scores[self.save_top_k:]
+            self.checkpoint_scores = self.checkpoint_scores[:self.save_top_k]
+            
+            # Delete files
+            for checkpoint in checkpoints_to_remove:
+                filepath = self.checkpoint_dir / checkpoint['filename']
+                if filepath.exists():
+                    try:
+                        filepath.unlink()
+                        self.logger.debug(f"Removed old checkpoint: {checkpoint['filename']}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to remove checkpoint {checkpoint['filename']}: {e}")
 
 
 def load_dataset(data_path: str, valid_peaks_only: bool = False) -> Tuple[List[Dict], Any, Any]:
