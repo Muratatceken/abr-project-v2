@@ -1246,6 +1246,17 @@ class ABRTrainer:
         # Get current score for primary monitor
         current_score = val_metrics.get(self.monitor, 0.0)
         
+        # Ensure current_score is a number, not a string
+        if isinstance(current_score, str):
+            try:
+                current_score = float(current_score)
+            except (ValueError, TypeError):
+                self.logger.warning(f"Could not convert monitor value '{current_score}' to float, using 0.0")
+                current_score = 0.0
+        elif not isinstance(current_score, (int, float)):
+            self.logger.warning(f"Monitor value has unexpected type {type(current_score)}, using 0.0")
+            current_score = 0.0
+        
         # Check if this is an improvement
         is_improvement = False
         if self.mode == 'min':
@@ -1313,6 +1324,17 @@ class ABRTrainer:
                 if monitor in val_metrics:
                     current_score = val_metrics[monitor]
                     
+                    # Ensure current_score is a number
+                    if isinstance(current_score, str):
+                        try:
+                            current_score = float(current_score)
+                        except (ValueError, TypeError):
+                            self.logger.warning(f"Could not convert {monitor} value '{current_score}' to float, skipping checkpoint")
+                            continue
+                    elif not isinstance(current_score, (int, float)):
+                        self.logger.warning(f"{monitor} value has unexpected type {type(current_score)}, skipping checkpoint")
+                        continue
+                    
                     # Check if this is the best score for this strategy
                     if strategy_name not in self.best_checkpoints:
                         self.best_checkpoints[strategy_name] = {
@@ -1364,6 +1386,17 @@ class ABRTrainer:
     def maintain_top_k_checkpoints(self, val_metrics: Dict[str, float]) -> None:
         """Maintain only the top-k best checkpoints to save disk space."""
         monitor_score = val_metrics.get(self.checkpoint_monitor, 0.0)
+        
+        # Ensure monitor_score is a number
+        if isinstance(monitor_score, str):
+            try:
+                monitor_score = float(monitor_score)
+            except (ValueError, TypeError):
+                self.logger.warning(f"Could not convert checkpoint monitor value '{monitor_score}' to float, using 0.0")
+                monitor_score = 0.0
+        elif not isinstance(monitor_score, (int, float)):
+            self.logger.warning(f"Checkpoint monitor value has unexpected type {type(monitor_score)}, using 0.0")
+            monitor_score = 0.0
         
         # Add current checkpoint to tracking
         self.checkpoint_scores.append({
