@@ -346,10 +346,10 @@ class ABRTrainer:
         early_stopping_config = self.config.get('early_stopping', {})
         
         self.early_stopping_enabled = early_stopping_config.get('enabled', False)
-        self.patience = early_stopping_config.get('patience', self.config.get('patience', 15))
-        self.min_delta = early_stopping_config.get('min_delta', 1e-5)
-        self.monitor = early_stopping_config.get('monitor', 'val_loss')
-        self.mode = early_stopping_config.get('mode', 'min')
+        self.patience = int(early_stopping_config.get('patience', self.config.get('patience', 15)))
+        self.min_delta = float(early_stopping_config.get('min_delta', 1e-5))
+        self.monitor = str(early_stopping_config.get('monitor', 'val_loss'))
+        self.mode = str(early_stopping_config.get('mode', 'min'))
         self.restore_best_weights = early_stopping_config.get('restore_best_weights', True)
         
         # Initialize early stopping state
@@ -1257,16 +1257,50 @@ class ABRTrainer:
             self.logger.warning(f"Monitor value has unexpected type {type(current_score)}, using 0.0")
             current_score = 0.0
         
+        # Debug logging to identify type issues
+        self.logger.debug(f"Early stopping check: current_score={current_score} (type: {type(current_score)}), "
+                         f"best_score={self.best_score} (type: {type(self.best_score)}), "
+                         f"min_delta={self.min_delta} (type: {type(self.min_delta)})")
+        
         # Check if this is an improvement
         is_improvement = False
         if self.mode == 'min':
-            if current_score < self.best_score - self.min_delta:
-                is_improvement = True
-                self.best_score = current_score
+            try:
+                if current_score < self.best_score - self.min_delta:
+                    is_improvement = True
+                    self.best_score = current_score
+            except TypeError as e:
+                self.logger.error(f"Type error in early stopping comparison: {e}")
+                self.logger.error(f"Types: current_score={type(current_score)}, best_score={type(self.best_score)}, min_delta={type(self.min_delta)}")
+                # Force conversion and continue
+                try:
+                    current_score = float(current_score)
+                    self.best_score = float(self.best_score) if isinstance(self.best_score, str) else self.best_score
+                    self.min_delta = float(self.min_delta) if isinstance(self.min_delta, str) else self.min_delta
+                    if current_score < self.best_score - self.min_delta:
+                        is_improvement = True
+                        self.best_score = current_score
+                except Exception as e2:
+                    self.logger.error(f"Failed to convert types for early stopping: {e2}")
+                    return False  # Don't stop if we can't compare
         else:  # mode == 'max'
-            if current_score > self.best_score + self.min_delta:
-                is_improvement = True
-                self.best_score = current_score
+            try:
+                if current_score > self.best_score + self.min_delta:
+                    is_improvement = True
+                    self.best_score = current_score
+            except TypeError as e:
+                self.logger.error(f"Type error in early stopping comparison (max mode): {e}")
+                # Force conversion and continue
+                try:
+                    current_score = float(current_score)
+                    self.best_score = float(self.best_score) if isinstance(self.best_score, str) else self.best_score
+                    self.min_delta = float(self.min_delta) if isinstance(self.min_delta, str) else self.min_delta
+                    if current_score > self.best_score + self.min_delta:
+                        is_improvement = True
+                        self.best_score = current_score
+                except Exception as e2:
+                    self.logger.error(f"Failed to convert types for early stopping: {e2}")
+                    return False  # Don't stop if we can't compare
         
         if is_improvement:
             self.patience_counter = 0
