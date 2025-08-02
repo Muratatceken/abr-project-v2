@@ -628,8 +628,22 @@ class ABRTrainer:
                 
                     # Update metrics with generated outputs
                     for key, value in gen_loss_dict.items():
-                        epoch_metrics[f'gen_{key}'] += value.item()
-                        detailed_metrics[f'gen_{key}'].append(value.item())
+                        if isinstance(value, dict):
+                            # Handle nested dictionaries (e.g., static parameter losses)
+                            for sub_key, sub_value in value.items():
+                                full_key = f"gen_{key}_{sub_key}"
+                                if full_key not in epoch_metrics:
+                                    epoch_metrics[full_key] = 0.0
+                                    detailed_metrics[full_key] = []
+                                if hasattr(sub_value, 'item'):
+                                    epoch_metrics[full_key] += sub_value.item()
+                                    detailed_metrics[full_key].append(sub_value.item())
+                        elif hasattr(value, 'item'):
+                            epoch_metrics[f'gen_{key}'] += value.item()
+                            detailed_metrics[f'gen_{key}'].append(value.item())
+                        else:
+                            # Skip non-tensor values
+                            continue
                 
                     # Update progress bar with both metrics
                     signal_diff = torch.mean((generated_signals - batch["signal"])**2).item()
