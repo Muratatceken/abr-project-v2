@@ -61,17 +61,17 @@ model:
   use_attention_skip_connections: true
   channel_multiplier: 2.0
 
-# Training Configuration (Production Optimized)
+# Training Configuration (Speed Optimized)
 training:
-  batch_size: 16  # Increased for better gradient estimates
-  num_epochs: 150  # Extended for thorough training
-  learning_rate: 0.0002  # Conservative for stable training
+  batch_size: 24  # Optimized balance of speed vs memory
+  num_epochs: 100  # Reduced for practical training time
+  learning_rate: 0.0003  # Slightly higher for faster convergence
   weight_decay: 1e-4
   use_amp: true  # Enable for efficiency (our FFT fix handles this)
-  patience: 25  # Generous patience for production
+  patience: 20  # Reduced patience for faster decisions
   gradient_clip_norm: 1.0
-  gradient_accumulation_steps: 2  # Effective batch size of 32
-  num_workers: 4
+  gradient_accumulation_steps: 1  # Direct batch processing
+  num_workers: 6  # More workers for faster data loading
   
   # Advanced training settings
   warmup_epochs: 10
@@ -135,12 +135,12 @@ hardware:
   benchmark: true
   deterministic: false
 
-# Validation Configuration (Balanced)
+# Validation Configuration (Optimized for Production)
 validation:
-  fast_mode: false  # Full validation for production
-  full_validation_every: 5  # Full evaluation every 5 epochs
-  ddim_steps: 30  # Balanced quality vs speed
-  skip_generation: false  # Include generation evaluation
+  fast_mode: true  # Speed up regular validation
+  full_validation_every: 10  # Full evaluation every 10 epochs only
+  ddim_steps: 20  # Reduced for speed while maintaining quality
+  skip_generation: true  # Skip generation for regular validation
   use_cv: false
   cv_folds: 5
   cv_strategy: "StratifiedGroupKFold"
