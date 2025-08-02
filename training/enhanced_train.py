@@ -593,8 +593,22 @@ class ABRTrainer:
                 
                 # Update metrics with direct outputs
                 for key, value in direct_loss_dict.items():
-                    epoch_metrics[f'direct_{key}'] += value.item()
-                    detailed_metrics[f'direct_{key}'].append(value.item())
+                    if isinstance(value, dict):
+                        # Handle nested dictionaries (e.g., static parameter losses)
+                        for sub_key, sub_value in value.items():
+                            full_key = f"direct_{key}_{sub_key}"
+                            if full_key not in epoch_metrics:
+                                epoch_metrics[full_key] = 0.0
+                                detailed_metrics[full_key] = []
+                            if hasattr(sub_value, 'item'):
+                                epoch_metrics[full_key] += sub_value.item()
+                                detailed_metrics[full_key].append(sub_value.item())
+                    elif hasattr(value, 'item'):
+                        epoch_metrics[f'direct_{key}'] += value.item()
+                        detailed_metrics[f'direct_{key}'].append(value.item())
+                    else:
+                        # Skip non-tensor values
+                        continue
                 
                 # Conditionally do generation-based evaluation
                 if do_generation and ddim_sampler is not None:
@@ -650,7 +664,10 @@ class ABRTrainer:
             # Add standard deviation for loss components
             if key in detailed_metrics:
                 values = detailed_metrics[key]
-                final_metrics[f'{key}_std'] = np.std(values)
+                if len(values) > 0:  # Only compute stats for non-empty arrays
+                    final_metrics[f'{key}_std'] = np.std(values)
+                else:
+                    final_metrics[f'{key}_std'] = 0.0
         
         # Compute classification metrics if we have predictions
         if all_predictions and all_targets:
