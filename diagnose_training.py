@@ -234,6 +234,12 @@ def generate_recommendations(loss_analysis: Dict, gradient_analysis: Dict,
     
     # Check configuration
     current_lr = config.get('training', {}).get('learning_rate', 1e-4)
+    if isinstance(current_lr, str):
+        try:
+            current_lr = float(current_lr)
+        except ValueError:
+            current_lr = 1e-4
+    
     if current_lr < 1e-4:
         recommendations.append(f"⚠️  Learning rate might be too low ({current_lr:.1e}). Consider increasing to 2-3e-4.")
     
