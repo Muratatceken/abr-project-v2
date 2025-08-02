@@ -209,7 +209,7 @@ class ABRTrainer:
         self.setup_optimizer()
         
         # Setup mixed precision training
-        self.use_amp = config.get('use_amp', True)
+        self.use_amp = config.get('training', {}).get('use_amp', True) and self.device.type == 'cuda'
         self.scaler = GradScaler() if self.use_amp else None
         
         # Setup memory optimization

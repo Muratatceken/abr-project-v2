@@ -902,7 +902,12 @@ class EnhancedS4Layer(nn.Module):
         x_padded = nn.functional.pad(x, (0, L))  # [B, F, 2L]
         k_padded = nn.functional.pad(k, (0, L))  # [F, 2L]
         
-        # FFT convolution
+        # FFT convolution - force float32 for non-power-of-2 sizes
+        original_dtype = x_padded.dtype
+        if original_dtype == torch.float16 and (L & (L - 1)) != 0:  # Not power of 2
+            x_padded = x_padded.to(torch.float32)
+            k_padded = k_padded.to(torch.float32)
+        
         x_fft = torch.fft.rfft(x_padded, dim=-1)  # [B, F, L+1]
         k_fft = torch.fft.rfft(k_padded, dim=-1)  # [F, L+1]
         
@@ -911,6 +916,10 @@ class EnhancedS4Layer(nn.Module):
         
         # IFFT and take first L samples
         y = torch.fft.irfft(y_fft, dim=-1)[..., :L]  # [B, F, L]
+        
+        # Convert back to original dtype if needed
+        if original_dtype == torch.float16 and (L & (L - 1)) != 0:
+            y = y.to(original_dtype)
         
         return y
 
