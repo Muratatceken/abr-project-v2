@@ -10,7 +10,7 @@ Usage:
     python run_training.py --model_type professional         # Force professional model
     python run_training.py --epochs 100 --batch_size 16      # Override config parameters
 
-Author: AI Assistant  
+Author: AI Assistant
 Date: January 2025
 """
 
@@ -166,7 +166,7 @@ def main():
         if not os.path.exists(data_path):
             print(f'❌ Dataset not found: {data_path}')
             return 1
-        
+    
         # Create data loaders
         if args.verbose:
             print('\n📊 Loading dataset...')
@@ -208,9 +208,9 @@ def main():
         
         if hasattr(trainer, 'best_model_path'):
             print(f'\n💾 Best model saved to: {trainer.best_model_path}')
-        
+            
         return 0
-        
+
     except KeyboardInterrupt:
         print('\n⚠️  Training interrupted by user')
         return 1
