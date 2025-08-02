@@ -516,9 +516,15 @@ class ABRTrainer:
             # Add standard deviation for loss components
             if key in detailed_metrics:
                 values = detailed_metrics[key]
-                final_metrics[f'{key}_std'] = np.std(values)
-                final_metrics[f'{key}_min'] = np.min(values)
-                final_metrics[f'{key}_max'] = np.max(values)
+                if len(values) > 0:  # Only compute stats for non-empty arrays
+                    final_metrics[f'{key}_std'] = np.std(values)
+                    final_metrics[f'{key}_min'] = np.min(values)
+                    final_metrics[f'{key}_max'] = np.max(values)
+                else:
+                    # For empty arrays, set stats to 0 or nan
+                    final_metrics[f'{key}_std'] = 0.0
+                    final_metrics[f'{key}_min'] = 0.0
+                    final_metrics[f'{key}_max'] = 0.0
         
         return final_metrics
     
