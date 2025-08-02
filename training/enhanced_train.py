@@ -45,6 +45,7 @@ try:
 except ImportError:
     WANDB_AVAILABLE = False
 
+# Optional visualization import
 try:
     from .visualization import TrainingVisualizer
     VISUALIZATION_AVAILABLE = True
@@ -53,6 +54,7 @@ except ImportError:
         from training.visualization import TrainingVisualizer
         VISUALIZATION_AVAILABLE = True
     except ImportError:
+        TrainingVisualizer = None
         VISUALIZATION_AVAILABLE = False
 
 # Import model and components
@@ -62,6 +64,7 @@ from diffusion.loss import ABRDiffusionLoss, create_class_weights
 from training.evaluation import ABREvaluator
 
 
+# Note: ABRDataset is kept for compatibility but we should use data.dataset.create_optimized_dataloaders
 class ABRDataset(Dataset):
     """
     Enhanced ABR Dataset with proper collation and masking support.
@@ -661,14 +664,24 @@ class ABRTrainer:
                 direct_loss, direct_loss_dict = self.loss_fn(direct_outputs, batch)
                 
                 # Extract predictions and targets for metrics
-                if 'classification_logits' in direct_outputs:
-                    class_logits = direct_outputs['classification_logits']
+                # Check multiple possible keys for classification outputs
+                class_logits = None
+                for possible_key in ['class', 'classification_logits', 'classification', 'class_logits', 'logits']:
+                    if possible_key in direct_outputs:
+                        class_logits = direct_outputs[possible_key]
+                        break
+                
+                if class_logits is not None:
                     class_probs = F.softmax(class_logits, dim=-1)
                     class_preds = torch.argmax(class_logits, dim=-1)
                     
                     all_predictions.extend(class_preds.cpu().numpy())
                     all_targets.extend(batch['target'].cpu().numpy())
                     all_class_probs.extend(class_probs.cpu().numpy())
+                else:
+                    # Debug: log available keys
+                    if batch_idx == 0:  # Only log once per epoch
+                        self.logger.debug(f"Available model output keys: {list(direct_outputs.keys())}")
                 
                 # Update metrics with direct outputs
                 for key, value in direct_loss_dict.items():
