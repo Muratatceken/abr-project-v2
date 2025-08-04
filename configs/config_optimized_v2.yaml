@@ -1,10 +1,10 @@
-# ABR Hierarchical U-Net Optimized Configuration
-# Optimized hyperparameters for best training results and performance
+# ABR Hierarchical U-Net Optimized Configuration v2
+# Fixed attention head compatibility issue
 
 project:
-  name: "ABR_HierarchicalUNet_Optimized"
-  description: "Optimized Hierarchical U-Net with S4 Encoder and Transformer Decoder for ABR Signal Generation"
-  version: "2.0.0"
+  name: "ABR_HierarchicalUNet_Optimized_v2"
+  description: "Optimized Hierarchical U-Net with compatible attention configuration"
+  version: "2.1.0"
   author: "AI Assistant"
 
 # Data Configuration - Optimized for better performance
@@ -31,7 +31,7 @@ data:
     prefetch_factor: 3  # Added for better performance
     persistent_workers: true  # Added for efficiency
 
-# Model Architecture - Enhanced for better performance
+# Model Architecture - Enhanced with compatible dimensions
 model:
   type: "hierarchical_unet"
   
@@ -39,7 +39,7 @@ model:
   architecture:
     signal_length: 200
     static_dim: 4
-    base_channels: 80      # Increased from 64 for more capacity
+    base_channels: 96      # Increased and made divisible by common head counts
     n_levels: 4
     n_classes: 5
     dropout: 0.15          # Increased for better regularization
@@ -47,27 +47,27 @@ model:
     # Enhanced S4 Encoder settings
     encoder:
       n_s4_layers: 3       # Increased from 2 for more depth
-      d_state: 80          # Increased from 64 for more capacity
+      d_state: 96          # Made compatible with attention heads
       use_enhanced_s4: true
       
-    # Enhanced Transformer Decoder settings
+    # Enhanced Transformer Decoder settings - FIXED COMPATIBILITY
     decoder:
       n_transformer_layers: 3  # Increased from 2 for more depth
-      n_heads: 8              # Fixed: d_model (160) must be divisible by n_heads
+      n_heads: 12             # Now compatible: 192 is divisible by 12
       use_multi_scale_attention: true
       use_cross_attention: true
       
     # Enhanced FiLM conditioning
     film:
-      hidden_dim: 96       # Increased from 64
+      hidden_dim: 96       # Aligned with base channels
       dropout: 0.15        # Added FiLM dropout
       
     # Enhanced output heads
     outputs:
       signal_activation: "tanh"
-      peak_head_dim: 256   # Increased from 128
-      class_head_dim: 256  # Increased from 128
-      threshold_head_dim: 256  # Increased from 128
+      peak_head_dim: 288   # Made divisible by 12 (288/12=24)
+      class_head_dim: 288  # Made divisible by 12
+      threshold_head_dim: 288  # Made divisible by 12
       use_attention_heads: true
       predict_uncertainty: true
 
@@ -236,11 +236,11 @@ logging:
   
   # Enhanced Weights & Biases configuration
   wandb:
-    project: "abr-hierarchical-unet-optimized"
+    project: "abr-hierarchical-unet-optimized-v2"
     entity: null
-    tags: ["diffusion", "abr", "s4", "transformer", "optimized", "multi-task"]
-    group: "production"
-    notes: "Optimized configuration for best performance"
+    tags: ["diffusion", "abr", "s4", "transformer", "optimized", "multi-task", "v2", "fixed"]
+    group: "production-v2"
+    notes: "Optimized configuration v2 with fixed attention compatibility"
 
 # Enhanced Reproducibility
 reproducibility:

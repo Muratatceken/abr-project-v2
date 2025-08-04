@@ -53,7 +53,7 @@ model:
     # Transformer Decoder settings - Enhanced
     decoder:
       n_transformer_layers: 3  # Increased depth
-      n_heads: 12             # More attention heads
+      n_heads: 8              # Fixed: d_model must be divisible by n_heads
       use_multi_scale_attention: true
       use_cross_attention: true
       
