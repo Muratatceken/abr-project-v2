@@ -111,7 +111,7 @@ training:
   scheduler:
     type: "cosine_annealing_warm_restarts"
     T_0: 30               # Reduced for more frequent restarts
-    T_mult: 1.5           # Reduced multiplier
+    T_mult: 2             # Fixed: Must be integer >= 1
     eta_min: 5e-7         # Lower minimum LR
     warmup_epochs: 5      # Reduced warmup
     warmup_type: "linear" # Added warmup type
