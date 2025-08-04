@@ -29,8 +29,7 @@ wandb>=0.15.0
 # Data Serialization and I/O
 joblib>=1.3.0
 
-# Machine Learning Metrics
-sklearn
+# Machine Learning Metrics (included in scikit-learn above)
 
 # Excel File Processing
 openpyxl>=3.1.0
