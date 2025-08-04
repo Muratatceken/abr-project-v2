@@ -1,0 +1,571 @@
+#!/usr/bin/env python3
+"""
+ABR Trainer - Professional Training Loop for Hierarchical U-Net
+
+Implements comprehensive training pipeline with:
+- Multi-task loss handling
+- Diffusion training with noise scheduling
+- Advanced monitoring and logging
+- Checkpointing and early stopping
+- Mixed precision training
+- Gradient clipping and accumulation
+
+Author: AI Assistant
+Date: January 2025
+"""
+
+import os
+import time
+import json
+import logging
+import traceback
+from typing import Dict, Any, Optional, Tuple, List
+from pathlib import Path
+from dataclasses import dataclass, field
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
+from torch.utils.tensorboard import SummaryWriter
+from omegaconf import DictConfig
+import wandb
+import numpy as np
+from tqdm import tqdm
+
+# Import our modules
+from utils.loss import ABRDiffusionLoss, create_class_weights
+from utils.schedule import get_noise_schedule, NoiseSchedule
+from utils.sampling import DDIMSampler
+from data.dataset import ABRDataset, stratified_patient_split, create_optimized_dataloaders
+from models.hierarchical_unet import OptimizedHierarchicalUNet
+from .lr_scheduler import get_optimizer_and_scheduler
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrainingMetrics:
+    """Container for training metrics."""
+    
+    # Loss components
+    total_loss: float = 0.0
+    signal_loss: float = 0.0
+    peak_exist_loss: float = 0.0
+    peak_latency_loss: float = 0.0
+    peak_amplitude_loss: float = 0.0
+    classification_loss: float = 0.0
+    threshold_loss: float = 0.0
+    
+    # Accuracy metrics
+    classification_accuracy: float = 0.0
+    peak_existence_accuracy: float = 0.0
+    
+    # Learning rate
+    learning_rate: float = 0.0
+    
+    # Timing
+    batch_time: float = 0.0
+    data_time: float = 0.0
+    
+    def to_dict(self) -> Dict[str, float]:
+        """Convert metrics to dictionary."""
+        return {k: v for k, v in self.__dict__.items() if isinstance(v, (int, float))}
+
+
+class ABRTrainer:
+    """
+    Professional trainer for ABR Hierarchical U-Net with diffusion training.
+    """
+    
+    def __init__(
+        self,
+        config: DictConfig,
+        model: nn.Module,
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        test_loader: Optional[DataLoader] = None,
+        device: Optional[torch.device] = None
+    ):
+        """
+        Initialize ABR trainer.
+        
+        Args:
+            config: Training configuration
+            model: ABR model to train
+            train_loader: Training data loader
+            val_loader: Validation data loader
+            test_loader: Optional test data loader
+            device: Training device
+        """
+        self.config = config
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.test_loader = test_loader
+        
+        # Setup device
+        self.device = device or torch.device(
+            config.hardware.device if hasattr(config, 'hardware') else 'cuda' if torch.cuda.is_available() else 'cpu'
+        )
+        self.model.to(self.device)
+        
+        # Training state
+        self.current_epoch = 0
+        self.global_step = 0
+        self.best_val_loss = float('inf')
+        self.early_stopping_counter = 0
+        
+        # Setup training components
+        self._setup_loss_function()
+        self._setup_optimizer_and_scheduler()
+        self._setup_noise_schedule()
+        self._setup_monitoring()
+        self._setup_mixed_precision()
+        self._setup_checkpointing()
+        
+        # Initialize metrics tracking
+        self.train_metrics = TrainingMetrics()
+        self.val_metrics = TrainingMetrics()
+        
+        logger.info(f"ABR Trainer initialized on device: {self.device}")
+        logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+        logger.info(f"Training samples: {len(train_loader.dataset):,}")
+        logger.info(f"Validation samples: {len(val_loader.dataset):,}")
+    
+    def _setup_loss_function(self):
+        """Setup loss function with class weights."""
+        # Get class weights if needed
+        class_weights = None
+        if self.config.loss.get('class_weights') == 'balanced':
+            # Extract targets from training dataset
+            targets = []
+            for batch in self.train_loader:
+                targets.extend(batch['target'].cpu().numpy())
+            
+            class_weights = create_class_weights(
+                targets, 
+                self.config.data.n_classes, 
+                self.device
+            )
+            logger.info(f"Using balanced class weights: {class_weights}")
+        
+        # Create loss function
+        self.loss_fn = ABRDiffusionLoss(
+            n_classes=self.config.data.n_classes,
+            class_weights=class_weights,
+            use_focal_loss=self.config.loss.focal_loss.get('use_focal', False),
+            focal_alpha=self.config.loss.focal_loss.get('alpha', 1.0),
+            focal_gamma=self.config.loss.focal_loss.get('gamma', 2.0),
+            peak_loss_type=self.config.loss.get('peak_loss_type', 'huber'),
+            huber_delta=self.config.loss.get('huber_delta', 1.0),
+            device=self.device,
+            signal_weight=self.config.loss.weights.get('diffusion', 1.0),
+            peak_weight=self.config.loss.weights.get('peak_latency', 1.0),
+            class_weight=self.config.loss.weights.get('classification', 1.0),
+            threshold_weight=self.config.loss.weights.get('threshold', 0.8)
+        )
+    
+    def _setup_optimizer_and_scheduler(self):
+        """Setup optimizer and learning rate scheduler."""
+        self.optimizer, self.scheduler = get_optimizer_and_scheduler(self.model, self.config)
+        logger.info(f"Using optimizer: {type(self.optimizer).__name__}")
+        logger.info(f"Using scheduler: {type(self.scheduler).__name__}")
+    
+    def _setup_noise_schedule(self):
+        """Setup diffusion noise schedule."""
+        noise_config = self.config.diffusion.noise_schedule
+        
+        self.noise_schedule_dict = get_noise_schedule(
+            schedule_type=noise_config.get('type', 'cosine'),
+            num_timesteps=noise_config.get('num_timesteps', 1000),
+            beta_start=noise_config.get('beta_start', 1e-4),
+            beta_end=noise_config.get('beta_end', 0.02)
+        )
+        
+        self.noise_schedule = NoiseSchedule(self.noise_schedule_dict)
+        
+        # Move to device
+        for key, value in self.noise_schedule_dict.items():
+            if isinstance(value, torch.Tensor):
+                self.noise_schedule_dict[key] = value.to(self.device)
+        
+        logger.info(f"Noise schedule: {noise_config.get('type', 'cosine')} with {noise_config.get('num_timesteps', 1000)} steps")
+    
+    def _setup_monitoring(self):
+        """Setup monitoring and logging."""
+        # Create log directories
+        log_dir = Path(self.config.paths.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Setup file logging
+        log_file = log_dir / "training.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        # Setup TensorBoard
+        if self.config.logging.get('use_tensorboard', True):
+            tb_dir = log_dir / "tensorboard"
+            tb_dir.mkdir(exist_ok=True)
+            self.writer = SummaryWriter(str(tb_dir))
+            logger.info(f"TensorBoard logging to: {tb_dir}")
+        else:
+            self.writer = None
+        
+        # Setup Weights & Biases
+        if self.config.logging.get('use_wandb', False):
+            wandb_config = self.config.logging.get('wandb', {})
+            wandb.init(
+                project=wandb_config.get('project', 'abr-hierarchical-unet'),
+                entity=wandb_config.get('entity'),
+                tags=wandb_config.get('tags', []),
+                config=dict(self.config)
+            )
+            self.use_wandb = True
+            logger.info("W&B logging enabled")
+        else:
+            self.use_wandb = False
+    
+    def _setup_mixed_precision(self):
+        """Setup mixed precision training."""
+        self.use_amp = self.config.hardware.get('mixed_precision', True) and torch.cuda.is_available()
+        
+        if self.use_amp:
+            self.scaler = GradScaler()
+            logger.info("Mixed precision training enabled")
+        else:
+            self.scaler = None
+            logger.info("Mixed precision training disabled")
+    
+    def _setup_checkpointing(self):
+        """Setup checkpointing directories."""
+        self.checkpoint_dir = Path(self.config.paths.checkpoint_dir)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save configuration
+        config_path = self.checkpoint_dir / "config.yaml"
+        with open(config_path, 'w') as f:
+            f.write(str(self.config))
+    
+    def train_epoch(self) -> TrainingMetrics:
+        """Train for one epoch."""
+        self.model.train()
+        metrics = TrainingMetrics()
+        
+        # Progress bar
+        pbar = tqdm(
+            self.train_loader, 
+            desc=f"Epoch {self.current_epoch+1}/{self.config.training.epochs}",
+            leave=False
+        )
+        
+        epoch_start_time = time.time()
+        num_batches = 0
+        accumulated_loss = 0.0
+        
+        for batch_idx, batch in enumerate(pbar):
+            batch_start_time = time.time()
+            
+            # Move batch to device
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                    for k, v in batch.items()}
+            
+            data_time = time.time() - batch_start_time
+            
+            # Forward pass with diffusion
+            loss, loss_components = self._forward_pass(batch)
+            
+            # Backward pass
+            loss = loss / self.config.training.get('accumulation_steps', 1)
+            
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
+            
+            accumulated_loss += loss.item()
+            
+            # Gradient accumulation
+            if (batch_idx + 1) % self.config.training.get('accumulation_steps', 1) == 0:
+                # Gradient clipping
+                if self.config.training.get('gradient_clip', 0) > 0:
+                    if self.use_amp:
+                        self.scaler.unscale_(self.optimizer)
+                    
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        self.config.training.gradient_clip
+                    )
+                
+                # Optimizer step
+                if self.use_amp:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
+                
+                self.optimizer.zero_grad()
+                self.global_step += 1
+                accumulated_loss = 0.0
+            
+            # Update metrics
+            self._update_metrics(metrics, loss_components, batch)
+            
+            batch_time = time.time() - batch_start_time
+            metrics.batch_time = batch_time
+            metrics.data_time = data_time
+            
+            # Update progress bar
+            pbar.set_postfix({
+                'Loss': f"{loss.item():.4f}",
+                'LR': f"{self.optimizer.param_groups[0]['lr']:.2e}"
+            })
+            
+            num_batches += 1
+            
+            # Log batch metrics
+            if self.global_step % 100 == 0:
+                self._log_metrics(metrics, 'train', self.global_step)
+        
+        # Average metrics over epoch
+        self._average_metrics(metrics, num_batches)
+        
+        return metrics
+    
+    def validate_epoch(self) -> TrainingMetrics:
+        """Validate for one epoch."""
+        self.model.eval()
+        metrics = TrainingMetrics()
+        
+        num_batches = 0
+        
+        with torch.no_grad():
+            for batch in tqdm(self.val_loader, desc="Validating", leave=False):
+                # Move batch to device
+                batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v 
+                        for k, v in batch.items()}
+                
+                # Forward pass
+                if self.use_amp:
+                    with autocast():
+                        loss, loss_components = self._forward_pass(batch)
+                else:
+                    loss, loss_components = self._forward_pass(batch)
+                
+                # Update metrics
+                self._update_metrics(metrics, loss_components, batch)
+                num_batches += 1
+        
+        # Average metrics over epoch
+        self._average_metrics(metrics, num_batches)
+        
+        return metrics
+    
+    def _forward_pass(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Forward pass with diffusion training."""
+        # Sample random timesteps
+        batch_size = batch['signal'].size(0)
+        timesteps = torch.randint(
+            0, self.noise_schedule.num_timesteps, 
+            (batch_size,), device=self.device
+        )
+        
+        # Add noise to signals
+        noise = torch.randn_like(batch['signal'])
+        noisy_signals = self.noise_schedule.q_sample(
+            batch['signal'], timesteps, noise
+        )
+        
+        # Forward pass through model
+        if self.use_amp:
+            with autocast():
+                outputs = self.model(
+                    noisy_signals,
+                    batch['static_params'],
+                    timesteps
+                )
+                
+                # Compute loss
+                loss, loss_components = self.loss_fn(outputs, batch)
+        else:
+            outputs = self.model(
+                noisy_signals,
+                batch['static_params'],
+                timesteps
+            )
+            
+            # Compute loss
+            loss, loss_components = self.loss_fn(outputs, batch)
+        
+        return loss, loss_components
+    
+    def _update_metrics(self, metrics: TrainingMetrics, loss_components: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
+        """Update training metrics."""
+        # Loss components
+        metrics.total_loss += loss_components['total_loss'].item()
+        metrics.signal_loss += loss_components.get('signal_loss', torch.tensor(0.0)).item()
+        metrics.peak_exist_loss += loss_components.get('peak_exist_loss', torch.tensor(0.0)).item()
+        metrics.peak_latency_loss += loss_components.get('peak_latency_loss', torch.tensor(0.0)).item()
+        metrics.peak_amplitude_loss += loss_components.get('peak_amplitude_loss', torch.tensor(0.0)).item()
+        metrics.classification_loss += loss_components.get('classification_loss', torch.tensor(0.0)).item()
+        metrics.threshold_loss += loss_components.get('threshold_loss', torch.tensor(0.0)).item()
+        
+        # Learning rate
+        metrics.learning_rate = self.optimizer.param_groups[0]['lr']
+    
+    def _average_metrics(self, metrics: TrainingMetrics, num_batches: int):
+        """Average metrics over epoch."""
+        for attr in ['total_loss', 'signal_loss', 'peak_exist_loss', 'peak_latency_loss',
+                    'peak_amplitude_loss', 'classification_loss', 'threshold_loss']:
+            setattr(metrics, attr, getattr(metrics, attr) / num_batches)
+    
+    def _log_metrics(self, metrics: TrainingMetrics, phase: str, step: int):
+        """Log metrics to monitoring systems."""
+        metrics_dict = metrics.to_dict()
+        
+        # TensorBoard logging
+        if self.writer:
+            for key, value in metrics_dict.items():
+                self.writer.add_scalar(f"{phase}/{key}", value, step)
+        
+        # W&B logging
+        if self.use_wandb:
+            wandb_dict = {f"{phase}_{key}": value for key, value in metrics_dict.items()}
+            wandb.log(wandb_dict, step=step)
+    
+    def save_checkpoint(self, is_best: bool = False, checkpoint_name: Optional[str] = None):
+        """Save model checkpoint."""
+        if checkpoint_name is None:
+            checkpoint_name = f"checkpoint_epoch_{self.current_epoch}.pt"
+        
+        checkpoint_path = self.checkpoint_dir / checkpoint_name
+        
+        checkpoint = {
+            'epoch': self.current_epoch,
+            'global_step': self.global_step,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if hasattr(self.scheduler, 'state_dict') else None,
+            'best_val_loss': self.best_val_loss,
+            'config': dict(self.config),
+            'scaler_state_dict': self.scaler.state_dict() if self.scaler else None
+        }
+        
+        torch.save(checkpoint, checkpoint_path)
+        logger.info(f"Checkpoint saved: {checkpoint_path}")
+        
+        # Save best model
+        if is_best:
+            best_path = self.checkpoint_dir / "best_model.pt"
+            torch.save(checkpoint, best_path)
+            logger.info(f"Best model saved: {best_path}")
+        
+        # Save latest model
+        latest_path = self.checkpoint_dir / "latest_model.pt"
+        torch.save(checkpoint, latest_path)
+    
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load model checkpoint."""
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        if checkpoint.get('scheduler_state_dict') and hasattr(self.scheduler, 'load_state_dict'):
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        
+        if checkpoint.get('scaler_state_dict') and self.scaler:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        
+        self.current_epoch = checkpoint['epoch']
+        self.global_step = checkpoint['global_step']
+        self.best_val_loss = checkpoint['best_val_loss']
+        
+        logger.info(f"Checkpoint loaded: {checkpoint_path}")
+        logger.info(f"Resuming from epoch {self.current_epoch}, step {self.global_step}")
+    
+    def train(self, resume_from: Optional[str] = None):
+        """
+        Main training loop.
+        
+        Args:
+            resume_from: Path to checkpoint to resume from
+        """
+        try:
+            # Resume from checkpoint if specified
+            if resume_from:
+                self.load_checkpoint(resume_from)
+            
+            logger.info("Starting training...")
+            logger.info(f"Training for {self.config.training.epochs} epochs")
+            
+            for epoch in range(self.current_epoch, self.config.training.epochs):
+                self.current_epoch = epoch
+                
+                # Training phase
+                train_metrics = self.train_epoch()
+                
+                # Validation phase
+                val_metrics = self.validate_epoch()
+                
+                # Learning rate scheduling
+                if hasattr(self.scheduler, 'step'):
+                    if hasattr(self.scheduler, 'step_with_metric'):
+                        self.scheduler.step_with_metric(val_metrics.total_loss)
+                    else:
+                        self.scheduler.step()
+                
+                # Log epoch metrics
+                logger.info(
+                    f"Epoch {epoch+1}/{self.config.training.epochs} - "
+                    f"Train Loss: {train_metrics.total_loss:.4f}, "
+                    f"Val Loss: {val_metrics.total_loss:.4f}, "
+                    f"LR: {train_metrics.learning_rate:.2e}"
+                )
+                
+                self._log_metrics(train_metrics, 'train', epoch)
+                self._log_metrics(val_metrics, 'val', epoch)
+                
+                # Checkpointing
+                is_best = val_metrics.total_loss < self.best_val_loss
+                if is_best:
+                    self.best_val_loss = val_metrics.total_loss
+                    self.early_stopping_counter = 0
+                else:
+                    self.early_stopping_counter += 1
+                
+                # Save checkpoint
+                if (epoch + 1) % self.config.training.checkpointing.get('save_frequency', 10) == 0:
+                    self.save_checkpoint(is_best=is_best)
+                
+                # Early stopping
+                early_stopping_patience = self.config.training.early_stopping.get('patience', 30)
+                if self.early_stopping_counter >= early_stopping_patience:
+                    logger.info(f"Early stopping triggered after {early_stopping_patience} epochs without improvement")
+                    break
+            
+            # Final checkpoint
+            self.save_checkpoint(is_best=False, checkpoint_name="final_model.pt")
+            
+            logger.info("Training completed successfully!")
+            
+        except KeyboardInterrupt:
+            logger.info("Training interrupted by user")
+            self.save_checkpoint(is_best=False, checkpoint_name="interrupted_model.pt")
+            
+        except Exception as e:
+            logger.error(f"Training failed with error: {e}")
+            logger.error(traceback.format_exc())
+            raise
+        
+        finally:
+            # Cleanup
+            if self.writer:
+                self.writer.close()
+            if self.use_wandb:
+                wandb.finish()

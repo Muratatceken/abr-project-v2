@@ -1,455 +1,341 @@
 #!/usr/bin/env python3
 """
-Configuration Loader for Enhanced ABR Training
+Configuration Loader for ABR Training Pipeline
 
-Utilities for loading and managing YAML-based configuration files
-with validation and environment variable support.
+Handles loading, validation, and management of training configurations
+with support for environment variable overrides and configuration merging.
 
 Author: AI Assistant
 Date: January 2025
 """
 
-import yaml
 import os
-import argparse
-from typing import Dict, Any, Optional, Union
+import yaml
+import torch
+from typing import Dict, Any, Optional
 from pathlib import Path
+import logging
+from dataclasses import dataclass, field
+from omegaconf import OmegaConf, DictConfig
 
 
-class ConfigLoader:
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class TrainingConfig:
+    """Structured configuration for ABR training."""
+    
+    # Project settings
+    project_name: str = "ABR_HierarchicalUNet_Diffusion"
+    experiment_name: str = "default_experiment"
+    
+    # Data settings
+    dataset_path: str = "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
+    signal_length: int = 200
+    static_dim: int = 4
+    n_classes: int = 5
+    batch_size: int = 32
+    num_workers: int = 4
+    
+    # Model architecture
+    base_channels: int = 64
+    n_levels: int = 4
+    dropout: float = 0.1
+    
+    # Training parameters
+    epochs: int = 200
+    learning_rate: float = 1e-4
+    weight_decay: float = 1e-5
+    gradient_clip: float = 1.0
+    accumulation_steps: int = 1
+    
+    # Loss weights
+    loss_weights: Dict[str, float] = field(default_factory=lambda: {
+        'signal': 1.0,
+        'peak_exist': 0.5,
+        'peak_latency': 1.0,
+        'peak_amplitude': 1.0,
+        'classification': 1.0,
+        'threshold': 0.8
+    })
+    
+    # Paths
+    checkpoint_dir: str = "checkpoints"
+    log_dir: str = "logs"
+    output_dir: str = "outputs"
+    
+    # Hardware
+    device: str = "auto"
+    mixed_precision: bool = True
+    
+    # Reproducibility
+    seed: int = 42
+    deterministic: bool = False
+
+
+def load_config(config_path: str, overrides: Optional[Dict[str, Any]] = None) -> DictConfig:
     """
-    Configuration loader with YAML support and validation.
-    """
-    
-    def __init__(self, config_path: Optional[str] = None):
-        """
-        Initialize configuration loader.
-        
-        Args:
-            config_path: Path to YAML configuration file
-        """
-        self.config_path = config_path
-        self.config = {}
-        
-        if config_path and os.path.exists(config_path):
-            self.load_config(config_path)
-    
-    def load_config(self, config_path: str) -> Dict[str, Any]:
-        """
-        Load configuration from YAML file.
-        
-        Args:
-            config_path: Path to YAML configuration file
-            
-        Returns:
-            Configuration dictionary
-        """
-        with open(config_path, 'r', encoding='utf-8') as f:
-            self.config = yaml.safe_load(f)
-        
-        # Process environment variables
-        self.config = self._process_env_vars(self.config)
-        
-        return self.config
-    
-    def _process_env_vars(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process environment variables in configuration.
-        
-        Args:
-            config: Configuration dictionary
-            
-        Returns:
-            Processed configuration with environment variables resolved
-        """
-        def process_value(value):
-            if isinstance(value, str) and value.startswith('${') and value.endswith('}'):
-                # Extract environment variable name
-                env_var = value[2:-1]
-                default_value = None
-                
-                # Check for default value syntax: ${VAR:default}
-                if ':' in env_var:
-                    env_var, default_value = env_var.split(':', 1)
-                
-                # Get environment variable value
-                env_value = os.getenv(env_var, default_value)
-                
-                # Try to convert to appropriate type
-                if env_value is not None:
-                    # Try to convert to int
-                    try:
-                        return int(env_value)
-                    except ValueError:
-                        pass
-                    
-                    # Try to convert to float
-                    try:
-                        return float(env_value)
-                    except ValueError:
-                        pass
-                    
-                    # Try to convert to bool
-                    if env_value.lower() in ('true', 'false'):
-                        return env_value.lower() == 'true'
-                    
-                    # Return as string
-                    return env_value
-                
-                return None
-            
-            elif isinstance(value, dict):
-                return {k: process_value(v) for k, v in value.items()}
-            elif isinstance(value, list):
-                return [process_value(item) for item in value]
-            else:
-                return value
-        
-        return process_value(config)
-    
-    def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get configuration value using dot notation.
-        
-        Args:
-            key: Configuration key (supports dot notation like 'model.base_channels')
-            default: Default value if key not found
-            
-        Returns:
-            Configuration value
-        """
-        keys = key.split('.')
-        value = self.config
-        
-        try:
-            for k in keys:
-                value = value[k]
-            return value
-        except (KeyError, TypeError):
-            return default
-    
-    def set(self, key: str, value: Any) -> None:
-        """
-        Set configuration value using dot notation.
-        
-        Args:
-            key: Configuration key (supports dot notation)
-            value: Value to set
-        """
-        keys = key.split('.')
-        config = self.config
-        
-        # Navigate to the parent dictionary
-        for k in keys[:-1]:
-            if k not in config:
-                config[k] = {}
-            config = config[k]
-        
-        # Set the value
-        config[keys[-1]] = value
-    
-    def update(self, updates: Dict[str, Any]) -> None:
-        """
-        Update configuration with new values.
-        
-        Args:
-            updates: Dictionary of updates
-        """
-        def deep_update(base_dict, update_dict):
-            for key, value in update_dict.items():
-                if key in base_dict and isinstance(base_dict[key], dict) and isinstance(value, dict):
-                    deep_update(base_dict[key], value)
-                else:
-                    base_dict[key] = value
-        
-        deep_update(self.config, updates)
-    
-    def save_config(self, output_path: str) -> None:
-        """
-        Save configuration to YAML file.
-        
-        Args:
-            output_path: Path to save configuration
-        """
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            yaml.dump(self.config, f, default_flow_style=False, indent=2)
-    
-    def validate_config(self) -> bool:
-        """
-        Validate configuration for required fields and consistency.
-        
-        Returns:
-            True if configuration is valid
-        """
-        required_fields = [
-            'model.input_channels',
-            'model.static_dim',
-            'model.num_classes',
-            'training.batch_size',
-            'training.learning_rate',
-            'training.num_epochs',
-            'data.data_path'
-        ]
-        
-        for field in required_fields:
-            if self.get(field) is None:
-                print(f"Missing required configuration field: {field}")
-                return False
-        
-        # Validate data types and ranges
-        validations = [
-            ('training.batch_size', int, lambda x: x > 0),
-            ('training.learning_rate', (int, float), lambda x: x > 0),
-            ('training.num_epochs', int, lambda x: x > 0),
-            ('model.num_classes', int, lambda x: x > 0),
-            ('data.val_split', (int, float), lambda x: 0 < x < 1),
-        ]
-        
-        for field, expected_type, validator in validations:
-            value = self.get(field)
-            if value is not None:
-                if not isinstance(value, expected_type):
-                    print(f"Invalid type for {field}: expected {expected_type}, got {type(value)}")
-                    return False
-                if not validator(value):
-                    print(f"Invalid value for {field}: {value}")
-                    return False
-        
-        return True
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """
-        Get configuration as dictionary.
-        
-        Returns:
-            Configuration dictionary
-        """
-        return self.config.copy()
-    
-    def flatten(self, separator: str = '.') -> Dict[str, Any]:
-        """
-        Flatten nested configuration dictionary.
-        
-        Args:
-            separator: Separator for nested keys
-            
-        Returns:
-            Flattened configuration dictionary
-        """
-        def _flatten(obj, parent_key='', sep='.'):
-            items = []
-            if isinstance(obj, dict):
-                for k, v in obj.items():
-                    new_key = f"{parent_key}{sep}{k}" if parent_key else k
-                    items.extend(_flatten(v, new_key, sep=sep).items())
-            else:
-                return {parent_key: obj}
-            return dict(items)
-        
-        return _flatten(self.config, sep=separator)
-
-
-def merge_configs(*configs: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Merge multiple configuration dictionaries.
+    Load configuration from YAML file with optional overrides.
     
     Args:
-        *configs: Configuration dictionaries to merge
-        
-    Returns:
-        Merged configuration dictionary
-    """
-    def deep_merge(base_dict, update_dict):
-        result = base_dict.copy()
-        for key, value in update_dict.items():
-            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = deep_merge(result[key], value)
-            else:
-                result[key] = value
-        return result
-    
-    result = {}
-    for config in configs:
-        result = deep_merge(result, config)
-    
-    return result
-
-
-def create_config_from_args(args: argparse.Namespace, base_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """
-    Create configuration dictionary from command line arguments.
-    
-    Args:
-        args: Parsed command line arguments
-        base_config: Base configuration to update
-        
-    Returns:
-        Configuration dictionary
-    """
-    if base_config is None:
-        base_config = {}
-    
-    # Map command line arguments to configuration structure
-    arg_mapping = {
-        # Data settings
-        'data_path': 'data.data_path',
-        'valid_peaks_only': 'data.valid_peaks_only',
-        'val_split': 'data.val_split',
-        'augment': 'data.augment',
-        'cfg_dropout_prob': 'data.cfg_dropout_prob',
-        
-        # Model settings
-        'base_channels': 'model.base_channels',
-        'n_levels': 'model.n_levels',
-        'num_transformer_layers': 'model.num_transformer_layers',
-        'use_cross_attention': 'model.use_cross_attention',
-        'film_dropout': 'model.film_dropout',
-        'num_classes': 'model.num_classes',
-        
-        # Training settings
-        'batch_size': 'training.batch_size',
-        'learning_rate': 'training.learning_rate',
-        'num_epochs': 'training.num_epochs',
-        'weight_decay': 'training.weight_decay',
-        'use_amp': 'training.use_amp',
-        'patience': 'training.patience',
-        'num_workers': 'training.num_workers',
-        
-        # Loss settings
-        'use_focal_loss': 'loss.use_focal_loss',
-        'use_class_weights': 'loss.use_class_weights',
-        
-        # Sampling settings
-        'use_balanced_sampler': 'training.use_balanced_sampler',
-        
-        # Logging settings
-        'output_dir': 'logging.output_dir',
-        'use_wandb': 'logging.use_wandb',
-        'wandb_project': 'logging.wandb_project',
-        'experiment_name': 'experiment.name',
-        
-        # System settings
-        'random_seed': 'experiment.random_seed'
-    }
-    
-    # Create configuration loader and update with args
-    config_loader = ConfigLoader()
-    config_loader.config = base_config
-    
-    # Update configuration with command line arguments
-    for arg_name, config_key in arg_mapping.items():
-        if hasattr(args, arg_name):
-            value = getattr(args, arg_name)
-            if value is not None:
-                config_loader.set(config_key, value)
-    
-    return config_loader.to_dict()
-
-
-def load_config_with_overrides(
-    config_path: str,
-    overrides: Optional[Dict[str, Any]] = None,
-    args: Optional[argparse.Namespace] = None
-) -> Dict[str, Any]:
-    """
-    Load configuration with overrides from multiple sources.
-    
-    Args:
-        config_path: Path to base configuration file
+        config_path: Path to configuration file
         overrides: Dictionary of configuration overrides
-        args: Command line arguments to override configuration
         
     Returns:
-        Final configuration dictionary
+        Loaded configuration as OmegaConf DictConfig
     """
-    # Load base configuration
-    config_loader = ConfigLoader(config_path)
-    base_config = config_loader.to_dict()
-    
-    # Apply overrides
-    if overrides:
-        config_loader.update(overrides)
-    
-    # Apply command line arguments
-    if args:
-        arg_config = create_config_from_args(args, config_loader.to_dict())
-        config_loader.config = arg_config
-    
-    # Validate final configuration
-    if not config_loader.validate_config():
-        raise ValueError("Configuration validation failed")
-    
-    return config_loader.to_dict()
+    try:
+        # Load base configuration
+        with open(config_path, 'r') as f:
+            config_dict = yaml.safe_load(f)
+        
+        # Convert to OmegaConf for advanced features
+        config = OmegaConf.create(config_dict)
+        
+        # Apply environment variable overrides
+        config = _apply_env_overrides(config)
+        
+        # Apply manual overrides
+        if overrides:
+            config = OmegaConf.merge(config, overrides)
+        
+        # Validate configuration
+        config = _validate_config(config)
+        
+        logger.info(f"Successfully loaded configuration from {config_path}")
+        return config
+        
+    except Exception as e:
+        logger.error(f"Failed to load configuration from {config_path}: {e}")
+        raise
 
 
-# Example usage and utility functions
-def get_default_config() -> Dict[str, Any]:
+def save_config(config: DictConfig, save_path: str) -> None:
     """
-    Get default configuration dictionary.
+    Save configuration to YAML file.
     
-    Returns:
-        Default configuration
+    Args:
+        config: Configuration to save
+        save_path: Path to save configuration
     """
-    return {
-        'experiment': {
-            'name': 'abr_training',
-            'random_seed': 42
-        },
-        'model': {
-            'input_channels': 1,
-            'static_dim': 4,
-            'base_channels': 64,
-            'n_levels': 4,
-            'sequence_length': 200,
-            'signal_length': 200,
-            'num_classes': 5,
-            'num_transformer_layers': 3,
-            'use_cross_attention': True,
-            'use_positional_encoding': True,
-            'film_dropout': 0.15,
-            'dropout': 0.1,
-            'use_cfg': True
-        },
-        'training': {
-            'batch_size': 32,
-            'num_epochs': 100,
-            'learning_rate': 1e-4,
-            'weight_decay': 0.01,
-            'use_amp': True,
-            'patience': 15,
-            'num_workers': 4
-        },
-        'data': {
-            'data_path': 'data/processed/ultimate_dataset.pkl',
-            'val_split': 0.2,
-            'augment': True,
-            'cfg_dropout_prob': 0.1
-        },
-        'loss': {
-            'use_class_weights': True,
-            'use_focal_loss': False
-        },
-        'logging': {
-            'use_wandb': False,
-            'use_tensorboard': True
-        }
+    try:
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        
+        # Convert to regular dict and save
+        config_dict = OmegaConf.to_yaml(config)
+        with open(save_path, 'w') as f:
+            f.write(config_dict)
+            
+        logger.info(f"Configuration saved to {save_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save configuration to {save_path}: {e}")
+        raise
+
+
+def _apply_env_overrides(config: DictConfig) -> DictConfig:
+    """Apply environment variable overrides to configuration."""
+    
+    # Common environment variable mappings
+    env_mappings = {
+        'ABR_DATA_PATH': 'data.dataset_path',
+        'ABR_BATCH_SIZE': 'data.dataloader.batch_size',
+        'ABR_LEARNING_RATE': 'training.optimizer.learning_rate',
+        'ABR_EPOCHS': 'training.epochs',
+        'ABR_DEVICE': 'hardware.device',
+        'ABR_CHECKPOINT_DIR': 'paths.checkpoint_dir',
+        'ABR_LOG_DIR': 'paths.log_dir',
+        'ABR_MIXED_PRECISION': 'hardware.mixed_precision',
+        'ABR_NUM_WORKERS': 'data.dataloader.num_workers'
     }
+    
+    for env_var, config_path in env_mappings.items():
+        if env_var in os.environ:
+            value = os.environ[env_var]
+            
+            # Type conversion
+            if config_path.endswith(('batch_size', 'epochs', 'num_workers')):
+                value = int(value)
+            elif config_path.endswith('learning_rate'):
+                value = float(value)
+            elif config_path.endswith('mixed_precision'):
+                value = value.lower() in ('true', '1', 'yes')
+            
+            # Set nested configuration value
+            OmegaConf.set(config, config_path, value)
+            logger.info(f"Applied environment override: {env_var} -> {config_path} = {value}")
+    
+    return config
 
 
-if __name__ == '__main__':
-    # Example usage
-    config_loader = ConfigLoader('training/config.yaml')
-    print("Loaded configuration:")
-    print(yaml.dump(config_loader.to_dict(), default_flow_style=False, indent=2))
+def _validate_config(config: DictConfig) -> DictConfig:
+    """Validate and post-process configuration."""
     
-    # Test flattening
-    flat_config = config_loader.flatten()
-    print("\nFlattened configuration:")
-    for key, value in flat_config.items():
-        print(f"{key}: {value}")
+    # Ensure required sections exist
+    required_sections = ['data', 'model', 'training', 'paths']
+    for section in required_sections:
+        if section not in config:
+            raise ValueError(f"Missing required configuration section: {section}")
     
-    # Test validation
-    is_valid = config_loader.validate_config()
-    print(f"\nConfiguration is valid: {is_valid}") 
+    # Fix type conversions for numeric values that might be strings
+    if 'training' in config and 'optimizer' in config.training:
+        opt_config = config.training.optimizer
+        # Convert string scientific notation to float
+        if 'learning_rate' in opt_config:
+            opt_config.learning_rate = float(opt_config.learning_rate)
+        if 'weight_decay' in opt_config:
+            opt_config.weight_decay = float(opt_config.weight_decay)
+        if 'eps' in opt_config:
+            opt_config.eps = float(opt_config.eps)
+    
+    if 'training' in config and 'scheduler' in config.training:
+        sched_config = config.training.scheduler
+        if 'eta_min' in sched_config:
+            sched_config.eta_min = float(sched_config.eta_min)
+    
+    if 'diffusion' in config and 'noise_schedule' in config.diffusion:
+        noise_config = config.diffusion.noise_schedule
+        if 'beta_start' in noise_config:
+            noise_config.beta_start = float(noise_config.beta_start)
+        if 'beta_end' in noise_config:
+            noise_config.beta_end = float(noise_config.beta_end)
+    
+    if 'training' in config and 'early_stopping' in config.training:
+        es_config = config.training.early_stopping
+        if 'min_delta' in es_config:
+            es_config.min_delta = float(es_config.min_delta)
+    
+    # Auto-detect device if needed
+    if config.hardware.device == "auto":
+        config.hardware.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Auto-detected device: {config.hardware.device}")
+    
+    # Ensure paths are absolute
+    for path_key in ['checkpoint_dir', 'log_dir', 'output_dir']:
+        if path_key in config.paths:
+            path_val = config.paths[path_key]
+            if not os.path.isabs(path_val):
+                config.paths[path_key] = os.path.abspath(path_val)
+    
+    # Validate data paths
+    if not os.path.exists(config.data.dataset_path):
+        logger.warning(f"Dataset path does not exist: {config.data.dataset_path}")
+    
+    # Ensure output directories exist
+    for path_key in ['checkpoint_dir', 'log_dir', 'output_dir']:
+        if path_key in config.paths:
+            os.makedirs(config.paths[path_key], exist_ok=True)
+    
+    # Validate batch size for multi-GPU training
+    if hasattr(config.hardware, 'multi_gpu') and config.hardware.multi_gpu:
+        gpu_count = torch.cuda.device_count()
+        if config.data.dataloader.batch_size % gpu_count != 0:
+            logger.warning(
+                f"Batch size {config.data.dataloader.batch_size} is not divisible by "
+                f"GPU count {gpu_count}. This may cause issues with DDP."
+            )
+    
+    # Validate loss weights
+    if 'loss' in config and 'weights' in config.loss:
+        required_loss_keys = ['diffusion', 'peak_exist', 'peak_latency', 'peak_amplitude', 
+                            'classification', 'threshold']
+        for key in required_loss_keys:
+            if key not in config.loss.weights:
+                logger.warning(f"Missing loss weight for: {key}")
+    
+    return config
+
+
+def create_experiment_config(
+    base_config_path: str,
+    experiment_name: str,
+    overrides: Dict[str, Any]
+) -> DictConfig:
+    """
+    Create experiment-specific configuration.
+    
+    Args:
+        base_config_path: Path to base configuration
+        experiment_name: Name of the experiment
+        overrides: Experiment-specific overrides
+        
+    Returns:
+        Experiment configuration
+    """
+    # Load base config
+    config = load_config(base_config_path)
+    
+    # Set experiment name
+    config.project.experiment_name = experiment_name
+    
+    # Apply experiment overrides
+    config = OmegaConf.merge(config, overrides)
+    
+    # Create experiment-specific paths
+    exp_checkpoint_dir = os.path.join(config.paths.checkpoint_dir, experiment_name)
+    exp_log_dir = os.path.join(config.paths.log_dir, experiment_name)
+    exp_output_dir = os.path.join(config.paths.output_dir, experiment_name)
+    
+    config.paths.checkpoint_dir = exp_checkpoint_dir
+    config.paths.log_dir = exp_log_dir
+    config.paths.output_dir = exp_output_dir
+    
+    # Ensure directories exist
+    for path in [exp_checkpoint_dir, exp_log_dir, exp_output_dir]:
+        os.makedirs(path, exist_ok=True)
+    
+    return config
+
+
+def get_config_hash(config: DictConfig) -> str:
+    """
+    Generate a hash for configuration to track experiments.
+    
+    Args:
+        config: Configuration to hash
+        
+    Returns:
+        Configuration hash string
+    """
+    import hashlib
+    import json
+    
+    # Convert to dict and sort for consistent hashing
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    config_str = json.dumps(config_dict, sort_keys=True)
+    
+    # Generate hash
+    config_hash = hashlib.md5(config_str.encode()).hexdigest()[:8]
+    return config_hash
+
+
+def print_config(config: DictConfig, title: str = "Configuration") -> None:
+    """
+    Pretty print configuration.
+    
+    Args:
+        config: Configuration to print
+        title: Title for the configuration display
+    """
+    print(f"\n{'='*60}")
+    print(f" {title}")
+    print(f"{'='*60}")
+    print(OmegaConf.to_yaml(config))
+    print(f"{'='*60}\n")
+
+
+# Utility functions for backwards compatibility
+def load_yaml_config(path: str) -> Dict[str, Any]:
+    """Load YAML configuration as regular dict."""
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
+
+
+def merge_configs(base_config: Dict[str, Any], override_config: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge two configuration dictionaries."""
+    base_omega = OmegaConf.create(base_config)
+    override_omega = OmegaConf.create(override_config)
+    merged = OmegaConf.merge(base_omega, override_omega)
+    return OmegaConf.to_container(merged, resolve=True)

@@ -9,7 +9,7 @@ project:
 
 # Data Configuration
 data:
-  dataset_path: "data/processed/ultimate_dataset.pkl"
+  dataset_path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
   signal_length: 200
   static_dim: 4  # age, intensity, stimulus_rate, fmp
   n_classes: 5   # hearing loss types
@@ -67,7 +67,7 @@ model:
 diffusion:
   # Noise schedule
   noise_schedule:
-    type: "abr_optimized"  # linear, cosine, abr_optimized
+    type: "cosine"  # linear, cosine, quadratic
     num_timesteps: 1000
     peak_preserve_ratio: 0.3
     beta_start: 5e-5

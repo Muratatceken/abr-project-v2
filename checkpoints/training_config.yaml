@@ -1,0 +1,207 @@
+project:
+  name: ABR_HierarchicalUNet_Diffusion
+  description: Hierarchical U-Net with S4 Encoder and Transformer Decoder for ABR
+    Signal Generation
+  version: 1.0.0
+  author: AI Assistant
+data:
+  dataset_path: data/processed/ultimate_dataset_with_clinical_thresholds.pkl
+  signal_length: 200
+  static_dim: 4
+  n_classes: 5
+  splits:
+    train_ratio: 0.7
+    val_ratio: 0.15
+    test_ratio: 0.15
+    random_seed: 42
+  dataloader:
+    batch_size: 32
+    num_workers: 4
+    pin_memory: true
+    drop_last: true
+    shuffle_train: true
+model:
+  type: hierarchical_unet
+  architecture:
+    signal_length: 200
+    static_dim: 4
+    base_channels: 64
+    n_levels: 4
+    n_classes: 5
+    dropout: 0.1
+    encoder:
+      n_s4_layers: 2
+      d_state: 64
+    decoder:
+      n_transformer_layers: 2
+      n_heads: 8
+    film:
+      hidden_dim: 64
+    outputs:
+      signal_activation: tanh
+      peak_head_dim: 128
+      class_head_dim: 128
+      threshold_head_dim: 128
+diffusion:
+  noise_schedule:
+    type: cosine
+    num_timesteps: 1000
+    peak_preserve_ratio: 0.3
+    beta_start: 5.0e-05
+    beta_end: 0.015
+  sampling:
+    type: ddpm
+    ddim_eta: 0.0
+    num_sampling_steps: 50
+    temperature: 1.0
+    clip_denoised: true
+    constraints:
+      apply_constraints: true
+      peak_latency_range:
+      - 1.0
+      - 8.0
+      amplitude_range:
+      - -0.5
+      - 0.5
+      smooth_kernel_size: 5
+training:
+  optimizer:
+    type: adamw
+    learning_rate: 0.0001
+    weight_decay: 1.0e-05
+    betas:
+    - 0.9
+    - 0.999
+    eps: 1.0e-08
+    amsgrad: true
+  scheduler:
+    type: cosine_annealing_warm_restarts
+    T_0: 50
+    T_mult: 2
+    eta_min: 1.0e-07
+    warmup_epochs: 10
+  epochs: 200
+  gradient_clip: 1.0
+  accumulation_steps: 1
+  validation:
+    frequency: 1
+    compute_metrics: true
+  checkpointing:
+    save_frequency: 10
+    save_best: true
+    save_last: true
+    save_dir: checkpoints
+  early_stopping:
+    patience: 30
+    min_delta: 1.0e-06
+    monitor: val_total_loss
+    mode: min
+loss:
+  type: abr_diffusion
+  weights:
+    diffusion: 1.0
+    peak_exist: 0.5
+    peak_latency: 1.0
+    peak_amplitude: 1.0
+    classification: 1.0
+    threshold: 0.8
+  peak_loss_type: huber
+  huber_delta: 1.0
+  class_weights: balanced
+  focal_loss:
+    use_focal: false
+    alpha: 1.0
+    gamma: 2.0
+  perceptual:
+    use_perceptual: false
+    feature_weights:
+      peak_preservation: 2.0
+      morphology: 1.0
+      spectral: 0.5
+      temporal: 1.0
+evaluation:
+  metrics:
+    signal_metrics:
+    - mse
+    - mae
+    - correlation
+    - dtw_distance
+    peak_metrics:
+    - peak_mae
+    - peak_accuracy
+    - existence_f1
+    classification_metrics:
+    - accuracy
+    - f1_macro
+    - f1_weighted
+    - confusion_matrix
+    threshold_metrics:
+    - threshold_mae
+    - threshold_r2
+  visualization:
+    save_plots: true
+    plot_types:
+    - reconstruction
+    - peaks
+    - latent_space
+    - generation_samples
+    n_samples_plot: 10
+  output_dir: outputs/evaluation
+  save_detailed_results: true
+inference:
+  generation:
+    num_samples: 100
+    batch_size: 16
+    temperature: 1.0
+    guidance_scale: 1.0
+  conditioning:
+    age_range:
+    - 20
+    - 80
+    intensity_range:
+    - 60
+    - 100
+    rate_range:
+    - 10
+    - 80
+    fmp_range:
+    - 0.5
+    - 1.0
+  output_dir: outputs/inference
+  save_formats:
+  - signals
+  - peaks
+  - predictions
+  - metadata
+logging:
+  level: INFO
+  log_dir: logs
+  use_tensorboard: true
+  use_wandb: false
+  wandb:
+    project: abr-hierarchical-unet
+    entity: null
+    tags:
+    - diffusion
+    - abr
+    - s4
+    - transformer
+reproducibility:
+  seed: 42
+  deterministic: false
+  benchmark: true
+hardware:
+  device: cpu
+  gpu_id: 0
+  mixed_precision: true
+  compile_model: false
+paths:
+  data_dir: data
+  model_dir: models
+  checkpoint_dir: /Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/checkpoints
+  output_dir: /Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/outputs
+  log_dir: /Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/logs
+training.epochs: 2
+data.dataloader.batch_size: 8
+training.checkpointing.save_frequency: 1
+training.validation.frequency: 1
