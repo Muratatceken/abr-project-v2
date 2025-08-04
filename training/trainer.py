@@ -320,17 +320,42 @@ class ABRTrainer:
             metrics.batch_time = batch_time
             metrics.data_time = data_time
             
-            # Update progress bar
-            pbar.set_postfix({
-                'Loss': f"{loss.item():.4f}",
+            # Update progress bar with detailed losses
+            postfix_dict = {
+                'Total': f"{loss.item():.4f}",
                 'LR': f"{self.optimizer.param_groups[0]['lr']:.2e}"
-            })
+            }
+            
+            # Add individual loss components to progress bar
+            if 'signal_loss' in loss_components:
+                postfix_dict['Signal'] = f"{loss_components['signal_loss'].item():.3f}"
+            if 'classification_loss' in loss_components:
+                postfix_dict['Class'] = f"{loss_components['classification_loss'].item():.3f}"
+            if 'peak_exist_loss' in loss_components:
+                postfix_dict['Peak'] = f"{loss_components['peak_exist_loss'].item():.3f}"
+            if 'threshold_loss' in loss_components:
+                postfix_dict['Thresh'] = f"{loss_components['threshold_loss'].item():.3f}"
+            
+            pbar.set_postfix(postfix_dict)
             
             num_batches += 1
             
-            # Log batch metrics
-            if self.global_step % 100 == 0:
+            # Log detailed batch metrics
+            log_frequency = self.config.training.get('log_frequency', 100)
+            if self.global_step % log_frequency == 0:
                 self._log_metrics(metrics, 'train', self.global_step)
+                
+                # Log detailed loss breakdown every 100 steps
+                logger.info(
+                    f"Step {self.global_step} - "
+                    f"Total: {loss.item():.4f}, "
+                    f"Signal: {loss_components.get('signal_loss', torch.tensor(0.0)).item():.4f}, "
+                    f"Class: {loss_components.get('classification_loss', torch.tensor(0.0)).item():.4f}, "
+                    f"Peak: {loss_components.get('peak_exist_loss', torch.tensor(0.0)).item():.4f}, "
+                    f"PeakLat: {loss_components.get('peak_latency_loss', torch.tensor(0.0)).item():.4f}, "
+                    f"PeakAmp: {loss_components.get('peak_amplitude_loss', torch.tensor(0.0)).item():.4f}, "
+                    f"Thresh: {loss_components.get('threshold_loss', torch.tensor(0.0)).item():.4f}"
+                )
         
         # Average metrics over epoch
         self._average_metrics(metrics, num_batches)
@@ -430,12 +455,42 @@ class ABRTrainer:
         
         # TensorBoard logging
         if self.writer:
+            # Main metrics
             for key, value in metrics_dict.items():
                 self.writer.add_scalar(f"{phase}/{key}", value, step)
+            
+            # Group loss components for better visualization
+            if phase == 'train' or phase == 'val':
+                loss_scalars = {
+                    'Total Loss': metrics.total_loss,
+                    'Signal Loss': metrics.signal_loss,
+                    'Classification Loss': metrics.classification_loss,
+                    'Peak Existence Loss': metrics.peak_exist_loss,
+                    'Peak Latency Loss': metrics.peak_latency_loss,
+                    'Peak Amplitude Loss': metrics.peak_amplitude_loss,
+                    'Threshold Loss': metrics.threshold_loss
+                }
+                self.writer.add_scalars(f"{phase}/Loss_Breakdown", loss_scalars, step)
+                
+                # Learning rate
+                if hasattr(metrics, 'learning_rate') and metrics.learning_rate > 0:
+                    self.writer.add_scalar(f"{phase}/Learning_Rate", metrics.learning_rate, step)
         
         # W&B logging
         if self.use_wandb:
             wandb_dict = {f"{phase}_{key}": value for key, value in metrics_dict.items()}
+            
+            # Add special grouped metrics for W&B
+            wandb_dict.update({
+                f"{phase}_loss_breakdown/total": metrics.total_loss,
+                f"{phase}_loss_breakdown/signal": metrics.signal_loss,
+                f"{phase}_loss_breakdown/classification": metrics.classification_loss,
+                f"{phase}_loss_breakdown/peak_exist": metrics.peak_exist_loss,
+                f"{phase}_loss_breakdown/peak_latency": metrics.peak_latency_loss,
+                f"{phase}_loss_breakdown/peak_amplitude": metrics.peak_amplitude_loss,
+                f"{phase}_loss_breakdown/threshold": metrics.threshold_loss
+            })
+            
             wandb.log(wandb_dict, step=step)
     
     def save_checkpoint(self, is_best: bool = False, checkpoint_name: Optional[str] = None):
@@ -520,13 +575,25 @@ class ABRTrainer:
                     else:
                         self.scheduler.step()
                 
-                # Log epoch metrics
+                # Log detailed epoch metrics
                 logger.info(
-                    f"Epoch {epoch+1}/{self.config.training.epochs} - "
-                    f"Train Loss: {train_metrics.total_loss:.4f}, "
-                    f"Val Loss: {val_metrics.total_loss:.4f}, "
-                    f"LR: {train_metrics.learning_rate:.2e}"
+                    f"Epoch {epoch+1}/{self.config.training.epochs} Summary:"
                 )
+                logger.info(
+                    f"  Train - Total: {train_metrics.total_loss:.4f}, "
+                    f"Signal: {train_metrics.signal_loss:.4f}, "
+                    f"Class: {train_metrics.classification_loss:.4f}, "
+                    f"Peak: {train_metrics.peak_exist_loss:.4f}, "
+                    f"Thresh: {train_metrics.threshold_loss:.4f}"
+                )
+                logger.info(
+                    f"  Val   - Total: {val_metrics.total_loss:.4f}, "
+                    f"Signal: {val_metrics.signal_loss:.4f}, "
+                    f"Class: {val_metrics.classification_loss:.4f}, "
+                    f"Peak: {val_metrics.peak_exist_loss:.4f}, "
+                    f"Thresh: {val_metrics.threshold_loss:.4f}"
+                )
+                logger.info(f"  LR: {train_metrics.learning_rate:.2e}")
                 
                 self._log_metrics(train_metrics, 'train', epoch)
                 self._log_metrics(val_metrics, 'val', epoch)

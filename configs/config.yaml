@@ -14,54 +14,62 @@ data:
   static_dim: 4  # age, intensity, stimulus_rate, fmp
   n_classes: 5   # hearing loss types
   
-  # Data splits (patient-stratified)
+  # Data splits (patient-stratified) - Optimized
   splits:
-    train_ratio: 0.7
+    train_ratio: 0.75    # Increased training data
     val_ratio: 0.15
-    test_ratio: 0.15
+    test_ratio: 0.10     # Reduced test set for more training data
     random_seed: 42
   
-  # Data loading
+  # Data loading - Optimized
   dataloader:
-    batch_size: 32
-    num_workers: 4
+    batch_size: 48       # Increased for better gradient estimates
+    num_workers: 6       # More workers for faster loading
     pin_memory: true
     drop_last: true
     shuffle_train: true
+    prefetch_factor: 3   # Better performance
+    persistent_workers: true  # Efficiency improvement
 
 # Model Architecture
 model:
   type: "hierarchical_unet"
   
-  # Architecture parameters
+  # Architecture parameters - Optimized
   architecture:
     signal_length: 200
     static_dim: 4
-    base_channels: 64
+    base_channels: 80      # Increased for more capacity
     n_levels: 4
     n_classes: 5
-    dropout: 0.1
+    dropout: 0.15          # Increased for better regularization
     
-    # S4 Encoder settings
+    # S4 Encoder settings - Enhanced
     encoder:
-      n_s4_layers: 2
-      d_state: 64
+      n_s4_layers: 3       # Increased depth
+      d_state: 80          # Increased capacity
+      use_enhanced_s4: true
       
-    # Transformer Decoder settings
+    # Transformer Decoder settings - Enhanced
     decoder:
-      n_transformer_layers: 2
-      n_heads: 8
+      n_transformer_layers: 3  # Increased depth
+      n_heads: 12             # More attention heads
+      use_multi_scale_attention: true
+      use_cross_attention: true
       
-    # FiLM conditioning
+    # FiLM conditioning - Enhanced
     film:
-      hidden_dim: 64
+      hidden_dim: 96       # Increased capacity
+      dropout: 0.15        # Added dropout
       
-    # Output heads
+    # Output heads - Enhanced
     outputs:
       signal_activation: "tanh"
-      peak_head_dim: 128
-      class_head_dim: 128
-      threshold_head_dim: 128
+      peak_head_dim: 256   # Increased capacity
+      class_head_dim: 256  # Increased capacity
+      threshold_head_dim: 256  # Increased capacity
+      use_attention_heads: true
+      predict_uncertainty: true
 
 # Diffusion Configuration
 diffusion:
@@ -90,27 +98,28 @@ diffusion:
 
 # Training Configuration
 training:
-  # Optimizer
+  # Optimizer - Optimized
   optimizer:
     type: "adamw"
-    learning_rate: 1e-4
-    weight_decay: 1e-5
-    betas: [0.9, 0.999]
+    learning_rate: 2e-4    # Increased for faster convergence
+    weight_decay: 1e-4     # Increased for better regularization
+    betas: [0.9, 0.95]     # Optimized betas
     eps: 1e-8
-    amsgrad: true
+    amsgrad: false         # Disabled for faster training
   
-  # Learning rate scheduler
+  # Learning rate scheduler - Optimized
   scheduler:
     type: "cosine_annealing_warm_restarts"
-    T_0: 50
-    T_mult: 2
-    eta_min: 1e-7
-    warmup_epochs: 10
+    T_0: 30               # More frequent restarts
+    T_mult: 1.5           # Smoother progression
+    eta_min: 5e-7         # Lower minimum LR
+    warmup_epochs: 5      # Shorter warmup
   
-  # Training parameters
-  epochs: 200
-  gradient_clip: 1.0
-  accumulation_steps: 1
+  # Training parameters - Optimized
+  epochs: 300             # Increased for better convergence
+  gradient_clip: 0.5      # Reduced for stability
+  accumulation_steps: 2   # Gradient accumulation
+  log_frequency: 25       # More frequent logging
   
   # Validation and checkpointing
   validation:
@@ -118,15 +127,15 @@ training:
     compute_metrics: true
   
   checkpointing:
-    save_frequency: 10
+    save_frequency: 5      # More frequent saves
     save_best: true
     save_last: true
     save_dir: "checkpoints"
   
-  # Early stopping
+  # Early stopping - Optimized
   early_stopping:
-    patience: 30
-    min_delta: 1e-6
+    patience: 50           # Increased patience
+    min_delta: 1e-5        # Increased threshold
     monitor: "val_total_loss"
     mode: "min"
 
@@ -134,25 +143,25 @@ training:
 loss:
   type: "abr_diffusion"
   
-  # Loss weights
+  # Loss weights - Optimized for better balance
   weights:
     diffusion: 1.0
-    peak_exist: 0.5
-    peak_latency: 1.0
-    peak_amplitude: 1.0
-    classification: 1.0
-    threshold: 0.8
+    peak_exist: 0.8        # Increased importance
+    peak_latency: 1.2      # Increased importance
+    peak_amplitude: 1.2    # Increased importance
+    classification: 1.5    # Increased importance
+    threshold: 1.0         # Increased importance
   
-  # Loss settings
-  peak_loss_type: "huber"  # mse, mae, huber, smooth_l1
-  huber_delta: 1.0
+  # Loss settings - Optimized
+  peak_loss_type: "smooth_l1"  # Better than huber for peaks
+  huber_delta: 0.5             # Reduced delta
   
-  # Class imbalance handling
-  class_weights: "balanced"  # "balanced", "inverse_freq", or specific weights
+  # Class imbalance handling - Enhanced
+  class_weights: "balanced"
   focal_loss:
-    use_focal: false
-    alpha: 1.0
-    gamma: 2.0
+    use_focal: true        # Enabled for better class balance
+    alpha: 0.75            # Optimized alpha
+    gamma: 2.5             # Increased gamma
   
   # Perceptual loss
   perceptual:
@@ -213,7 +222,7 @@ logging:
   level: "INFO"
   log_dir: "logs"
   use_tensorboard: true
-  use_wandb: false
+  use_wandb: true          # Enabled for better experiment tracking
   
   # Weights & Biases configuration (if enabled)
   wandb:
@@ -224,15 +233,15 @@ logging:
 # Reproducibility
 reproducibility:
   seed: 42
-  deterministic: false
-  benchmark: true
+  deterministic: true      # Enabled for reproducible results
+  benchmark: false         # Disabled for deterministic behavior
 
 # Hardware Configuration
 hardware:
   device: "auto"  # auto, cuda, cpu
   gpu_id: 0
   mixed_precision: true
-  compile_model: false  # PyTorch 2.0 compilation
+  compile_model: true   # Enabled PyTorch 2.0 compilation for speed
 
 # Paths
 paths:

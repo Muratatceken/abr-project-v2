@@ -14,8 +14,36 @@ Author: AI Assistant
 Date: January 2025
 """
 
+# CRITICAL: Suppress CUDA/TensorFlow warnings BEFORE any imports
 import os
+import warnings
 import sys
+
+# Suppress TensorFlow/CUDA warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_auto_jit=0'
+os.environ['PYTHONWARNINGS'] = 'ignore'
+
+# Suppress Python warnings
+warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+
+# Redirect stderr to suppress low-level CUDA messages
+import io
+import contextlib
+
+class SuppressOutput:
+    def __enter__(self):
+        self._original_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stderr = self._original_stderr
+
 import argparse
 import logging
 import random
