@@ -466,9 +466,25 @@ def compute_all_metrics(
             return x.detach().cpu().numpy()
         return x
     
-    # Convert outputs to numpy
+    # Convert outputs to numpy with shape handling
     pred_signals = to_numpy(model_outputs.get('signal', model_outputs.get('recon')))
     true_signals = to_numpy(batch_targets['signal'])
+    
+    # Ensure signal shapes match
+    if pred_signals.ndim == 2 and true_signals.ndim == 3:
+        # pred: [batch, seq_len], true: [batch, 1, seq_len]
+        if true_signals.shape[1] == 1:
+            true_signals = true_signals.squeeze(1)
+    elif pred_signals.ndim == 3 and true_signals.ndim == 2:
+        # pred: [batch, 1, seq_len], true: [batch, seq_len]
+        if pred_signals.shape[1] == 1:
+            pred_signals = pred_signals.squeeze(1)
+    elif pred_signals.ndim == 3 and true_signals.ndim == 3:
+        # Both 3D - ensure same shape
+        if pred_signals.shape[1] == 1 and true_signals.shape[1] != 1:
+            pred_signals = pred_signals.squeeze(1)
+        elif true_signals.shape[1] == 1 and pred_signals.shape[1] != 1:
+            true_signals = true_signals.squeeze(1)
     
     # Peak predictions
     if 'peak' in model_outputs:
@@ -502,9 +518,22 @@ def compute_all_metrics(
     pred_class_logits = to_numpy(model_outputs.get('class', model_outputs.get('classification_logits')))
     true_class = to_numpy(batch_targets['target'])
     
-    # Threshold predictions
+    # Threshold predictions with shape handling
     pred_threshold = to_numpy(model_outputs.get('threshold'))
     true_threshold = to_numpy(batch_targets['threshold'])
+    
+    # Handle threshold shape mismatch (uncertainty predictions)
+    if pred_threshold is not None and pred_threshold.ndim > 1:
+        if pred_threshold.shape[-1] == 2:
+            # Model predicts [mean, std] - use only mean for evaluation
+            pred_threshold = pred_threshold[..., 0]
+        elif pred_threshold.shape[-1] == 1:
+            # Squeeze single dimension
+            pred_threshold = pred_threshold.squeeze(-1)
+    
+    # Ensure true threshold is 1D
+    if true_threshold is not None and true_threshold.ndim > 1:
+        true_threshold = true_threshold.squeeze()
     
     # Compute metrics
     metrics = ABRMetrics()

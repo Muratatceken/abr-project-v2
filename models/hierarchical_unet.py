@@ -301,17 +301,19 @@ class OptimizedHierarchicalUNet(nn.Module):
         self, 
         x: torch.Tensor, 
         static_params: Optional[torch.Tensor] = None,
+        timesteps: Optional[torch.Tensor] = None,
         cfg_guidance_scale: float = 1.0,
         cfg_mode: str = 'training',
         force_uncond: bool = False,
         generation_mode: str = 'conditional'
     ) -> Dict[str, torch.Tensor]:
         """
-        Optimized forward pass through the hierarchical U-Net.
+        Optimized forward pass through the hierarchical U-Net with diffusion support.
         
         Args:
             x: Input signal [batch, input_channels, sequence_length]
             static_params: Static parameters [batch, static_dim] (optional for joint generation)
+            timesteps: Diffusion timesteps [batch] (optional, defaults to 0 for inference)
             cfg_guidance_scale: CFG guidance scale
             cfg_mode: CFG mode ('training', 'inference', 'unconditional')
             force_uncond: Force unconditional generation
@@ -331,6 +333,15 @@ class OptimizedHierarchicalUNet(nn.Module):
             raise ValueError("Static parameters required for conditional generation.")
         
         batch_size = x.size(0)
+        
+        # ============== TIMESTEP HANDLING FOR DIFFUSION ==============
+        if timesteps is None:
+            # Default to t=0 for inference (clean signal)
+            timesteps = torch.zeros(batch_size, device=x.device, dtype=torch.long)
+        
+        # Determine if we're in diffusion mode (t > 0) or inference mode (t = 0)
+        is_diffusion_mode = timesteps.max() > 0
+        is_inference_mode = timesteps.max() == 0
         
         # ============== STATIC PARAMETER EMBEDDING ==============
         static_emb = self.static_embedding(static_params)
@@ -395,13 +406,39 @@ class OptimizedHierarchicalUNet(nn.Module):
                 'threshold': x_final
             }
         
-        # ============== ENHANCED OUTPUT HEADS ==============
+        # ============== ENHANCED OUTPUT HEADS WITH DIFFUSION SUPPORT ==============
         
-        # Signal reconstruction
-        signal_recon = self.signal_head(task_features['signal'])
+        # ============== SIGNAL RECONSTRUCTION / NOISE PREDICTION ==============
+        if is_diffusion_mode:
+            # During diffusion training (t > 0): predict noise
+            predicted_noise = self.signal_head(task_features['signal'])
+            signal_recon = predicted_noise  # For compatibility
+        else:
+            # During inference (t = 0): predict clean signal
+            signal_recon = self.signal_head(task_features['signal'])
+            predicted_noise = None
+        
+        # ============== MULTI-TASK PREDICTIONS (ALWAYS FROM CLEAN FEATURES) ==============
+        # These predictions should be consistent regardless of diffusion mode
+        # Extract clean features for multi-task learning
+        if is_diffusion_mode:
+            # For diffusion mode, we need to extract clean features
+            # Use the final features as they contain semantic information
+            clean_features = {
+                'peaks': x_final,
+                'classification': x_final,
+                'threshold': x_final
+            }
+        else:
+            # For inference mode, features are already clean
+            clean_features = {
+                'peaks': task_features['peaks'],
+                'classification': task_features['classification'],
+                'threshold': task_features['threshold']
+            }
         
         # Peak prediction (with proper handling of outputs)
-        peak_output = self.peak_head(task_features['peaks'])
+        peak_output = self.peak_head(clean_features['peaks'])
         if len(peak_output) == 5:  # With uncertainty
             peak_exists, peak_latency, peak_amplitude, latency_std, amplitude_std = peak_output
             peak_result = (peak_exists, peak_latency, peak_amplitude, latency_std, amplitude_std)
@@ -410,18 +447,26 @@ class OptimizedHierarchicalUNet(nn.Module):
             peak_result = (peak_exists, peak_latency, peak_amplitude)
         
         # Classification
-        class_logits = self.class_head(task_features['classification'])
+        class_logits = self.class_head(clean_features['classification'])
         
         # Threshold regression
-        threshold = self.threshold_head(task_features['threshold'])
+        threshold = self.threshold_head(clean_features['threshold'])
         
-        # Prepare output dictionary
+        # ============== PREPARE OUTPUT DICTIONARY ==============
         outputs = {
             'recon': signal_recon,
             'peak': peak_result,
             'class': class_logits,
             'threshold': threshold
         }
+        
+        # Add explicit noise output for diffusion training
+        if predicted_noise is not None:
+            outputs['noise'] = predicted_noise
+        
+        # Add diffusion mode information for loss computation
+        outputs['is_diffusion_mode'] = is_diffusion_mode
+        outputs['timesteps'] = timesteps
         
         # ============== JOINT GENERATION: STATIC PARAMETER GENERATION ==============
         if generation_mode in ['joint', 'unconditional'] and self.static_param_head is not None:

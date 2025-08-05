@@ -418,6 +418,142 @@ def create_test_loader(config: DictConfig) -> DataLoader:
     return test_loader
 
 
+def evaluate_model_diffusion(
+    model: torch.nn.Module,
+    test_loader: DataLoader,
+    device: torch.device,
+    config: DictConfig
+) -> Dict[str, Any]:
+    """
+    Properly evaluate diffusion model on test data.
+    
+    Args:
+        model: Trained diffusion model
+        test_loader: Test data loader
+        device: Computation device
+        config: Configuration
+        
+    Returns:
+        Dictionary containing evaluation results
+    """
+    logger = logging.getLogger(__name__)
+    
+    # Create noise scheduler and sampler for proper diffusion evaluation
+    from utils.schedule import get_noise_schedule
+    from utils.sampling import DDIMSampler
+    
+    noise_schedule = get_noise_schedule(
+        schedule_type=config.diffusion.noise_schedule.get('type', 'cosine'),
+        num_timesteps=config.diffusion.noise_schedule.get('num_timesteps', 1000),
+        beta_start=config.diffusion.noise_schedule.get('beta_start', 1e-4),
+        beta_end=config.diffusion.noise_schedule.get('beta_end', 0.02)
+    )
+    
+    sampler = DDIMSampler(noise_schedule)
+    
+    model.eval()
+    all_metrics = []
+    all_outputs = []
+    all_targets = []
+    
+    logger.info("Evaluating diffusion model on test data...")
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(tqdm(test_loader, desc="Evaluating Diffusion Model")):
+            # Move batch to device
+            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                    for k, v in batch.items()}
+            
+            batch_size = batch['signal'].size(0)
+            
+            # METHOD 1: Test generation capability
+            # Generate synthetic signals conditioned on static params
+            try:
+                synthetic_signals = sampler.sample(
+                    model=model,
+                    shape=batch['signal'].shape,
+                    static_params=batch['static_params'],
+                    device=device,
+                    num_steps=config.diffusion.sampling.get('num_sampling_steps', 50),
+                    progress=False
+                )
+                
+                # Get predictions from synthetic signals (t=0 for final prediction)
+                outputs = model(
+                    synthetic_signals,
+                    batch['static_params'],
+                    torch.zeros(batch_size, device=device, dtype=torch.long)
+                )
+                
+            except Exception as e:
+                logger.warning(f"Diffusion sampling failed: {e}. Falling back to direct evaluation.")
+                # Fallback: Add small noise and use low timestep
+                small_noise = torch.randn_like(batch['signal']) * 0.1
+                slightly_noisy = batch['signal'] + small_noise
+                t_small = torch.full((batch_size,), 10, device=device, dtype=torch.long)
+                
+                outputs = model(
+                    slightly_noisy,
+                    batch['static_params'],
+                    t_small
+                )
+                synthetic_signals = batch['signal']  # Use original for comparison
+            
+            # Create evaluation targets comparing synthetic to original
+            eval_targets = batch.copy()
+            eval_targets['signal'] = synthetic_signals
+            
+            # Compute metrics for this batch
+            batch_metrics = compute_all_metrics(
+                model_outputs=outputs,
+                batch_targets=batch,  # Compare predictions to original targets
+                static_params=batch['static_params']
+            )
+            
+            all_metrics.append(batch_metrics)
+            
+            # Store outputs and targets for analysis
+            batch_outputs = {}
+            batch_targets = {}
+            
+            for key, value in outputs.items():
+                if isinstance(value, torch.Tensor):
+                    batch_outputs[key] = value.cpu().numpy()
+                elif isinstance(value, (list, tuple)):
+                    batch_outputs[key] = [v.cpu().numpy() if isinstance(v, torch.Tensor) else v for v in value]
+                else:
+                    batch_outputs[key] = value
+            
+            # Add synthetic signals to outputs for analysis
+            batch_outputs['synthetic_signal'] = synthetic_signals.cpu().numpy()
+            
+            for key, value in batch.items():
+                if isinstance(value, torch.Tensor):
+                    batch_targets[key] = value.cpu().numpy()
+                else:
+                    batch_targets[key] = value
+            
+            all_outputs.append(batch_outputs)
+            all_targets.append(batch_targets)
+    
+    # Aggregate metrics
+    logger.info("Aggregating metrics...")
+    aggregated_metrics = _aggregate_metrics(all_metrics)
+    
+    # Create results dictionary
+    results = {
+        'metrics': aggregated_metrics.to_dict(),
+        'detailed_metrics': [m.to_dict() for m in all_metrics],
+        'sample_outputs': all_outputs[:10],
+        'sample_targets': all_targets[:10],
+        'num_samples': len(test_loader.dataset),
+        'num_batches': len(test_loader),
+        'evaluation_type': 'diffusion'
+    }
+    
+    return results
+
+
 def evaluate_model(
     model: torch.nn.Module,
     test_loader: DataLoader,
@@ -425,7 +561,7 @@ def evaluate_model(
     config: DictConfig
 ) -> Dict[str, Any]:
     """
-    Evaluate model on test data.
+    Evaluate model on test data - automatically detects if diffusion model.
     
     Args:
         model: Trained model
@@ -435,6 +571,28 @@ def evaluate_model(
         
     Returns:
         Dictionary containing evaluation results
+    """
+    logger = logging.getLogger(__name__)
+    
+    # Check if this is a diffusion model by looking at config
+    is_diffusion = hasattr(config, 'diffusion') and config.diffusion is not None
+    
+    if is_diffusion:
+        logger.info("Detected diffusion model - using diffusion evaluation pipeline")
+        return evaluate_model_diffusion(model, test_loader, device, config)
+    else:
+        logger.info("Using direct evaluation pipeline")
+        return evaluate_model_direct(model, test_loader, device, config)
+
+
+def evaluate_model_direct(
+    model: torch.nn.Module,
+    test_loader: DataLoader,
+    device: torch.device,
+    config: DictConfig
+) -> Dict[str, Any]:
+    """
+    Direct evaluation for non-diffusion models.
     """
     logger = logging.getLogger(__name__)
     
@@ -451,15 +609,10 @@ def evaluate_model(
             batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
                     for k, v in batch.items()}
             
-            # Forward pass (inference mode - no noise)
-            # For evaluation, we use the denoising capability
-            batch_size = batch['signal'].size(0)
-            
-            # Use clean signal as input for direct evaluation
+            # Direct forward pass
             outputs = model(
-                batch['signal'],  # Clean signal
-                batch['static_params'],
-                torch.zeros(batch_size, device=device, dtype=torch.long)  # t=0 for clean
+                batch['signal'],
+                batch['static_params']
             )
             
             # Compute metrics for this batch
@@ -503,7 +656,8 @@ def evaluate_model(
         'sample_outputs': all_outputs[:10],  # Store first 10 for visualization
         'sample_targets': all_targets[:10],
         'num_samples': len(test_loader.dataset),
-        'num_batches': len(test_loader)
+        'num_batches': len(test_loader),
+        'evaluation_type': 'direct'
     }
     
     return results

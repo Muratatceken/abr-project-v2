@@ -1,0 +1,14 @@
+2025-08-05 07:35:18,053 - training.trainer - INFO - Enhanced training monitoring enabled
+2025-08-05 07:35:18,054 - training.trainer - INFO - TensorBoard logging to: /Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/logs/sequential/tensorboard
+2025-08-05 07:35:18,054 - training.trainer - INFO - Mixed precision training disabled
+2025-08-05 07:35:18,055 - training.trainer - INFO - ABR Trainer initialized on device: cpu
+2025-08-05 07:35:18,057 - training.trainer - INFO - Model parameters: 15,178,416
+2025-08-05 07:35:18,057 - training.trainer - INFO - Training samples: 38,917
+2025-08-05 07:35:18,057 - training.trainer - INFO - Validation samples: 7,686
+2025-08-05 07:35:29,303 - training.trainer - INFO - Step 0 - Total: 0.3386, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000
+2025-08-05 07:35:31,787 - training.trainer - INFO - Step 0 - Total: 0.3313, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000
+2025-08-05 07:35:33,905 - training.trainer - INFO - Step 0 - Total: 0.3458, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000
+2025-08-05 07:35:36,022 - training.trainer - INFO - Step 0 - Total: 0.3230, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000
+2025-08-05 07:35:38,023 - training.trainer - INFO - Step 0 - Total: 0.4029, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000
+2025-08-05 07:35:40,085 - training.trainer - INFO - Step 0 - Total: 0.3382, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000
+2025-08-05 07:35:42,968 - training.trainer - INFO - Step 0 - Total: 0.3649, Signal: 0.0000, Class: 0.0000, Peak: 0.0000, PeakLat: 0.0000, PeakAmp: 0.0000, Thresh: 0.0000

@@ -136,29 +136,56 @@ class ABRTrainer:
         logger.info(f"Validation samples: {len(val_loader.dataset):,}")
     
     def _setup_loss_function(self):
-        """Setup loss function with class weights."""
-        # Get class weights if needed
-        class_weights = None
-        if self.config.loss.get('class_weights') == 'balanced':
-            # Extract targets from training dataset
-            targets = []
-            for batch in self.train_loader:
-                targets.extend(batch['target'].cpu().numpy())
-            
-            class_weights = create_class_weights(
-                targets, 
-                self.config.data.n_classes, 
-                self.device
-            )
-            logger.info(f"Using balanced class weights: {class_weights}")
+        """Setup enhanced loss function with advanced class imbalance handling."""
+        # Enhanced class imbalance handling
+        use_enhanced_imbalance = self.config.loss.get('enhanced_class_balance', True)
         
-        # Create loss function
+        if use_enhanced_imbalance:
+            try:
+                from utils.class_balance import setup_class_imbalance_handling
+                
+                # Setup comprehensive class imbalance handling
+                imbalance_components = setup_class_imbalance_handling(
+                    train_dataset=self.train_loader.dataset,
+                    config=self.config,
+                    device=self.device
+                )
+                
+                # Use enhanced classification loss
+                self.enhanced_class_loss = imbalance_components['loss_function']
+                self.dynamic_weights = imbalance_components.get('dynamic_weights')
+                
+                logger.info("Enhanced class imbalance handling enabled")
+                logger.info(f"Class distribution: {imbalance_components['class_distribution']}")
+                
+            except ImportError:
+                logger.warning("Enhanced class balance module not available, using standard approach")
+                use_enhanced_imbalance = False
+        
+        if not use_enhanced_imbalance:
+            # Standard class weights approach
+            class_weights = None
+            if self.config.loss.get('class_weights') == 'balanced':
+                # Extract targets from training dataset
+                targets = []
+                for batch in self.train_loader:
+                    targets.extend(batch['target'].cpu().numpy())
+                
+                class_weights = create_class_weights(
+                    targets, 
+                    self.config.data.n_classes, 
+                    self.device
+                )
+                logger.info(f"Using balanced class weights: {class_weights}")
+            
+            self.enhanced_class_loss = None
+            self.dynamic_weights = None
+        
+        # Create main diffusion loss function
         self.loss_fn = ABRDiffusionLoss(
             n_classes=self.config.data.n_classes,
-            class_weights=class_weights,
-            use_focal_loss=self.config.loss.focal_loss.get('use_focal', False),
-            focal_alpha=self.config.loss.focal_loss.get('alpha', 1.0),
-            focal_gamma=self.config.loss.focal_loss.get('gamma', 2.0),
+            class_weights=None,  # We'll handle classification separately if enhanced
+            use_focal_loss=False,  # We'll use enhanced focal loss separately
             peak_loss_type=self.config.loss.get('peak_loss_type', 'huber'),
             huber_delta=self.config.loss.get('huber_delta', 1.0),
             device=self.device,
@@ -195,7 +222,7 @@ class ABRTrainer:
         logger.info(f"Noise schedule: {noise_config.get('type', 'cosine')} with {noise_config.get('num_timesteps', 1000)} steps")
     
     def _setup_monitoring(self):
-        """Setup monitoring and logging."""
+        """Setup enhanced monitoring and logging."""
         # Create log directories
         log_dir = Path(self.config.paths.log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -207,6 +234,22 @@ class ABRTrainer:
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+        
+        # Setup enhanced training monitor
+        use_enhanced_monitoring = self.config.logging.get('enhanced_monitoring', True)
+        if use_enhanced_monitoring:
+            try:
+                from utils.monitoring import create_training_monitor
+                self.training_monitor = create_training_monitor(
+                    config=self.config,
+                    log_dir=str(log_dir / "enhanced_monitoring")
+                )
+                logger.info("Enhanced training monitoring enabled")
+            except ImportError:
+                logger.warning("Enhanced monitoring not available")
+                self.training_monitor = None
+        else:
+            self.training_monitor = None
         
         # Setup TensorBoard
         if self.config.logging.get('use_tensorboard', True):
@@ -340,12 +383,32 @@ class ABRTrainer:
             
             num_batches += 1
             
-            # Log detailed batch metrics
+            # Enhanced monitoring and logging
             log_frequency = self.config.training.get('log_frequency', 100)
             if self.global_step % log_frequency == 0:
                 self._log_metrics(metrics, 'train', self.global_step)
                 
-                # Log detailed loss breakdown every 100 steps
+                # Enhanced monitoring
+                if self.training_monitor is not None:
+                    # Prepare batch data for monitoring
+                    outputs_dict = None
+                    targets_dict = None
+                    
+                    # Get model outputs and targets from current batch for analysis
+                    # Note: This requires the forward pass to return outputs
+                    # We'll monitor based on loss components for now
+                    
+                    self.training_monitor.log_step(
+                        step=self.global_step,
+                        epoch=self.current_epoch,
+                        loss_components=loss_components,
+                        outputs=outputs_dict,
+                        targets=targets_dict,
+                        model=self.model,
+                        optimizer=self.optimizer
+                    )
+                
+                # Log detailed loss breakdown every log_frequency steps
                 logger.info(
                     f"Step {self.global_step} - "
                     f"Total: {loss.item():.4f}, "
@@ -392,42 +455,132 @@ class ABRTrainer:
         return metrics
     
     def _forward_pass(self, batch: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Forward pass with diffusion training."""
-        # Sample random timesteps
+        """Fixed forward pass for diffusion + multi-task learning."""
         batch_size = batch['signal'].size(0)
+        
+        # Sample random timesteps for diffusion
         timesteps = torch.randint(
             0, self.noise_schedule.num_timesteps, 
             (batch_size,), device=self.device
         )
         
-        # Add noise to signals
+        # Add noise to signals (diffusion process)
         noise = torch.randn_like(batch['signal'])
         noisy_signals = self.noise_schedule.q_sample(
             batch['signal'], timesteps, noise
         )
         
-        # Forward pass through model
+        # Forward pass through model with timesteps
         if self.use_amp:
             with autocast():
                 outputs = self.model(
                     noisy_signals,
                     batch['static_params'],
-                    timesteps
+                    timesteps  # Now properly passed to model
                 )
                 
-                # Compute loss
-                loss, loss_components = self.loss_fn(outputs, batch)
+                # Compute enhanced loss with diffusion support
+                loss, loss_components = self._compute_enhanced_loss(outputs, batch, noise, timesteps)
         else:
             outputs = self.model(
                 noisy_signals,
                 batch['static_params'],
-                timesteps
+                timesteps  # Now properly passed to model
             )
             
-            # Compute loss
-            loss, loss_components = self.loss_fn(outputs, batch)
+            # Compute enhanced loss with diffusion support
+            loss, loss_components = self._compute_enhanced_loss(outputs, batch, noise, timesteps)
         
         return loss, loss_components
+    
+    def _compute_enhanced_loss(
+        self, 
+        outputs: Dict[str, torch.Tensor], 
+        batch: Dict[str, torch.Tensor],
+        noise: torch.Tensor,
+        timesteps: torch.Tensor
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Enhanced loss computation for diffusion + multi-task learning.
+        """
+        loss_components = {}
+        
+        # 1. DIFFUSION LOSS (noise prediction)
+        if 'noise' in outputs and outputs['noise'] is not None:
+            diffusion_loss = F.mse_loss(outputs['noise'], noise)
+            loss_components['diffusion_loss'] = diffusion_loss
+            
+            # Also compute signal loss for compatibility
+            signal_loss = F.mse_loss(outputs['recon'], batch['signal'])
+            loss_components['signal_loss'] = signal_loss
+            
+            # Use diffusion loss as primary signal loss
+            primary_signal_loss = diffusion_loss
+        else:
+            # Fallback: standard signal reconstruction loss
+            signal_loss = F.mse_loss(outputs['recon'], batch['signal'])
+            loss_components['signal_loss'] = signal_loss
+            primary_signal_loss = signal_loss
+        
+        # 2. MULTI-TASK LOSSES (these should be from clean features)
+        # Peak detection losses
+        if 'peak' in outputs:
+            try:
+                peak_losses = self.loss_fn.compute_peak_loss(
+                    outputs['peak'], batch['v_peak'], batch['v_peak_mask']
+                )
+                loss_components['peak_exist_loss'] = peak_losses['exist']
+                loss_components['peak_latency_loss'] = peak_losses['latency']
+                loss_components['peak_amplitude_loss'] = peak_losses['amplitude']
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Peak loss computation failed: {e}")
+                # Fallback to zero losses
+                device = outputs['peak'][0].device if isinstance(outputs['peak'], (list, tuple)) else outputs['peak'].device
+                loss_components['peak_exist_loss'] = torch.tensor(0.0, device=device, requires_grad=True)
+                loss_components['peak_latency_loss'] = torch.tensor(0.0, device=device, requires_grad=True)
+                loss_components['peak_amplitude_loss'] = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        # Enhanced classification loss
+        if 'class' in outputs:
+            try:
+                if self.enhanced_class_loss is not None:
+                    # Use enhanced focal loss with class imbalance handling
+                    class_loss = self.enhanced_class_loss(outputs['class'], batch['target'])
+                    
+                    # Update dynamic weights if available
+                    if self.dynamic_weights is not None:
+                        self.dynamic_weights.update(outputs['class'], batch['target'])
+                else:
+                    # Standard cross-entropy loss
+                    class_loss = F.cross_entropy(outputs['class'], batch['target'])
+                
+                loss_components['classification_loss'] = class_loss
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Classification loss computation failed: {e}")
+                loss_components['classification_loss'] = torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        # Threshold loss
+        if 'threshold' in outputs and 'threshold' in batch:
+            try:
+                threshold_loss = F.mse_loss(outputs['threshold'], batch['threshold'])
+                loss_components['threshold_loss'] = threshold_loss
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Threshold loss computation failed: {e}")
+                loss_components['threshold_loss'] = torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        # 3. BALANCED TOTAL LOSS for diffusion + multi-task
+        total_loss = (
+            1.0 * primary_signal_loss +  # Diffusion loss
+            0.5 * loss_components.get('classification_loss', 0) +
+            0.3 * loss_components.get('peak_exist_loss', 0) +
+            0.2 * loss_components.get('peak_latency_loss', 0) +
+            0.1 * loss_components.get('peak_amplitude_loss', 0) +
+            0.3 * loss_components.get('threshold_loss', 0)
+        )
+        
+        loss_components['total_loss'] = total_loss
+        
+        return total_loss, loss_components
     
     def _update_metrics(self, metrics: TrainingMetrics, loss_components: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]):
         """Update training metrics."""
@@ -561,6 +714,7 @@ class ABRTrainer:
             
             for epoch in range(self.current_epoch, self.config.training.epochs):
                 self.current_epoch = epoch
+                epoch_start_time = time.time()
                 
                 # Training phase
                 train_metrics = self.train_epoch()
@@ -597,6 +751,16 @@ class ABRTrainer:
                 
                 self._log_metrics(train_metrics, 'train', epoch)
                 self._log_metrics(val_metrics, 'val', epoch)
+                
+                # Enhanced epoch monitoring
+                if self.training_monitor is not None:
+                    epoch_time = time.time() - epoch_start_time if 'epoch_start_time' in locals() else 0
+                    self.training_monitor.log_epoch(
+                        epoch=epoch,
+                        train_metrics=train_metrics.to_dict(),
+                        val_metrics=val_metrics.to_dict(),
+                        epoch_time=epoch_time
+                    )
                 
                 # Checkpointing
                 is_best = val_metrics.total_loss < self.best_val_loss

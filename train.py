@@ -334,16 +334,34 @@ def main():
             val_loader = [single_batch] * 10
             config.training.epochs = 50
         
-        # Create trainer
+        # Create trainer (sequential or standard)
         logger.info("Initializing trainer...")
-        trainer = ABRTrainer(
-            config=config,
-            model=model,
-            train_loader=train_loader,
-            val_loader=val_loader,
-            test_loader=test_loader,
-            device=device
-        )
+        
+        # Check if sequential training is enabled
+        use_sequential = (hasattr(config, 'sequential_training') and 
+                         config.sequential_training.get('enabled', False))
+        
+        if use_sequential:
+            from training.sequential_trainer import SequentialTrainer
+            trainer = SequentialTrainer(
+                config=config,
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=test_loader,
+                device=device
+            )
+            logger.info("Sequential trainer initialized for curriculum learning")
+        else:
+            trainer = ABRTrainer(
+                config=config,
+                model=model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                test_loader=test_loader,
+                device=device
+            )
+            logger.info("Standard trainer initialized")
         
         # Save training configuration
         config_save_path = Path(config.paths.checkpoint_dir) / "training_config.yaml"

@@ -1,0 +1,323 @@
+{
+  "timestamp": "2025-08-05T03:52:19.164489",
+  "evaluation_time_seconds": 35.6122682094574,
+  "model_info": {
+    "model_class": "OptimizedHierarchicalUNet",
+    "total_parameters": 80298680,
+    "trainable_parameters": 80298680,
+    "device": "cuda"
+  },
+  "dataset_info": {
+    "num_samples": 5358,
+    "signal_shape": [
+      200
+    ],
+    "num_classes": 5,
+    "has_uncertainty": false
+  },
+  "signal_quality": {
+    "basic_metrics": {
+      "mse": 3.61785888671875,
+      "mae": 1.5077862739562988,
+      "rmse": 1.9020670037406016,
+      "correlation_mean": -0.03225454315543175,
+      "correlation_std": 0.12067092210054398,
+      "snr_mean_db": -4.630362941017057,
+      "snr_std_db": 11.807202684450465,
+      "dtw_distance_mean": 1.4894898319244385,
+      "dtw_distance_std": 0.06405900650262067
+    },
+    "spectral_metrics": {
+      "spectral_correlation": -0.1293722540140152,
+      "spectral_mse": 3.472857084877304
+    },
+    "temporal_metrics": {
+      "peak_count_correlation": -0.09625819733615897,
+      "peak_count_mae": 12.05
+    },
+    "perceptual_metrics": {}
+  },
+  "classification": {
+    "basic_metrics": {
+      "accuracy": 0.7980589772303098,
+      "f1_macro": 0.17753788665144282,
+      "f1_weighted": 0.7084285212034056
+    },
+    "per_class_metrics": {
+      "0": {
+        "precision": 0.7980589772303098,
+        "recall": 1.0,
+        "f1-score": 0.8876894332572141,
+        "support": 4276.0
+      },
+      "1": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 18.0
+      },
+      "2": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 599.0
+      },
+      "3": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 142.0
+      },
+      "4": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 323.0
+      },
+      "accuracy": 0.7980589772303098,
+      "macro avg": {
+        "precision": 0.15961179544606197,
+        "recall": 0.2,
+        "f1-score": 0.17753788665144282,
+        "support": 5358.0
+      },
+      "weighted avg": {
+        "precision": 0.6368981311378882,
+        "recall": 0.7980589772303098,
+        "f1-score": 0.7084285212034056,
+        "support": 5358.0
+      }
+    },
+    "confusion_matrix": {
+      "matrix": [
+        [
+          4276,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          18,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          599,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          142,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          323,
+          0,
+          0,
+          0,
+          0
+        ]
+      ],
+      "normalized": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          1.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ]
+      ]
+    },
+    "roc_analysis": {
+      "per_class_auc": {
+        "0": 0.6143615917583244,
+        "1": 0.677257594673325,
+        "2": 0.6110546715633431,
+        "3": 0.4135575531409315,
+        "4": 0.5818647178727238
+      },
+      "macro_auc": 0.5796192258017296
+    },
+    "confidence_analysis": {
+      "mean_confidence_correct": 0.5238770842552185,
+      "mean_confidence_incorrect": 0.5237077474594116,
+      "confidence_correlation_with_accuracy": 0.11678162879203202
+    }
+  },
+  "peak_detection": {
+    "existence_metrics": {},
+    "latency_metrics": {},
+    "amplitude_metrics": {},
+    "timing_accuracy": {}
+  },
+  "threshold_regression": {
+    "regression_metrics": {
+      "mae_db": 14.904304504394531,
+      "rmse_db": 22.31627326069686,
+      "r2_score": -0.08258819580078125,
+      "correlation": 0.3838241398334503,
+      "mean_error_db": -6.165683269500732,
+      "std_error_db": 21.44761848449707
+    },
+    "clinical_metrics": {
+      "category_accuracy": 0.5533781261664801,
+      "category_f1_score": 0.14249669590291963,
+      "confusion_matrix": [
+        [
+          2965,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          1345,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          865,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          39,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          144,
+          0,
+          0,
+          0,
+          0
+        ]
+      ]
+    },
+    "error_analysis": {
+      "within_5db_percent": 28.163493840985442,
+      "within_10db_percent": 49.30944382232176,
+      "within_15db_percent": 67.80515117581187,
+      "max_error_db": 93.5296630859375,
+      "percentile_95_error_db": 46.36656188964844,
+      "percentile_99_error_db": 86.90711212158203
+    }
+  },
+  "uncertainty": {
+    "message": "No uncertainty information available"
+  },
+  "clinical_analysis": {
+    "diagnostic_accuracy": {
+      "overall_accuracy": 0.5533781261664801,
+      "diagnosis_report": {
+        "Mild Loss": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1-score": 0.0,
+          "support": 1345.0
+        },
+        "Moderate Loss": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1-score": 0.0,
+          "support": 865.0
+        },
+        "Normal": {
+          "precision": 0.5533781261664801,
+          "recall": 1.0,
+          "f1-score": 0.7124834795145981,
+          "support": 2965.0
+        },
+        "Profound Loss": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1-score": 0.0,
+          "support": 144.0
+        },
+        "Severe Loss": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1-score": 0.0,
+          "support": 39.0
+        },
+        "accuracy": 0.5533781261664801,
+        "macro avg": {
+          "precision": 0.11067562523329602,
+          "recall": 0.2,
+          "f1-score": 0.14249669590291963,
+          "support": 5358.0
+        },
+        "weighted avg": {
+          "precision": 0.3062273505195247,
+          "recall": 0.5533781261664801,
+          "f1-score": 0.3942727728183619,
+          "support": 5358.0
+        }
+      }
+    },
+    "clinical_correlation": {},
+    "agreement_analysis": {
+      "bias_db": -6.165683269500732,
+      "limits_of_agreement_db": [
+        -48.20301818847656,
+        35.87165069580078
+      ],
+      "within_limits_percent": 92.94512877939529
+    }
+  },
+  "demographic_analysis": {
+    "age_analysis": {},
+    "gender_analysis": {},
+    "ear_analysis": {},
+    "stimulus_analysis": {},
+    "message": "Demographic analysis requires metadata with age, gender, ear, and stimulus information"
+  },
+  "summary_metrics": {
+    "overall_score": 0.0
+  },
+  "recommendations": [
+    "Model performance is excellent across all metrics!"
+  ]
+}

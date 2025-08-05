@@ -1,0 +1,163 @@
+# Simplified ABR Model Configuration
+# Optimized for stable training and easier convergence
+
+project:
+  name: "ABR_Simplified_Model"
+  description: "Simplified ABR Model for Stable Training"
+  version: "1.0.0"
+  author: "AI Assistant - Simplified Architecture"
+
+# Data Configuration
+data:
+  dataset_path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
+  signal_length: 200
+  static_dim: 4
+  n_classes: 5
+  
+  splits:
+    train_ratio: 0.75
+    val_ratio: 0.15
+    test_ratio: 0.10
+    random_seed: 42
+  
+  # Conservative data loading
+  dataloader:
+    batch_size: 16         # Moderate batch size
+    num_workers: 2
+    pin_memory: true
+    drop_last: true
+    shuffle_train: true
+    prefetch_factor: 1
+    persistent_workers: true
+
+# Simplified Model Architecture
+model:
+  type: "simplified_abr"
+  
+  architecture:
+    signal_length: 200
+    static_dim: 4
+    base_channels: 64      # Moderate complexity
+    n_levels: 3           # Simple 3-level architecture
+    blocks_per_level: 2   # 2 blocks per level
+    dropout: 0.15         # Moderate regularization
+    predict_uncertainty: true
+    
+    # No complex S4 or deep transformers
+    # Uses simplified attention and residual blocks
+
+# Simplified Diffusion
+diffusion:
+  noise_schedule:
+    type: "linear"         # Simpler schedule
+    num_timesteps: 250     # Fewer timesteps
+    beta_start: 1e-4
+    beta_end: 0.01
+  
+  sampling:
+    type: "ddim"
+    num_sampling_steps: 20  # Fast sampling
+    temperature: 1.0
+    clip_denoised: true
+
+# Conservative Training
+training:
+  optimizer:
+    type: "adamw"
+    learning_rate: 1e-4    # Higher LR for simpler model
+    weight_decay: 1e-5
+    betas: [0.9, 0.999]
+    eps: 1e-8
+  
+  scheduler:
+    type: "cosine_annealing"
+    T_max: 100
+    eta_min: 1e-7
+  
+  epochs: 100             # Fewer epochs needed
+  gradient_clip: 1.0      # Moderate clipping
+  accumulation_steps: 4   # Moderate accumulation
+  log_frequency: 10       # Frequent logging
+  
+  validation:
+    frequency: 1
+    compute_metrics: true
+  
+  checkpointing:
+    save_frequency: 10
+    save_best: true
+    save_last: true
+    save_dir: "checkpoints/simplified"
+  
+  early_stopping:
+    patience: 20
+    min_delta: 1e-5
+    monitor: "val_total_loss"
+    mode: "min"
+
+# Balanced Loss Weights
+loss:
+  type: "abr_diffusion"
+  
+  # Carefully balanced weights
+  weights:
+    diffusion: 1.0
+    peak_exist: 0.2
+    peak_latency: 0.1
+    peak_amplitude: 0.05
+    classification: 1.5    # Higher priority
+    threshold: 0.3
+  
+  peak_loss_type: "smooth_l1"
+  huber_delta: 0.1
+  
+  # Enhanced class balance
+  enhanced_class_balance: true
+  class_weights: "balanced"
+  focal_loss:
+    use_focal: true
+    alpha: 1.5
+    gamma: 2.5
+
+# Enhanced Monitoring
+logging:
+  level: "INFO"
+  log_dir: "logs/simplified"
+  use_tensorboard: true
+  use_wandb: false
+  enhanced_monitoring: true
+  
+  # Detailed tracking
+  detailed_logging: true
+  log_model_gradients: true
+  log_loss_components: true
+
+# Evaluation
+evaluation:
+  evaluation_type: "diffusion"
+  metrics:
+    signal_metrics: ["mse", "mae", "correlation", "snr"]
+    peak_metrics: ["peak_mae", "peak_accuracy", "existence_f1"]
+    classification_metrics: ["accuracy", "f1_macro", "f1_weighted"]
+    threshold_metrics: ["threshold_mae", "threshold_r2"]
+  
+  visualization:
+    save_plots: true
+    plot_types: ["reconstruction", "peaks", "classification"]
+    n_samples_plot: 10
+  
+  output_dir: "outputs/simplified"
+
+# Hardware
+hardware:
+  device: "auto"
+  mixed_precision: true
+  compile_model: false
+
+# Paths
+paths:
+  data_dir: "data"
+  model_dir: "models"
+  checkpoint_dir: "checkpoints/simplified"
+  output_dir: "outputs/simplified"
+  log_dir: "logs/simplified"
