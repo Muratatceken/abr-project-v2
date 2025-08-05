@@ -306,10 +306,26 @@ class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMet
                 ground_truth['thresholds'].append(targets['thresholds'].cpu())
                 ground_truth['metadata'].append(targets.get('metadata', {}))
         
-        # Concatenate all predictions
+        # Concatenate all predictions - handle different data types
         for key in predictions:
             if predictions[key]:
-                predictions[key] = torch.cat(predictions[key], dim=0)
+                if key == 'peak_predictions':
+                    # Handle peak predictions which are lists of tuples
+                    # Convert to proper tensor format
+                    concatenated_peaks = []
+                    for batch_peaks in predictions[key]:
+                        if isinstance(batch_peaks, list) and len(batch_peaks) > 0:
+                            # Each element in batch_peaks is a tuple of tensors
+                            batch_tensor = torch.stack([torch.stack(batch_peaks)])
+                            concatenated_peaks.append(batch_tensor)
+                        else:
+                            # Fallback for unexpected format
+                            concatenated_peaks.append(batch_peaks)
+                    if concatenated_peaks:
+                        predictions[key] = torch.cat(concatenated_peaks, dim=0)
+                else:
+                    # Standard tensor concatenation
+                    predictions[key] = torch.cat(predictions[key], dim=0)
         
         for key in ground_truth:
             if ground_truth[key] and isinstance(ground_truth[key][0], torch.Tensor):
