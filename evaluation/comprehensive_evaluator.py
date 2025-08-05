@@ -226,7 +226,7 @@ class ComprehensiveEvaluationMethods:
     def _evaluate_peak_detection(self) -> Dict[str, Any]:
         """Evaluate peak detection performance."""
         pred_peaks = self.predictions['peak_predictions'].numpy()
-        true_peaks = self.ground_truth['peaks'].numpy()
+        true_peaks = self.ground_truth['peak_labels'].numpy()
         
         results = {
             'existence_metrics': {},

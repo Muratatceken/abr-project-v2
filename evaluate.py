@@ -252,6 +252,7 @@ class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMet
             'signals': [],
             'classifications': [],
             'peak_labels': [],
+            'peak_masks': [],
             'thresholds': [],
             'metadata': []
         }
@@ -303,9 +304,10 @@ class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMet
                 
                 # Store ground truth
                 ground_truth['signals'].append(targets['signal'].cpu())
-                ground_truth['classifications'].append(targets['classification'].cpu())
-                ground_truth['peak_labels'].append(targets['peaks'].cpu())
-                ground_truth['thresholds'].append(targets['thresholds'].cpu())
+                ground_truth['classifications'].append(targets['target'].cpu())
+                ground_truth['peak_labels'].append(targets['v_peak'].cpu())
+                ground_truth['peak_masks'].append(targets.get('v_peak_mask', torch.ones_like(targets['v_peak'])).cpu())
+                ground_truth['thresholds'].append(targets['threshold'].cpu())
                 ground_truth['metadata'].append(targets.get('metadata', {}))
         
         # Concatenate all predictions
