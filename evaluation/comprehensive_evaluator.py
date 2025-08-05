@@ -222,15 +222,26 @@ class ComprehensiveEvaluationMethods:
             pred_exists = (pred_peaks[..., 0] > 0.5).astype(int)  # Binary threshold
             true_exists = (true_peaks[..., 0] > 0.5).astype(int)
             
+            # Debug shapes
+            print(f"DEBUG: pred_peaks.shape = {pred_peaks.shape}")
+            print(f"DEBUG: true_peaks.shape = {true_peaks.shape}")
+            print(f"DEBUG: pred_exists.shape = {pred_exists.shape}")
+            print(f"DEBUG: true_exists.shape = {true_exists.shape}")
+            
+            # Ensure consistent shapes
+            min_len = min(len(pred_exists.flatten()), len(true_exists.flatten()))
+            pred_exists_flat = pred_exists.flatten()[:min_len]
+            true_exists_flat = true_exists.flatten()[:min_len]
+            
             # Peak existence metrics
-            exist_accuracy = accuracy_score(true_exists.flatten(), pred_exists.flatten())
-            exist_f1 = f1_score(true_exists.flatten(), pred_exists.flatten(), average='macro')
+            exist_accuracy = accuracy_score(true_exists_flat, pred_exists_flat)
+            exist_f1 = f1_score(true_exists_flat, pred_exists_flat, average='macro')
             
             results['existence_metrics'] = {
                 'accuracy': float(exist_accuracy),
                 'f1_score': float(exist_f1),
-                'precision': float(f1_score(true_exists.flatten(), pred_exists.flatten(), average='macro')),
-                'recall': float(f1_score(true_exists.flatten(), pred_exists.flatten(), average='macro'))
+                'precision': float(f1_score(true_exists_flat, pred_exists_flat, average='macro')),
+                'recall': float(f1_score(true_exists_flat, pred_exists_flat, average='macro'))
             }
             
             # Latency metrics (only for existing peaks)
