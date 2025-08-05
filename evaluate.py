@@ -348,7 +348,7 @@ def load_model_and_config(checkpoint_path: str, config_path: Optional[str] = Non
     # Load checkpoint
     logger.info(f"Loading checkpoint from: {checkpoint_path}")
     # Load checkpoint with weights_only=False for OmegaConf compatibility
-    checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Load configuration
     if config_path:
