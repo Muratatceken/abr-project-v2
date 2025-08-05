@@ -266,10 +266,10 @@ class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMet
                     batch_size = batch['signal'].shape[0]
                     targets = {
                         'signal': batch['signal'],
-                        'classification': batch['target'],
-                        'peaks': torch.stack([batch.get('v_peak', torch.zeros(batch_size, 2)), 
-                                            batch.get('v_peak_mask', torch.ones(batch_size, 2))], dim=-1) if 'v_peak' in batch else torch.zeros(batch_size, 2, 2),
-                        'thresholds': batch.get('threshold', torch.zeros(batch_size, 1))
+                        'target': batch['target'],
+                        'v_peak': batch.get('v_peak', torch.zeros(batch_size, 2)),
+                        'v_peak_mask': batch.get('v_peak_mask', torch.ones(batch_size, 2)),
+                        'threshold': batch.get('threshold', torch.zeros(batch_size, 1))
                     }
                 else:
                     # Handle tuple/list format
