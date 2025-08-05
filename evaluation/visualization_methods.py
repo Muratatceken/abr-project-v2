@@ -41,22 +41,60 @@ class VisualizationMethods:
         self._create_overview_dashboard()
         
         # 2. Signal quality analysis plots
-        self._create_signal_quality_plots()
+        try:
+            self._create_signal_quality_plots()
+            print("   ✅ Signal quality plots created")
+        except Exception as e:
+            print(f"   ❌ Signal quality plots failed: {e}")
         
         # 3. Classification analysis plots
-        self._create_classification_plots()
+        try:
+            self._create_classification_plots()
+            print("   ✅ Classification plots created")
+        except Exception as e:
+            print(f"   ❌ Classification plots failed: {e}")
         
         # 4. Peak detection analysis plots
-        self._create_peak_detection_plots()
+        try:
+            self._create_peak_detection_plots()
+            print("   ✅ Peak detection plots created")
+        except Exception as e:
+            print(f"   ❌ Peak detection plots failed: {e}")
         
         # 5. Threshold regression plots
-        self._create_threshold_regression_plots()
+        try:
+            self._create_threshold_regression_plots()
+            print("   ✅ Threshold regression plots created")
+        except Exception as e:
+            print(f"   ❌ Threshold regression plots failed: {e}")
         
         # 6. Uncertainty analysis plots
-        self._create_uncertainty_plots()
+        try:
+            self._create_uncertainty_plots()
+            print("   ✅ Uncertainty plots created")
+        except Exception as e:
+            print(f"   ❌ Uncertainty plots failed: {e}")
         
         # 7. Clinical correlation plots
-        self._create_clinical_plots()
+        try:
+            self._create_clinical_plots()
+            print("   ✅ Clinical plots created")
+        except Exception as e:
+            print(f"   ❌ Clinical plots failed: {e}")
+        
+        # 8. Class-wise analysis
+        try:
+            self._create_class_wise_analysis()
+            print("   ✅ Class-wise analysis created")
+        except Exception as e:
+            print(f"   ❌ Class-wise analysis failed: {e}")
+        
+        # 9. Static parameters analysis
+        try:
+            self._create_static_params_analysis()
+            print("   ✅ Static parameters analysis created")
+        except Exception as e:
+            print(f"   ❌ Static parameters analysis failed: {e}")
         
         print(f"✅ Static visualizations saved to {self.plots_dir}")
     
@@ -744,3 +782,306 @@ Evaluation time: {results['evaluation_time_seconds']:.2f} seconds
             
             pred_df = pd.DataFrame(pred_data)
             pred_df.to_csv(self.data_dir / 'predictions.csv', index=False)
+    
+    def _create_class_wise_analysis(self) -> None:
+        """Create class-wise signal reconstruction analysis."""
+        if 'classification' not in self.results or len(self.predictions['signals']) == 0:
+            return
+        
+        print("   Creating class-wise signal analysis...")
+        
+        # Get predictions and ground truth
+        pred_signals = self.predictions['signals'].numpy()
+        true_signals = self.ground_truth['signals'].numpy()
+        true_classes = self.ground_truth['classifications'].numpy()
+        pred_classes = torch.argmax(self.predictions['classifications'], dim=1).numpy()
+        
+        # Actual class names from the dataset
+        class_names = ['NORMAL', 'NÖROPATİ', 'SNİK', 'TOTAL', 'İTİK']
+        unique_classes = np.unique(true_classes)
+        
+        fig, axes = plt.subplots(3, 2, figsize=(15, 18))
+        fig.suptitle('Class-wise Signal Reconstruction Analysis', fontsize=16, fontweight='bold')
+        
+        # 1. Signal quality by class
+        ax = axes[0, 0]
+        mse_by_class = []
+        corr_by_class = []
+        
+        for class_id in unique_classes:
+            mask = true_classes == class_id
+            if np.sum(mask) > 0:
+                class_true = true_signals[mask]
+                class_pred = pred_signals[mask]
+                
+                # MSE for this class
+                mse = np.mean((class_true - class_pred)**2)
+                mse_by_class.append(mse)
+                
+                # Average correlation for this class
+                correlations = []
+                for i in range(len(class_true)):
+                    if np.std(class_true[i]) > 1e-10 and np.std(class_pred[i]) > 1e-10:
+                        corr = np.corrcoef(class_true[i].flatten(), class_pred[i].flatten())[0,1]
+                        if np.isfinite(corr):
+                            correlations.append(corr)
+                
+                corr_by_class.append(np.mean(correlations) if correlations else 0.0)
+        
+        x_pos = np.arange(len(unique_classes))
+        ax.bar(x_pos, mse_by_class, alpha=0.7, color='lightblue')
+        ax.set_xlabel('Hearing Loss Class')
+        ax.set_ylabel('Mean Squared Error')
+        ax.set_title('Signal Reconstruction MSE by Class')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([class_names[i] for i in unique_classes], rotation=45)
+        
+        # 2. Correlation by class
+        ax = axes[0, 1]
+        ax.bar(x_pos, corr_by_class, alpha=0.7, color='lightgreen')
+        ax.set_xlabel('Hearing Loss Class')
+        ax.set_ylabel('Mean Correlation')
+        ax.set_title('Signal Correlation by Class')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([class_names[i] for i in unique_classes], rotation=45)
+        
+        # 3. Example signals by class
+        ax = axes[1, 0]
+        colors = ['blue', 'orange', 'green', 'red', 'purple']
+        time_axis = np.linspace(0, 10, pred_signals.shape[-1])
+        
+        for i, class_id in enumerate(unique_classes[:3]):  # Show first 3 classes
+            mask = true_classes == class_id
+            if np.sum(mask) > 0:
+                idx = np.where(mask)[0][0]  # First sample of this class
+                ax.plot(time_axis, true_signals[idx].flatten() + i*2, 
+                       color=colors[i], linestyle='-', alpha=0.8, 
+                       label=f'{class_names[class_id]} (True)')
+                ax.plot(time_axis, pred_signals[idx].flatten() + i*2, 
+                       color=colors[i], linestyle='--', alpha=0.8,
+                       label=f'{class_names[class_id]} (Pred)')
+        
+        ax.set_xlabel('Time (ms)')
+        ax.set_ylabel('Amplitude (offset)')
+        ax.set_title('Signal Examples by Class')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 4. Threshold predictions by class
+        if len(self.predictions['thresholds']) > 0:
+            ax = axes[1, 1]
+            pred_thresholds = self.predictions['thresholds'].numpy()
+            true_thresholds = self.ground_truth['thresholds'].numpy()
+            
+            # Handle multiple threshold outputs
+            if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
+                pred_thresholds = pred_thresholds[:, 0]
+            
+            thresh_by_class_true = []
+            thresh_by_class_pred = []
+            
+            for class_id in unique_classes:
+                mask = true_classes == class_id
+                if np.sum(mask) > 0:
+                    thresh_by_class_true.append(np.mean(true_thresholds[mask]))
+                    thresh_by_class_pred.append(np.mean(pred_thresholds[mask]))
+            
+            x_pos = np.arange(len(unique_classes))
+            width = 0.35
+            ax.bar(x_pos - width/2, thresh_by_class_true, width, label='True', alpha=0.7)
+            ax.bar(x_pos + width/2, thresh_by_class_pred, width, label='Predicted', alpha=0.7)
+            ax.set_xlabel('Hearing Loss Class')
+            ax.set_ylabel('Threshold (dB)')
+            ax.set_title('Average Thresholds by Class')
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels([class_names[i] for i in unique_classes], rotation=45)
+            ax.legend()
+        
+        # 5. Classification confusion by signal quality
+        ax = axes[2, 0]
+        from sklearn.metrics import confusion_matrix
+        cm = confusion_matrix(true_classes, pred_classes)
+        im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+        ax.set_title('Classification Confusion Matrix')
+        
+        tick_marks = np.arange(len(unique_classes))
+        ax.set_xticks(tick_marks)
+        ax.set_yticks(tick_marks)
+        ax.set_xticklabels([class_names[i] for i in unique_classes], rotation=45)
+        ax.set_yticklabels([class_names[i] for i in unique_classes])
+        
+        # Add text annotations
+        thresh = cm.max() / 2.
+        for i in range(len(unique_classes)):
+            for j in range(len(unique_classes)):
+                ax.text(j, i, format(cm[i, j], 'd'),
+                       ha="center", va="center",
+                       color="white" if cm[i, j] > thresh else "black")
+        
+        ax.set_ylabel('True Class')
+        ax.set_xlabel('Predicted Class')
+        
+        # 6. Error distribution by class
+        ax = axes[2, 1]
+        if len(self.predictions['thresholds']) > 0:
+            errors_by_class = []
+            labels = []
+            
+            for class_id in unique_classes:
+                mask = true_classes == class_id
+                if np.sum(mask) > 5:  # Need sufficient samples
+                    class_errors = pred_thresholds[mask] - true_thresholds[mask]
+                    errors_by_class.append(class_errors)
+                    labels.append(class_names[class_id])
+            
+            if errors_by_class:
+                ax.boxplot(errors_by_class, labels=labels)
+                ax.set_ylabel('Prediction Error (dB)')
+                ax.set_title('Threshold Error Distribution by Class')
+                ax.tick_params(axis='x', rotation=45)
+                ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(self.plots_dir / 'class_wise_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()
+    
+    def _create_static_params_analysis(self) -> None:
+        """Create static parameters correlation analysis."""
+        if 'static_params' not in self.ground_truth:
+            print("   No static parameters available for analysis")
+            return
+        
+        print("   Creating static parameters analysis...")
+        
+        static_params = self.ground_truth['static_params'].numpy()
+        if len(static_params.shape) == 1:
+            static_params = static_params.reshape(-1, 1)
+        
+        # Get predictions
+        pred_classes = torch.argmax(self.predictions['classifications'], dim=1).numpy()
+        true_classes = self.ground_truth['classifications'].numpy()
+        
+        pred_thresholds = self.predictions['thresholds'].numpy()
+        true_thresholds = self.ground_truth['thresholds'].numpy()
+        
+        # Handle multiple threshold outputs
+        if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
+            pred_thresholds = pred_thresholds[:, 0]
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        fig.suptitle('Static Parameters Analysis', fontsize=16, fontweight='bold')
+        
+        # Actual parameter names from the dataset metadata
+        param_names = ['Age', 'Intensity', 'Stimulus Rate', 'FMP'][:static_params.shape[1]]
+        
+        # 1. Static params vs true class
+        ax = axes[0, 0]
+        for param_idx in range(min(2, static_params.shape[1])):  # Show first 2 params
+            for class_id in np.unique(true_classes):
+                mask = true_classes == class_id
+                if np.sum(mask) > 0:
+                    ax.scatter(static_params[mask, param_idx], 
+                             np.full(np.sum(mask), class_id) + np.random.normal(0, 0.1, np.sum(mask)),
+                             alpha=0.6, label=f'Class {class_id}' if param_idx == 0 else '')
+        
+        ax.set_xlabel(param_names[0] if len(param_names) > 0 else 'Parameter 0')
+        ax.set_ylabel('True Class')
+        ax.set_title('Static Parameters vs True Class')
+        if static_params.shape[1] >= 1:
+            ax.legend()
+        
+        # 2. Static params vs predicted class
+        ax = axes[0, 1]
+        for param_idx in range(min(2, static_params.shape[1])):
+            for class_id in np.unique(pred_classes):
+                mask = pred_classes == class_id
+                if np.sum(mask) > 0:
+                    ax.scatter(static_params[mask, param_idx], 
+                             np.full(np.sum(mask), class_id) + np.random.normal(0, 0.1, np.sum(mask)),
+                             alpha=0.6, label=f'Class {class_id}' if param_idx == 0 else '')
+        
+        ax.set_xlabel(param_names[0] if len(param_names) > 0 else 'Parameter 0')
+        ax.set_ylabel('Predicted Class')
+        ax.set_title('Static Parameters vs Predicted Class')
+        
+        # 3. Static params vs threshold error
+        ax = axes[0, 2]
+        threshold_errors = pred_thresholds - true_thresholds
+        
+        for param_idx in range(min(2, static_params.shape[1])):
+            ax.scatter(static_params[:, param_idx], threshold_errors, alpha=0.6,
+                      label=param_names[param_idx] if param_idx < len(param_names) else f'Param {param_idx}')
+        
+        ax.set_xlabel('Static Parameter Value')
+        ax.set_ylabel('Threshold Error (dB)')
+        ax.set_title('Static Parameters vs Threshold Error')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        
+        # 4-6. Correlation matrices and distributions
+        if static_params.shape[1] > 1:
+            # 4. Parameter correlation matrix
+            ax = axes[1, 0]
+            param_corr = np.corrcoef(static_params.T)
+            im = ax.imshow(param_corr, cmap='coolwarm', vmin=-1, vmax=1)
+            ax.set_title('Static Parameters Correlation')
+            ax.set_xticks(range(len(param_names)))
+            ax.set_yticks(range(len(param_names)))
+            ax.set_xticklabels(param_names, rotation=45)
+            ax.set_yticklabels(param_names)
+            
+            # Add correlation values
+            for i in range(len(param_names)):
+                for j in range(len(param_names)):
+                    ax.text(j, i, f'{param_corr[i, j]:.2f}',
+                           ha="center", va="center", 
+                           color="white" if abs(param_corr[i, j]) > 0.5 else "black")
+            
+            plt.colorbar(im, ax=ax)
+        
+        # 5. Parameter distributions by class
+        ax = axes[1, 1]
+        if static_params.shape[1] > 0:
+            class_names = ['NORMAL', 'NÖROPATİ', 'SNİK', 'TOTAL', 'İTİK']
+            param_idx = 0  # Use first parameter
+            
+            for class_id in np.unique(true_classes):
+                mask = true_classes == class_id
+                if np.sum(mask) > 5:
+                    ax.hist(static_params[mask, param_idx], alpha=0.7, bins=20,
+                           label=class_names[class_id] if class_id < len(class_names) else f'Class {class_id}')
+            
+            ax.set_xlabel(param_names[0] if len(param_names) > 0 else 'Parameter 0')
+            ax.set_ylabel('Frequency')
+            ax.set_title('Parameter Distribution by Class')
+            ax.legend()
+        
+        # 6. Parameter impact on prediction accuracy
+        ax = axes[1, 2]
+        if static_params.shape[1] > 0:
+            correct_predictions = (pred_classes == true_classes)
+            
+            # Bin the parameter and calculate accuracy per bin
+            param_vals = static_params[:, 0]
+            n_bins = 10
+            bins = np.linspace(np.min(param_vals), np.max(param_vals), n_bins + 1)
+            bin_centers = (bins[:-1] + bins[1:]) / 2
+            accuracies = []
+            
+            for i in range(n_bins):
+                mask = (param_vals >= bins[i]) & (param_vals < bins[i + 1])
+                if np.sum(mask) > 0:
+                    acc = np.mean(correct_predictions[mask])
+                    accuracies.append(acc)
+                else:
+                    accuracies.append(0.0)
+            
+            ax.bar(bin_centers, accuracies, width=(bins[1] - bins[0]) * 0.8, alpha=0.7)
+            ax.set_xlabel(param_names[0] if len(param_names) > 0 else 'Parameter 0')
+            ax.set_ylabel('Classification Accuracy')
+            ax.set_title('Accuracy vs Parameter Value')
+            ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(self.plots_dir / 'static_params_analysis.png', dpi=300, bbox_inches='tight')
+        plt.close()

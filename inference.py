@@ -86,7 +86,7 @@ class ABRInference:
         """Load model and configuration."""
         # Load checkpoint
         self.logger.info(f"Loading checkpoint from: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         # Load configuration
         if config_path:
@@ -363,7 +363,7 @@ class ABRInference:
             predicted_class = int(np.argmax(class_probs))
             
             # Map to hearing loss categories
-            class_names = ['Normal', 'Mild', 'Moderate', 'Severe', 'Profound']
+            class_names = ['NORMAL', 'NÖROPATİ', 'SNİK', 'TOTAL', 'İTİK']
             
             results['classification'] = {
                 'predicted_class': predicted_class,

@@ -69,16 +69,30 @@ class ComprehensiveEvaluationMethods:
         mse = mean_squared_error(true_signals.flatten(), pred_signals.flatten())
         mae = mean_absolute_error(true_signals.flatten(), pred_signals.flatten())
         
-        # Correlation analysis
+        # Correlation analysis (with NaN handling)
         correlations = []
         for i in range(len(pred_signals)):
-            corr, _ = pearsonr(true_signals[i].flatten(), pred_signals[i].flatten())
-            correlations.append(corr)
+            true_sig = true_signals[i].flatten()
+            pred_sig = pred_signals[i].flatten()
+            
+            # Check for valid signals
+            if np.all(np.isfinite(true_sig)) and np.all(np.isfinite(pred_sig)) and np.std(true_sig) > 1e-10 and np.std(pred_sig) > 1e-10:
+                corr, _ = pearsonr(true_sig, pred_sig)
+                if np.isfinite(corr):
+                    correlations.append(corr)
         
-        # SNR calculation
+        # SNR calculation (with better numerical stability)
         signal_power = np.mean(true_signals ** 2, axis=1)
         noise_power = np.mean((true_signals - pred_signals) ** 2, axis=1)
-        snr = 10 * np.log10(signal_power / (noise_power + 1e-10))
+        
+        # Add more robust epsilon and handle edge cases
+        epsilon = 1e-10
+        valid_mask = (signal_power > epsilon) & (noise_power > epsilon)
+        snr = np.full(len(signal_power), -50.0)  # Default to -50 dB for invalid cases
+        snr[valid_mask] = 10 * np.log10(signal_power[valid_mask] / (noise_power[valid_mask] + epsilon))
+        
+        # Clip extreme values
+        snr = np.clip(snr, -50, 50)
         
         # DTW distance (simplified)
         dtw_distances = []
@@ -90,12 +104,12 @@ class ComprehensiveEvaluationMethods:
             'mse': float(mse),
             'mae': float(mae),
             'rmse': float(np.sqrt(mse)),
-            'correlation_mean': float(np.mean(correlations)),
-            'correlation_std': float(np.std(correlations)),
-            'snr_mean_db': float(np.mean(snr)),
-            'snr_std_db': float(np.std(snr)),
-            'dtw_distance_mean': float(np.mean(dtw_distances)),
-            'dtw_distance_std': float(np.std(dtw_distances))
+            'correlation_mean': float(np.mean(correlations)) if len(correlations) > 0 else 0.0,
+            'correlation_std': float(np.std(correlations)) if len(correlations) > 0 else 0.0,
+            'snr_mean_db': float(np.mean(snr[np.isfinite(snr)])) if np.any(np.isfinite(snr)) else -50.0,
+            'snr_std_db': float(np.std(snr[np.isfinite(snr)])) if np.any(np.isfinite(snr)) else 0.0,
+            'dtw_distance_mean': float(np.mean(dtw_distances)) if len(dtw_distances) > 0 else 0.0,
+            'dtw_distance_std': float(np.std(dtw_distances)) if len(dtw_distances) > 0 else 0.0
         }
         
         # Spectral analysis
@@ -207,7 +221,7 @@ class ComprehensiveEvaluationMethods:
     def _evaluate_peak_detection(self) -> Dict[str, Any]:
         """Evaluate peak detection performance."""
         pred_peaks = self.predictions['peak_predictions'].numpy()
-        true_peaks = self.ground_truth['peak_labels'].numpy()
+        true_peaks = self.ground_truth['peaks'].numpy()
         
         results = {
             'existence_metrics': {},
@@ -249,7 +263,14 @@ class ComprehensiveEvaluationMethods:
                     valid_true_latencies = true_latencies[latency_mask]
                 
                     latency_mae = mean_absolute_error(valid_true_latencies, valid_pred_latencies)
-                    latency_correlation, _ = pearsonr(valid_true_latencies, valid_pred_latencies)
+                    
+                    # Calculate correlation with NaN handling
+                    if len(valid_true_latencies) > 1 and np.std(valid_true_latencies) > 1e-10 and np.std(valid_pred_latencies) > 1e-10:
+                        latency_correlation, _ = pearsonr(valid_true_latencies, valid_pred_latencies)
+                        if not np.isfinite(latency_correlation):
+                            latency_correlation = 0.0
+                    else:
+                        latency_correlation = 0.0
                     
                     results['latency_metrics'] = {
                         'mae_ms': float(latency_mae),
@@ -276,7 +297,14 @@ class ComprehensiveEvaluationMethods:
                     valid_true_amplitudes = true_amplitudes[amplitude_mask]
                     
                     amplitude_mae = mean_absolute_error(valid_true_amplitudes, valid_pred_amplitudes)
-                    amplitude_correlation, _ = pearsonr(valid_true_amplitudes, valid_pred_amplitudes)
+                    
+                    # Calculate correlation with NaN handling
+                    if len(valid_true_amplitudes) > 1 and np.std(valid_true_amplitudes) > 1e-10 and np.std(valid_pred_amplitudes) > 1e-10:
+                        amplitude_correlation, _ = pearsonr(valid_true_amplitudes, valid_pred_amplitudes)
+                        if not np.isfinite(amplitude_correlation):
+                            amplitude_correlation = 0.0
+                    else:
+                        amplitude_correlation = 0.0
                     
                     results['amplitude_metrics'] = {
                         'mae_uv': float(amplitude_mae),
