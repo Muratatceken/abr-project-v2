@@ -287,11 +287,13 @@ class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMet
                 # Store predictions
                 predictions['signals'].append(outputs['recon'].cpu())
                 predictions['classifications'].append(outputs['class'].cpu())
-                # Handle peak output which is a tuple
+                # Handle peak output which is a tuple of tensors
                 peak_outputs = outputs['peak']
                 if isinstance(peak_outputs, tuple):
-                    peak_tensors = [p.cpu() if hasattr(p, 'cpu') else p for p in peak_outputs]
-                    predictions['peak_predictions'].append(peak_tensors)
+                    # Each element in the tuple is a tensor with shape [batch_size]
+                    # Convert to a single tensor with shape [batch_size, num_outputs]
+                    peak_tensor = torch.stack(peak_outputs, dim=1).cpu()  # [batch_size, num_peak_outputs]
+                    predictions['peak_predictions'].append(peak_tensor)
                 else:
                     predictions['peak_predictions'].append(peak_outputs.cpu())
                 predictions['thresholds'].append(outputs['threshold'].cpu())
@@ -306,34 +308,10 @@ class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMet
                 ground_truth['thresholds'].append(targets['thresholds'].cpu())
                 ground_truth['metadata'].append(targets.get('metadata', {}))
         
-        # Concatenate all predictions - handle different data types
+        # Concatenate all predictions
         for key in predictions:
             if predictions[key]:
-                if key == 'peak_predictions':
-                    # Handle peak predictions which are lists of tuples
-                    # Convert to proper tensor format
-                    all_peak_tensors = []
-                    for batch_peaks in predictions[key]:
-                        if isinstance(batch_peaks, list) and len(batch_peaks) > 0:
-                            # batch_peaks is a list of tuples, each tuple contains tensors for one sample
-                            for sample_peaks in batch_peaks:
-                                if isinstance(sample_peaks, (list, tuple)):
-                                    # Convert tuple of tensors to a single tensor
-                                    sample_tensor = torch.stack(sample_peaks) if len(sample_peaks) > 0 else torch.zeros(3, 2)
-                                    all_peak_tensors.append(sample_tensor)
-                                else:
-                                    # Direct tensor
-                                    all_peak_tensors.append(sample_peaks)
-                        else:
-                            # Handle case where batch_peaks is already a tensor
-                            if hasattr(batch_peaks, 'shape'):
-                                all_peak_tensors.append(batch_peaks)
-                    
-                    if all_peak_tensors:
-                        predictions[key] = torch.stack(all_peak_tensors)
-                else:
-                    # Standard tensor concatenation
-                    predictions[key] = torch.cat(predictions[key], dim=0)
+                predictions[key] = torch.cat(predictions[key], dim=0)
         
         for key in ground_truth:
             if ground_truth[key] and isinstance(ground_truth[key][0], torch.Tensor):
