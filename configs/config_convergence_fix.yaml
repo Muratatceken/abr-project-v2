@@ -1,0 +1,236 @@
+# ABR Hierarchical U-Net Configuration - CONVERGENCE OPTIMIZED
+# This configuration addresses convergence issues identified in training analysis
+
+project:
+  name: "abr_hierarchical_unet"
+  experiment_name: "convergence_fix"
+  description: "Convergence-optimized training configuration"
+
+# Paths
+paths:
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  output_dir: "outputs"
+
+# Data Configuration
+data:
+  dataset_path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
+  
+  # Patient-stratified splitting
+  splitting:
+    split_type: "patient_stratified"
+    train_ratio: 0.75
+    val_ratio: 0.15
+    test_ratio: 0.10
+    random_seed: 42
+  
+  # Data loading - Conservative for stability
+  dataloader:
+    batch_size: 24         # REDUCED for more stable gradients
+    num_workers: 4         # Reduced for stability
+    pin_memory: true
+    drop_last: true
+    shuffle_train: true
+    prefetch_factor: 2
+    persistent_workers: true
+
+# Model Architecture - Simplified for better convergence
+model:
+  type: "hierarchical_unet"
+  
+  architecture:
+    signal_length: 200
+    static_dim: 4
+    base_channels: 64      # REDUCED for simpler model
+    n_levels: 3           # REDUCED levels
+    n_classes: 5
+    dropout: 0.1          # REDUCED dropout
+    
+    # S4 Encoder - Simplified
+    encoder:
+      n_s4_layers: 2      # REDUCED for simpler model
+      d_state: 64         # REDUCED
+      use_enhanced_s4: true
+      
+    # Transformer Decoder - Simplified
+    decoder:
+      n_transformer_layers: 2  # REDUCED
+      n_heads: 8
+      use_multi_scale_attention: true
+      use_cross_attention: true
+      
+    # FiLM conditioning
+    film:
+      hidden_dim: 64      # REDUCED
+      dropout: 0.1
+      
+    # Output heads
+    outputs:
+      signal_activation: "tanh"
+      peak_head_dim: 128  # REDUCED
+      class_head_dim: 128 # REDUCED
+      threshold_head_dim: 128  # REDUCED
+      use_attention_heads: true
+      predict_uncertainty: true
+
+# Diffusion Configuration
+diffusion:
+  noise_schedule:
+    type: "cosine"
+    num_timesteps: 1000
+    peak_preserve_ratio: 0.3
+    beta_start: 1e-4
+    beta_end: 0.02
+  
+  sampling:
+    type: "ddpm"
+    ddim_eta: 0.0
+    num_sampling_steps: 50
+    temperature: 1.0
+    clip_denoised: true
+
+# CONVERGENCE-OPTIMIZED Training Configuration
+training:
+  # Optimizer - Conservative for stability
+  optimizer:
+    type: "adamw"
+    learning_rate: 5e-5    # REDUCED for stable convergence
+    weight_decay: 1e-5     # REDUCED weight decay
+    betas: [0.9, 0.999]    # Standard betas
+    eps: 1e-8
+    amsgrad: false
+  
+  # Learning rate scheduler - Gentle
+  scheduler:
+    type: "cosine_annealing_warm_restarts"
+    T_0: 50               # Longer cycles
+    T_mult: 2
+    eta_min: 1e-7         # Very low minimum
+    warmup_epochs: 10     # Longer warmup
+  
+  # Training parameters
+  epochs: 200             # Reasonable epoch count
+  gradient_clip: 0.1      # STRICT gradient clipping
+  accumulation_steps: 4   # More accumulation for stable gradients
+  log_frequency: 25
+  
+  # Validation and checkpointing
+  validation:
+    frequency: 1
+    compute_metrics: true
+  
+  checkpointing:
+    save_frequency: 5
+    save_best: true
+    save_last: true
+    save_dir: "checkpoints"
+  
+  # Early stopping
+  early_stopping:
+    patience: 30
+    min_delta: 1e-4
+    monitor: "val_total_loss"
+    mode: "min"
+
+# BALANCED Loss Configuration - KEY FOR CONVERGENCE
+loss:
+  type: "abr_diffusion"
+  
+  # CAREFULLY BALANCED weights - addressing scale imbalance
+  weights:
+    diffusion: 1.0
+    peak_exist: 0.1        # REDUCED - was causing massive values
+    peak_latency: 0.05     # HEAVILY REDUCED 
+    peak_amplitude: 0.001  # HEAVILY REDUCED - was 1M+ scale
+    classification: 0.5    # REDUCED
+    threshold: 0.1         # REDUCED
+  
+  # Loss settings
+  peak_loss_type: "mse"    # Simpler loss
+  huber_delta: 1.0
+  
+  # Progressive class balancing - less aggressive
+  class_weights: "balanced"
+  focal_loss:
+    use_focal: false       # DISABLED for simpler training
+    alpha: 0.25
+    gamma: 2.0
+  
+  # Perceptual loss - disabled for convergence
+  perceptual:
+    use_perceptual: false
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    signal_metrics: ["mse", "mae", "correlation"]
+    peak_metrics: ["peak_mae", "peak_accuracy"]
+    classification_metrics: ["accuracy", "f1_macro"]
+    threshold_metrics: ["threshold_mae"]
+  
+  visualization:
+    save_plots: true
+    plot_types: ["reconstruction", "peaks"]
+    n_samples_plot: 5
+
+# Inference Configuration
+inference:
+  num_samples: 100
+  batch_size: 16
+  temperature: 1.0
+  guidance_scale: 1.0
+  use_cfg: true
+  
+  conditioning:
+    age_range: [0, 100]
+    gender_range: [0, 1]
+    ear_range: [0, 1]
+    stimulus_range: [0, 100]
+    
+  output_dir: "outputs/inference"
+  save_statistics: true
+  save_formats: ["npy", "csv"]
+
+# Hardware Configuration
+hardware:
+  device: "auto"
+  mixed_precision: true
+  compile_model: false    # Disabled for debugging
+  channels_last: false
+  multi_gpu: false
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  use_wandb: false        # Disabled for simpler debugging
+  wandb:
+    project: "abr_project"
+    entity: null
+    tags: ["convergence_fix"]
+
+# Reproducibility
+reproducibility:
+  seed: 42
+  deterministic: true
+  benchmark: false        # Disabled for reproducibility
+
+# Optimization flags - Conservative
+optimization:
+  # Data augmentation - Disabled for convergence focus
+  augmentation:
+    use_augmentation: false
+    noise_factor: 0.01
+    time_stretch_factor: 0.1
+    amplitude_scale_factor: 0.1
+  
+  # Model optimizations - Conservative
+  model_optimizations:
+    use_gradient_checkpointing: false
+    use_efficient_attention: false
+    use_flash_attention: false
+  
+  # Training optimizations
+  training_optimizations:
+    use_compile: false
+    use_channels_last: false
+    use_fused_optimizer: false

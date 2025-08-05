@@ -1,0 +1,69 @@
+data:
+  dataset_path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
+  signal_length: 200
+  static_dim: 4
+  n_classes: 5
+  dataloader:
+    batch_size: 16
+    num_workers: 4
+    pin_memory: true
+    drop_last: false
+
+model:
+  type: hierarchical_unet
+  architecture:
+    signal_length: 200
+    static_dim: 4
+    base_channels: 96
+    n_levels: 4
+    n_classes: 5
+    dropout: 0.15
+    encoder:
+      n_s4_layers: 3
+      d_state: 96
+      use_enhanced_s4: true
+    decoder:
+      n_transformer_layers: 3
+      n_heads: 12
+      use_multi_scale_attention: true
+      use_cross_attention: true
+    film:
+      hidden_dim: 96
+      dropout: 0.15
+    outputs:
+      signal_activation: tanh
+      peak_head_dim: 288
+      class_head_dim: 288
+      threshold_head_dim: 288
+      use_attention_heads: true
+      predict_uncertainty: true
+
+diffusion:
+  noise_schedule:
+    type: cosine
+    num_timesteps: 1000
+    peak_preserve_ratio: 0.4
+    beta_start: 0.0001
+    beta_end: 0.02
+  sampling:
+    type: ddpm
+    ddim_eta: 0.0
+    num_sampling_steps: 100
+    temperature: 0.9
+    clip_denoised: true
+
+training:
+  epochs: 100
+  optimizer:
+    type: "adamw"
+    learning_rate: 1e-5
+    weight_decay: 1e-6
+    betas: [0.9, 0.999]
+    eps: 1e-8
+    amsgrad: false
+
+paths:
+  outputs: "outputs"
+  checkpoints: "checkpoints"
+  logs: "logs"
+  data: "data"

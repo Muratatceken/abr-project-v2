@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
 """
-ABR Model Evaluation Script
+COMPREHENSIVE ABR MODEL EVALUATION PIPELINE
 
-Comprehensive evaluation script for the ABR Hierarchical U-Net model.
-Evaluates model performance on test data and generates detailed reports.
+Professional, detailed evaluation system for ABR Hierarchical U-Net model.
+Provides exhaustive analysis across all model tasks with rich visualizations.
+
+Features:
+- Multi-task performance analysis (Signal, Classification, Peaks, Thresholds)
+- Clinical-grade metrics and visualizations
+- Statistical significance testing
+- Confusion matrices and performance curves
+- Signal quality assessment with spectral analysis
+- Peak detection accuracy with timing analysis
+- Threshold regression with clinical correlation
+- Model uncertainty quantification
+- Comparative analysis across patient demographics
+- Interactive plots and comprehensive reports
 
 Usage:
     python evaluate.py --checkpoint checkpoints/best_model.pt --config configs/config.yaml
-    python evaluate.py --checkpoint checkpoints/best_model.pt --output_dir results/evaluation
-    python evaluate.py --checkpoint checkpoints/best_model.pt --generate_samples 100
+    python evaluate.py --checkpoint checkpoints/best_model.pt --comprehensive --clinical_analysis
+    python evaluate.py --checkpoint checkpoints/best_model.pt --uncertainty_analysis --demographic_breakdown
 
 Author: AI Assistant
 Date: January 2025
@@ -27,14 +39,42 @@ import argparse
 import logging
 from pathlib import Path
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime
+import time
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+# Enhanced visualization and analysis
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
+from matplotlib.patches import Rectangle
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import plotly.offline as pyo
+
+# Statistical analysis
+from scipy import stats
+from scipy.signal import find_peaks, welch, spectrogram
+from scipy.spatial.distance import euclidean
+# fastdtw removed - using simple DTW fallback
+from sklearn.metrics import (
+    confusion_matrix, classification_report, roc_curve, auc,
+    precision_recall_curve, f1_score, accuracy_score,
+    mean_squared_error, mean_absolute_error, r2_score
+)
+from sklearn.preprocessing import label_binarize
+
+# Clinical analysis
+import warnings
+from scipy.stats import pearsonr, spearmanr, ttest_rel, wilcoxon
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent))
@@ -44,7 +84,241 @@ from training.config_loader import load_config
 from data.dataset import ABRDataset, stratified_patient_split, create_optimized_dataloaders
 from models.hierarchical_unet import OptimizedHierarchicalUNet
 from evaluation.metrics import compute_all_metrics, ABRMetrics
+from evaluation.comprehensive_evaluator import ComprehensiveEvaluationMethods
+from evaluation.visualization_methods import VisualizationMethods
 from utils.sampling import DDIMSampler, create_ddim_sampler
+
+
+class ComprehensiveABREvaluator(ComprehensiveEvaluationMethods, VisualizationMethods):
+    """
+    Professional, comprehensive evaluation system for ABR models.
+    
+    Provides detailed analysis across all model tasks with clinical-grade
+    metrics, statistical testing, and rich visualizations.
+    """
+    
+    def __init__(self, model: torch.nn.Module, config: DictConfig, 
+                 device: torch.device, output_dir: str = "evaluation_results"):
+        self.model = model
+        self.config = config
+        self.device = device
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create subdirectories for organized output
+        self.plots_dir = self.output_dir / "plots"
+        self.reports_dir = self.output_dir / "reports"
+        self.data_dir = self.output_dir / "data"
+        
+        for dir_path in [self.plots_dir, self.reports_dir, self.data_dir]:
+            dir_path.mkdir(exist_ok=True)
+        
+        # Initialize evaluation state
+        self.results = {}
+        self.predictions = {}
+        self.ground_truth = {}
+        self.metadata = {}
+        
+        # Set visualization style
+        try:
+            plt.style.use('seaborn-v0_8')
+        except OSError:
+            try:
+                plt.style.use('seaborn')
+            except OSError:
+                plt.style.use('default')
+        sns.set_palette("husl")
+        
+        # Clinical thresholds for ABR interpretation
+        self.clinical_thresholds = {
+            'normal': 20,  # dB nHL
+            'mild': 40,
+            'moderate': 70,
+            'severe': 90,
+            'profound': 120
+        }
+        
+        print(f"🔬 Comprehensive ABR Evaluator initialized")
+        print(f"📁 Output directory: {self.output_dir}")
+    
+    def evaluate_comprehensive(self, test_loader: DataLoader, 
+                             uncertainty_analysis: bool = True,
+                             clinical_analysis: bool = True,
+                             demographic_breakdown: bool = True) -> Dict[str, Any]:
+        """
+        Perform comprehensive evaluation across all model tasks.
+        
+        Args:
+            test_loader: DataLoader for test data
+            uncertainty_analysis: Whether to perform uncertainty quantification
+            clinical_analysis: Whether to perform clinical correlation analysis
+            demographic_breakdown: Whether to analyze by demographics
+            
+        Returns:
+            Comprehensive evaluation results dictionary
+        """
+        print("🚀 Starting comprehensive evaluation...")
+        start_time = time.time()
+        
+        # 1. Generate predictions and collect data
+        print("📊 Generating predictions...")
+        self._generate_predictions(test_loader)
+        
+        # 2. Signal quality analysis
+        print("🌊 Analyzing signal quality...")
+        signal_results = self._evaluate_signal_quality()
+        
+        # 3. Classification analysis
+        print("🎯 Analyzing classification performance...")
+        classification_results = self._evaluate_classification()
+        
+        # 4. Peak detection analysis
+        print("⛰️ Analyzing peak detection...")
+        peak_results = self._evaluate_peak_detection()
+        
+        # 5. Threshold regression analysis
+        print("📏 Analyzing threshold regression...")
+        threshold_results = self._evaluate_threshold_regression()
+        
+        # 6. Uncertainty quantification
+        if uncertainty_analysis:
+            print("🎲 Performing uncertainty analysis...")
+            uncertainty_results = self._evaluate_uncertainty()
+        else:
+            uncertainty_results = {}
+        
+        # 7. Clinical correlation analysis
+        if clinical_analysis:
+            print("🏥 Performing clinical analysis...")
+            clinical_results = self._evaluate_clinical_correlation()
+        else:
+            clinical_results = {}
+        
+        # 8. Demographic breakdown
+        if demographic_breakdown:
+            print("👥 Performing demographic analysis...")
+            demographic_results = self._evaluate_demographics()
+        else:
+            demographic_results = {}
+        
+        # 9. Generate comprehensive visualizations
+        print("📈 Creating visualizations...")
+        self._create_comprehensive_visualizations()
+        
+        # 10. Generate interactive plots
+        print("🎨 Creating interactive plots...")
+        self._create_interactive_visualizations()
+        
+        # 11. Compile final results
+        evaluation_time = time.time() - start_time
+        
+        final_results = {
+            'timestamp': datetime.now().isoformat(),
+            'evaluation_time_seconds': evaluation_time,
+            'model_info': self._get_model_info(),
+            'dataset_info': self._get_dataset_info(),
+            'signal_quality': signal_results,
+            'classification': classification_results,
+            'peak_detection': peak_results,
+            'threshold_regression': threshold_results,
+            'uncertainty': uncertainty_results,
+            'clinical_analysis': clinical_results,
+            'demographic_analysis': demographic_results,
+            'summary_metrics': self._compute_summary_metrics(),
+            'recommendations': self._generate_recommendations()
+        }
+        
+        # 12. Save comprehensive report
+        self._save_comprehensive_report(final_results)
+        
+        print(f"✅ Evaluation complete! Time: {evaluation_time:.2f}s")
+        print(f"📁 Results saved to: {self.output_dir}")
+        
+        return final_results
+    
+    def _generate_predictions(self, test_loader: DataLoader) -> None:
+        """Generate predictions for all test samples."""
+        self.model.eval()
+        
+        predictions = {
+            'signals': [],
+            'classifications': [],
+            'peak_predictions': [],
+            'thresholds': [],
+            'uncertainties': []
+        }
+        
+        ground_truth = {
+            'signals': [],
+            'classifications': [],
+            'peak_labels': [],
+            'thresholds': [],
+            'metadata': []
+        }
+        
+        with torch.no_grad():
+            for batch in tqdm(test_loader, desc="Generating predictions"):
+                # Handle dictionary batch format
+                if isinstance(batch, dict):
+                    signals = batch['signal'].to(self.device)
+                    static_params = batch['static_params'].to(self.device)
+                    batch_size = batch['signal'].shape[0]
+                    targets = {
+                        'signal': batch['signal'],
+                        'classification': batch['target'],
+                        'peaks': torch.stack([batch.get('v_peak', torch.zeros(batch_size, 2)), 
+                                            batch.get('v_peak_mask', torch.ones(batch_size, 2))], dim=-1) if 'v_peak' in batch else torch.zeros(batch_size, 2, 2),
+                        'thresholds': batch.get('threshold', torch.zeros(batch_size, 1))
+                    }
+                else:
+                    # Handle tuple/list format
+                    if len(batch) == 3:
+                        signals, static_params, targets = batch
+                    elif len(batch) >= 4:
+                        signals, static_params, targets = batch[:3]  # ignore additional data
+                    else:
+                        raise ValueError(f"Unexpected batch format with {len(batch)} items")
+                    signals = signals.to(self.device)
+                    static_params = static_params.to(self.device)
+                
+                # Forward pass
+                outputs = self.model(signals, static_params)
+                
+                # Store predictions
+                predictions['signals'].append(outputs['recon'].cpu())
+                predictions['classifications'].append(outputs['class'].cpu())
+                # Handle peak output which is a tuple
+                peak_outputs = outputs['peak']
+                if isinstance(peak_outputs, tuple):
+                    peak_tensors = [p.cpu() if hasattr(p, 'cpu') else p for p in peak_outputs]
+                    predictions['peak_predictions'].append(peak_tensors)
+                else:
+                    predictions['peak_predictions'].append(peak_outputs.cpu())
+                predictions['thresholds'].append(outputs['threshold'].cpu())
+                
+                if 'uncertainty' in outputs:
+                    predictions['uncertainties'].append(outputs['uncertainty'].cpu())
+                
+                # Store ground truth
+                ground_truth['signals'].append(targets['signal'].cpu())
+                ground_truth['classifications'].append(targets['classification'].cpu())
+                ground_truth['peak_labels'].append(targets['peaks'].cpu())
+                ground_truth['thresholds'].append(targets['thresholds'].cpu())
+                ground_truth['metadata'].append(targets.get('metadata', {}))
+        
+        # Concatenate all predictions
+        for key in predictions:
+            if predictions[key]:
+                predictions[key] = torch.cat(predictions[key], dim=0)
+        
+        for key in ground_truth:
+            if ground_truth[key] and isinstance(ground_truth[key][0], torch.Tensor):
+                ground_truth[key] = torch.cat(ground_truth[key], dim=0)
+        
+        self.predictions = predictions
+        self.ground_truth = ground_truth
+        
+        print(f"📊 Generated predictions for {len(predictions['signals'])} samples")
 
 
 def setup_logging(log_level: str = "INFO"):
@@ -439,8 +713,8 @@ def create_evaluation_report(
 
 
 def main():
-    """Main evaluation function."""
-    parser = argparse.ArgumentParser(description="ABR Model Evaluation")
+    """Main comprehensive evaluation function."""
+    parser = argparse.ArgumentParser(description="Comprehensive ABR Model Evaluation")
     
     # Required arguments
     parser.add_argument(
@@ -460,20 +734,40 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="outputs/evaluation",
-        help="Output directory for results"
-    )
-    parser.add_argument(
-        "--generate_samples",
-        type=int,
-        default=0,
-        help="Number of samples to generate (0 to skip generation)"
+        default="comprehensive_evaluation_results",
+        help="Output directory for comprehensive evaluation results"
     )
     parser.add_argument(
         "--batch_size",
         type=int,
         default=None,
         help="Batch size for evaluation (overrides config)"
+    )
+    parser.add_argument(
+        "--comprehensive",
+        action="store_true",
+        help="Enable comprehensive analysis (default: True)"
+    )
+    parser.add_argument(
+        "--uncertainty_analysis",
+        action="store_true",
+        help="Enable uncertainty quantification analysis"
+    )
+    parser.add_argument(
+        "--clinical_analysis",
+        action="store_true",
+        help="Enable clinical correlation analysis"
+    )
+    parser.add_argument(
+        "--demographic_breakdown",
+        action="store_true",
+        help="Enable demographic performance breakdown"
+    )
+    parser.add_argument(
+        "--generate_samples",
+        type=int,
+        default=0,
+        help="Number of samples to generate (0 to skip generation)"
     )
     parser.add_argument(
         "--log_level",
@@ -489,12 +783,13 @@ def main():
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
     
-    logger.info("=" * 80)
-    logger.info("ABR Model Evaluation")
-    logger.info("=" * 80)
+    print("🚀" + "="*78 + "🚀")
+    print("🔬 COMPREHENSIVE ABR MODEL EVALUATION PIPELINE 🔬")
+    print("🚀" + "="*78 + "🚀")
     
     try:
         # Load model and configuration
+        print("\n📦 Loading model and configuration...")
         model, config, device = load_model_and_config(args.checkpoint, args.config)
         
         # Override batch size if specified
@@ -502,40 +797,129 @@ def main():
             config.data.dataloader.batch_size = args.batch_size
         
         # Create test data loader
+        print("📊 Creating test data loader...")
         test_loader = create_test_loader(config)
         
-        # Create output directory
-        os.makedirs(args.output_dir, exist_ok=True)
+        # Initialize comprehensive evaluator
+        print("🔬 Initializing comprehensive evaluator...")
+        evaluator = ComprehensiveABREvaluator(
+            model=model,
+            config=config,
+            device=device,
+            output_dir=args.output_dir
+        )
         
-        # Evaluate model
-        logger.info("Starting evaluation...")
-        results = evaluate_model(model, test_loader, device, config)
+        # Perform comprehensive evaluation
+        print("\n🎯 Starting comprehensive evaluation...")
+        results = evaluator.evaluate_comprehensive(
+            test_loader=test_loader,
+            uncertainty_analysis=args.uncertainty_analysis,
+            clinical_analysis=args.clinical_analysis,
+            demographic_breakdown=args.demographic_breakdown
+        )
         
-        # Create evaluation report
-        create_evaluation_report(results, args.output_dir, config)
+        # Print comprehensive summary
+        print("\n" + "="*80)
+        print("📊 COMPREHENSIVE EVALUATION RESULTS SUMMARY")
+        print("="*80)
         
-        # Print summary
-        logger.info("\nEvaluation Results Summary:")
-        logger.info("-" * 40)
-        logger.info(f"Signal MSE: {results['metrics']['signal_mse']:.6f}")
-        logger.info(f"Signal Correlation: {results['metrics']['signal_correlation']:.4f}")
-        logger.info(f"Peak Existence Accuracy: {results['metrics']['peak_existence_accuracy']:.4f}")
-        logger.info(f"Classification Accuracy: {results['metrics']['classification_accuracy']:.4f}")
-        logger.info(f"Threshold MAE: {results['metrics']['threshold_mae']:.2f} dB nHL")
-        logger.info(f"Clinical Concordance: {results['metrics']['clinical_concordance']:.4f}")
+        # Summary metrics
+        summary = results.get('summary_metrics', {})
+        print(f"\n🎯 OVERALL PERFORMANCE:")
+        print(f"   Overall Score: {summary.get('overall_score', 0):.3f}")
+        
+        print(f"\n🌊 SIGNAL QUALITY:")
+        if 'signal_quality' in results:
+            signal_metrics = results['signal_quality']['basic_metrics']
+            print(f"   Correlation: {signal_metrics.get('correlation_mean', 0):.3f}")
+            print(f"   SNR: {signal_metrics.get('snr_mean_db', 0):.1f} dB")
+            print(f"   RMSE: {signal_metrics.get('rmse', 0):.4f}")
+        
+        print(f"\n🎯 CLASSIFICATION:")
+        if 'classification' in results:
+            class_metrics = results['classification']['basic_metrics']
+            print(f"   Accuracy: {class_metrics.get('accuracy', 0):.3f}")
+            print(f"   F1-Macro: {class_metrics.get('f1_macro', 0):.3f}")
+            print(f"   F1-Weighted: {class_metrics.get('f1_weighted', 0):.3f}")
+        
+        print(f"\n⛰️ PEAK DETECTION:")
+        if 'peak_detection' in results:
+            peak_metrics = results['peak_detection']
+            existence_metrics = peak_metrics.get('existence_metrics', {})
+            latency_metrics = peak_metrics.get('latency_metrics', {})
+            print(f"   Existence F1: {existence_metrics.get('f1_score', 0):.3f}")
+            print(f"   Latency MAE: {latency_metrics.get('mae_ms', 0):.3f} ms")
+            print(f"   Latency Correlation: {latency_metrics.get('correlation', 0):.3f}")
+        
+        print(f"\n📏 THRESHOLD REGRESSION:")
+        if 'threshold_regression' in results:
+            thresh_metrics = results['threshold_regression']['regression_metrics']
+            error_metrics = results['threshold_regression']['error_analysis']
+            print(f"   MAE: {thresh_metrics.get('mae_db', 0):.2f} dB")
+            print(f"   R² Score: {thresh_metrics.get('r2_score', 0):.3f}")
+            print(f"   Within 5dB: {error_metrics.get('within_5db_percent', 0):.1f}%")
+            print(f"   Within 10dB: {error_metrics.get('within_10db_percent', 0):.1f}%")
+        
+        # Clinical analysis summary
+        if 'clinical_analysis' in results and results['clinical_analysis']:
+            print(f"\n🏥 CLINICAL ANALYSIS:")
+            diag_metrics = results['clinical_analysis'].get('diagnostic_accuracy', {})
+            print(f"   Diagnostic Accuracy: {diag_metrics.get('overall_accuracy', 0):.3f}")
+        
+        # Uncertainty analysis summary
+        if 'uncertainty' in results and results['uncertainty']:
+            print(f"\n🎲 UNCERTAINTY ANALYSIS:")
+            uncertainty_metrics = results['uncertainty']
+            if 'uncertainty_stats' in uncertainty_metrics:
+                stats = uncertainty_metrics['uncertainty_stats']
+                print(f"   Mean Uncertainty: {stats.get('mean_uncertainty', 0):.4f}")
+            if 'calibration_analysis' in uncertainty_metrics:
+                calib = uncertainty_metrics['calibration_analysis']
+                print(f"   Well Calibrated: {calib.get('well_calibrated', False)}")
+        
+        # Recommendations
+        print(f"\n💡 RECOMMENDATIONS:")
+        recommendations = results.get('recommendations', [])
+        for i, rec in enumerate(recommendations[:5], 1):  # Show top 5
+            print(f"   {i}. {rec}")
+        
+        # Model information
+        model_info = results.get('model_info', {})
+        dataset_info = results.get('dataset_info', {})
+        print(f"\n📋 MODEL & DATASET INFO:")
+        print(f"   Model: {model_info.get('model_class', 'Unknown')}")
+        print(f"   Parameters: {model_info.get('total_parameters', 0):,}")
+        print(f"   Test Samples: {dataset_info.get('num_samples', 0)}")
+        print(f"   Signal Shape: {dataset_info.get('signal_shape', [])}")
+        
+        print(f"\n📁 RESULTS LOCATION:")
+        print(f"   Output Directory: {args.output_dir}")
+        print(f"   Plots: {args.output_dir}/plots/")
+        print(f"   Reports: {args.output_dir}/reports/")
+        print(f"   Data: {args.output_dir}/data/")
         
         # Generate samples if requested
         if args.generate_samples > 0:
+            print(f"\n🎨 Generating {args.generate_samples} sample signals...")
             sample_output_dir = os.path.join(args.output_dir, "generated_samples")
             generated_samples = generate_samples(
                 model, config, device, args.generate_samples, sample_output_dir
             )
-            logger.info(f"Generated {args.generate_samples} samples")
+            print(f"✅ Generated samples saved to: {sample_output_dir}")
         
-        logger.info(f"\nEvaluation completed! Results saved to: {args.output_dir}")
+        print("\n🎉" + "="*76 + "🎉")
+        print("✅ COMPREHENSIVE EVALUATION COMPLETED SUCCESSFULLY! ✅")
+        print("🎉" + "="*76 + "🎉")
+        
+        # Final summary
+        evaluation_time = results.get('evaluation_time_seconds', 0)
+        print(f"\n⏱️  Total evaluation time: {evaluation_time:.2f} seconds")
+        print(f"📊 Comprehensive analysis with {len(results)} result categories")
+        print(f"🎨 Visualizations and reports generated")
+        print(f"📁 All results saved to: {args.output_dir}")
         
     except Exception as e:
-        logger.error(f"Evaluation failed: {e}")
+        logger.error(f"❌ Evaluation failed: {e}")
         import traceback
         logger.error(traceback.format_exc())
         sys.exit(1)

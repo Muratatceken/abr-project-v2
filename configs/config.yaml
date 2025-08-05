@@ -21,15 +21,15 @@ data:
     test_ratio: 0.10     # Reduced test set for more training data
     random_seed: 42
   
-  # Data loading - Optimized
+  # Data loading - CONVERGENCE OPTIMIZED
   dataloader:
-    batch_size: 48       # Increased for better gradient estimates
-    num_workers: 6       # More workers for faster loading
+    batch_size: 16       # REDUCED: Smaller batches for precise gradients
+    num_workers: 4       # Reduced for stability
     pin_memory: true
     drop_last: true
     shuffle_train: true
-    prefetch_factor: 3   # Better performance
-    persistent_workers: true  # Efficiency improvement
+    prefetch_factor: 2   # Moderate prefetching
+    persistent_workers: true
 
 # Model Architecture
 model:
@@ -39,7 +39,7 @@ model:
   architecture:
     signal_length: 200
     static_dim: 4
-    base_channels: 80      # Increased for more capacity
+    base_channels: 96      # Increased for more capacity
     n_levels: 4
     n_classes: 5
     dropout: 0.15          # Increased for better regularization
@@ -47,13 +47,13 @@ model:
     # S4 Encoder settings - Enhanced
     encoder:
       n_s4_layers: 3       # Increased depth
-      d_state: 80          # Increased capacity
+      d_state: 96          # Increased capacity
       use_enhanced_s4: true
       
     # Transformer Decoder settings - Enhanced
     decoder:
       n_transformer_layers: 3  # Increased depth
-      n_heads: 8              # Fixed: d_model must be divisible by n_heads
+      n_heads: 12             # Fixed: d_model (192) must be divisible by n_heads
       use_multi_scale_attention: true
       use_cross_attention: true
       
@@ -98,28 +98,28 @@ diffusion:
 
 # Training Configuration
 training:
-  # Optimizer - Optimized
+  # Optimizer - CONVERGENCE FIXED
   optimizer:
     type: "adamw"
-    learning_rate: 2e-4    # Increased for faster convergence
-    weight_decay: 1e-4     # Increased for better regularization
-    betas: [0.9, 0.95]     # Optimized betas
+    learning_rate: 1e-5    # REDUCED: Fix plateau issue (was 2e-4)
+    weight_decay: 1e-6     # REDUCED: Less regularization for gradual learning
+    betas: [0.9, 0.999]    # Standard betas for stability
     eps: 1e-8
-    amsgrad: false         # Disabled for faster training
+    amsgrad: false
   
-  # Learning rate scheduler - Optimized
+  # Learning rate scheduler - IMPROVED DYNAMICS
   scheduler:
     type: "cosine_annealing_warm_restarts"
-    T_0: 30               # More frequent restarts
-    T_mult: 2             # Fixed: Must be integer >= 1
-    eta_min: 5e-7         # Lower minimum LR
-    warmup_epochs: 5      # Shorter warmup
+    T_0: 15               # Shorter cycles for more adaptation
+    T_mult: 1             # No lengthening for consistent adaptation
+    eta_min: 1e-8         # Much lower minimum for fine-tuning
+    warmup_epochs: 3      # Shorter warmup for quicker adaptation
   
-  # Training parameters - Optimized
-  epochs: 300             # Increased for better convergence
-  gradient_clip: 0.5      # Reduced for stability
-  accumulation_steps: 2   # Gradient accumulation
-  log_frequency: 25       # More frequent logging
+  # Training parameters - CONVERGENCE OPTIMIZED
+  epochs: 100             # More reasonable for gradual learning
+  gradient_clip: 0.3      # Stricter clipping for stability
+  accumulation_steps: 8   # MORE accumulation for stable gradients
+  log_frequency: 10       # More frequent monitoring
   
   # Validation and checkpointing
   validation:
@@ -132,10 +132,10 @@ training:
     save_last: true
     save_dir: "checkpoints"
   
-  # Early stopping - Optimized
+  # Early stopping - GRADUAL LEARNING OPTIMIZED
   early_stopping:
-    patience: 50           # Increased patience
-    min_delta: 1e-5        # Increased threshold
+    patience: 25           # Moderate patience for gradual learning
+    min_delta: 1e-6        # SMALLER threshold for gradual improvements
     monitor: "val_total_loss"
     mode: "min"
 
@@ -143,14 +143,14 @@ training:
 loss:
   type: "abr_diffusion"
   
-  # Loss weights - Optimized for better balance
+  # Loss weights - CONVERGENCE FIXED: Proper component balance
   weights:
     diffusion: 1.0
-    peak_exist: 0.8        # Increased importance
-    peak_latency: 1.2      # Increased importance
-    peak_amplitude: 1.2    # Increased importance
-    classification: 1.5    # Increased importance
-    threshold: 1.0         # Increased importance
+    peak_exist: 0.3        # REDUCED: More balanced
+    peak_latency: 0.2      # REDUCED: Prevent dominance
+    peak_amplitude: 0.01   # KEEP LOW: Was causing massive scale issues
+    classification: 0.8    # Moderate importance
+    threshold: 0.05        # HEAVILY REDUCED: Was causing plateau at ~70
   
   # Loss settings - Optimized
   peak_loss_type: "smooth_l1"  # Better than huber for peaks

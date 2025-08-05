@@ -1,0 +1,56 @@
+{
+    "os": "macOS-15.5-arm64-arm-64bit",
+    "python": "3.9.13",
+    "heartbeatAt": "2025-08-04T23:43:48.365209",
+    "startedAt": "2025-08-04T23:43:48.291550",
+    "docker": null,
+    "cuda": null,
+    "args": [
+        "--config",
+        "configs/config.yaml",
+        "--experiment",
+        "log_analysis_test",
+        "--fast_dev_run",
+        "--quiet"
+    ],
+    "state": "running",
+    "program": "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2/train.py",
+    "codePathLocal": "train.py",
+    "codePath": "train.py",
+    "git": {
+        "remote": "https://github.com/Muratatceken/abr-project-v2.git",
+        "commit": "70a213bc6bd372b5df3a568b543ad31000738d54"
+    },
+    "email": "88457698+Muratatceken@users.noreply.github.com",
+    "root": "/Users/muratatceken/Downloads/Projects/abr-project/abr-project-v2/abr-project-v2",
+    "host": "Murats-MacBook-Pro.local",
+    "username": "muratatceken",
+    "executable": "/Users/muratatceken/opt/anaconda3/bin/python",
+    "cpu_count": 8,
+    "cpu_count_logical": 8,
+    "cpu_freq": {
+        "current": 3204,
+        "min": 600,
+        "max": 3204
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 3204,
+            "min": 600,
+            "max": 3204
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 926.3517189025879,
+            "used": 10.47652816772461
+        }
+    },
+    "gpuapple": {
+        "type": "arm",
+        "vendor": "Apple"
+    },
+    "memory": {
+        "total": 16.0
+    }
+}

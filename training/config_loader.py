@@ -189,11 +189,26 @@ def _validate_config(config: DictConfig) -> DictConfig:
             opt_config.weight_decay = float(opt_config.weight_decay)
         if 'eps' in opt_config:
             opt_config.eps = float(opt_config.eps)
+        # Handle betas as list of floats
+        if 'betas' in opt_config and opt_config.betas is not None:
+            if isinstance(opt_config.betas, (list, tuple)):
+                opt_config.betas = [float(beta) for beta in opt_config.betas]
+        # Handle boolean flags
+        if 'amsgrad' in opt_config:
+            if isinstance(opt_config.amsgrad, str):
+                opt_config.amsgrad = opt_config.amsgrad.lower() in ('true', '1', 'yes')
     
     if 'training' in config and 'scheduler' in config.training:
         sched_config = config.training.scheduler
         if 'eta_min' in sched_config:
             sched_config.eta_min = float(sched_config.eta_min)
+        # Add conversions for all scheduler parameters
+        if 'T_0' in sched_config:
+            sched_config.T_0 = int(sched_config.T_0)
+        if 'T_mult' in sched_config:
+            sched_config.T_mult = int(sched_config.T_mult)
+        if 'warmup_epochs' in sched_config:
+            sched_config.warmup_epochs = int(sched_config.warmup_epochs)
     
     if 'diffusion' in config and 'noise_schedule' in config.diffusion:
         noise_config = config.diffusion.noise_schedule

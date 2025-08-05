@@ -1,0 +1,10 @@
+# Quick config with frequent checkpointing for immediate best model saving
+
+# Copy your current config and override just the checkpointing section
+checkpointing:
+  save_frequency: 1      # Save every epoch instead of every 5
+  save_best: true
+  save_last: true
+  save_dir: "checkpoints"
+
+# This will create best_model.pt as soon as validation loss improves
