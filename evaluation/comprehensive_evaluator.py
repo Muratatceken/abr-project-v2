@@ -217,74 +217,73 @@ class ComprehensiveEvaluationMethods:
         }
         
         # Assuming peak format: [exists, latency, amplitude] for each peak
-        # Extract peak existence (binary)
-        if pred_peaks.shape[-1] >= 3:  # At least one peak with 3 components
-            pred_exists = (pred_peaks[..., 0] > 0.5).astype(int)  # Binary threshold
-            true_exists = (true_peaks[..., 0] > 0.5).astype(int)
+        # Handle ground truth format: (samples, 2, 2) where last dim is [value, mask]
+        if len(true_peaks.shape) == 3 and true_peaks.shape[1] == 2 and true_peaks.shape[2] == 2:
+            # Extract actual values and masks
+            true_latencies = true_peaks[:, 0, 0]  # Latency values
+            true_amplitudes = true_peaks[:, 1, 0]  # Amplitude values
+            latency_mask = true_peaks[:, 0, 1].astype(bool)  # Latency validity
+            amplitude_mask = true_peaks[:, 1, 1].astype(bool)  # Amplitude validity
             
-            # Debug shapes
-            print(f"DEBUG: pred_peaks.shape = {pred_peaks.shape}")
-            print(f"DEBUG: true_peaks.shape = {true_peaks.shape}")
-            print(f"DEBUG: pred_exists.shape = {pred_exists.shape}")
-            print(f"DEBUG: true_exists.shape = {true_exists.shape}")
+            # Peak existence is based on latency validity (if latency is valid, peak exists)
+            true_exists = latency_mask.astype(int)
             
-            # Ensure consistent shapes
-            min_len = min(len(pred_exists.flatten()), len(true_exists.flatten()))
-            pred_exists_flat = pred_exists.flatten()[:min_len]
-            true_exists_flat = true_exists.flatten()[:min_len]
-            
-            # Peak existence metrics
-            exist_accuracy = accuracy_score(true_exists_flat, pred_exists_flat)
-            exist_f1 = f1_score(true_exists_flat, pred_exists_flat, average='macro')
-            
-            results['existence_metrics'] = {
-                'accuracy': float(exist_accuracy),
-                'f1_score': float(exist_f1),
-                'precision': float(f1_score(true_exists_flat, pred_exists_flat, average='macro')),
-                'recall': float(f1_score(true_exists_flat, pred_exists_flat, average='macro'))
-            }
-            
-            # Latency metrics (only for existing peaks)
-            mask = true_exists.astype(bool)
-            if np.any(mask):
-                pred_latencies = pred_peaks[..., 1][mask]
-                true_latencies = true_peaks[..., 1][mask]
+            # Extract predicted components (assuming format: [existence, latency, amplitude, ...])
+            if pred_peaks.shape[-1] >= 3:
+                pred_exists = (pred_peaks[:, 0] > 0.5).astype(int)  # Existence probability
+                pred_latencies = pred_peaks[:, 1]  # Predicted latency
+                pred_amplitudes = pred_peaks[:, 2]  # Predicted amplitude
                 
-                latency_mae = mean_absolute_error(true_latencies, pred_latencies)
-                latency_correlation, _ = pearsonr(true_latencies.flatten(), pred_latencies.flatten())
+                # Peak existence metrics
+                exist_accuracy = accuracy_score(true_exists, pred_exists)
+                exist_f1 = f1_score(true_exists, pred_exists, average='macro')
                 
-                results['latency_metrics'] = {
-                    'mae_ms': float(latency_mae),
-                    'rmse_ms': float(np.sqrt(mean_squared_error(true_latencies, pred_latencies))),
-                    'correlation': float(latency_correlation),
-                    'mean_error_ms': float(np.mean(pred_latencies - true_latencies))
+                results['existence_metrics'] = {
+                    'accuracy': float(exist_accuracy),
+                    'f1_score': float(exist_f1),
                 }
                 
-                # Amplitude metrics (only for existing peaks)
-                pred_amplitudes = pred_peaks[..., 2][mask]
-                true_amplitudes = true_peaks[..., 2][mask]
+                # Latency metrics (only for peaks with valid ground truth latency)
+                if np.any(latency_mask):
+                    valid_pred_latencies = pred_latencies[latency_mask]
+                    valid_true_latencies = true_latencies[latency_mask]
                 
-                amplitude_mae = mean_absolute_error(true_amplitudes, pred_amplitudes)
-                amplitude_correlation, _ = pearsonr(true_amplitudes.flatten(), pred_amplitudes.flatten())
+                    latency_mae = mean_absolute_error(valid_true_latencies, valid_pred_latencies)
+                    latency_correlation, _ = pearsonr(valid_true_latencies, valid_pred_latencies)
+                    
+                    results['latency_metrics'] = {
+                        'mae_ms': float(latency_mae),
+                        'rmse_ms': float(np.sqrt(mean_squared_error(valid_true_latencies, valid_pred_latencies))),
+                        'correlation': float(latency_correlation),
+                        'mean_error_ms': float(np.mean(valid_pred_latencies - valid_true_latencies))
+                    }
+                    
+                    # Timing accuracy analysis
+                    timing_errors = np.abs(valid_pred_latencies - valid_true_latencies)
+                    timing_within_0_5ms = np.mean(timing_errors < 0.5)
+                    timing_within_1_0ms = np.mean(timing_errors < 1.0)
+                    
+                    results['timing_accuracy'] = {
+                        'within_0_5ms_percent': float(timing_within_0_5ms * 100),
+                        'within_1_0ms_percent': float(timing_within_1_0ms * 100),
+                        'mean_timing_error_ms': float(np.mean(timing_errors)),
+                        'std_timing_error_ms': float(np.std(timing_errors))
+                    }
                 
-                results['amplitude_metrics'] = {
-                    'mae_uv': float(amplitude_mae),
-                    'rmse_uv': float(np.sqrt(mean_squared_error(true_amplitudes, pred_amplitudes))),
-                    'correlation': float(amplitude_correlation),
-                    'mean_error_uv': float(np.mean(pred_amplitudes - true_amplitudes))
-                }
-                
-                # Timing accuracy analysis
-                timing_errors = np.abs(pred_latencies - true_latencies)
-                timing_within_0_5ms = np.mean(timing_errors < 0.5)
-                timing_within_1_0ms = np.mean(timing_errors < 1.0)
-                
-                results['timing_accuracy'] = {
-                    'within_0_5ms_percent': float(timing_within_0_5ms * 100),
-                    'within_1_0ms_percent': float(timing_within_1_0ms * 100),
-                    'mean_timing_error_ms': float(np.mean(timing_errors)),
-                    'std_timing_error_ms': float(np.std(timing_errors))
-                }
+                # Amplitude metrics (only for peaks with valid ground truth amplitude)
+                if np.any(amplitude_mask):
+                    valid_pred_amplitudes = pred_amplitudes[amplitude_mask]
+                    valid_true_amplitudes = true_amplitudes[amplitude_mask]
+                    
+                    amplitude_mae = mean_absolute_error(valid_true_amplitudes, valid_pred_amplitudes)
+                    amplitude_correlation, _ = pearsonr(valid_true_amplitudes, valid_pred_amplitudes)
+                    
+                    results['amplitude_metrics'] = {
+                        'mae_uv': float(amplitude_mae),
+                        'rmse_uv': float(np.sqrt(mean_squared_error(valid_true_amplitudes, valid_pred_amplitudes))),
+                        'correlation': float(amplitude_correlation),
+                        'mean_error_uv': float(np.mean(valid_pred_amplitudes - valid_true_amplitudes))
+                    }
         
         return results
     
