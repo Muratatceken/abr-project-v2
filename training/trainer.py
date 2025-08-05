@@ -562,7 +562,21 @@ class ABRTrainer:
         # Threshold loss
         if 'threshold' in outputs and 'threshold' in batch:
             try:
-                threshold_loss = F.mse_loss(outputs['threshold'], batch['threshold'])
+                # Handle threshold predictions with uncertainty (mean, std)
+                threshold_pred = outputs['threshold']
+                threshold_true = batch['threshold']
+                
+                # If prediction includes uncertainty, take only the mean (first dimension)
+                if threshold_pred.shape[-1] == 2:
+                    threshold_pred = threshold_pred[..., 0]  # Take mean, ignore std
+                
+                # Ensure both tensors have compatible shapes
+                if threshold_true.dim() > threshold_pred.dim():
+                    threshold_true = threshold_true.squeeze(-1)
+                elif threshold_pred.dim() > threshold_true.dim():
+                    threshold_pred = threshold_pred.squeeze(-1)
+                
+                threshold_loss = F.mse_loss(threshold_pred, threshold_true)
                 loss_components['threshold_loss'] = threshold_loss
             except Exception as e:
                 logging.getLogger(__name__).warning(f"Threshold loss computation failed: {e}")
