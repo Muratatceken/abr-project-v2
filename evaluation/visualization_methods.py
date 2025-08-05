@@ -168,8 +168,16 @@ class VisualizationMethods:
         # 7. Threshold Prediction Scatter (third row, left)
         ax7 = fig.add_subplot(gs[2, :2])
         if len(self.predictions['thresholds']) > 0:
-            pred_thresh = self.predictions['thresholds'].numpy().flatten()
-            true_thresh = self.ground_truth['thresholds'].numpy().flatten()
+            pred_thresh = self.predictions['thresholds'].numpy()
+            true_thresh = self.ground_truth['thresholds'].numpy()
+            
+            # Handle shape mismatch - if predictions have multiple outputs, use first one
+            if len(pred_thresh.shape) > 1 and pred_thresh.shape[1] > 1:
+                pred_thresh = pred_thresh[:, 0]  # Use first threshold output
+            
+            # Ensure both are 1D
+            pred_thresh = pred_thresh.flatten()
+            true_thresh = true_thresh.flatten()
             
             ax7.scatter(true_thresh, pred_thresh, alpha=0.6, s=30)
             
@@ -186,8 +194,16 @@ class VisualizationMethods:
         # 8. Error Distribution (third row, right)
         ax8 = fig.add_subplot(gs[2, 2:])
         if len(self.predictions['thresholds']) > 0:
-            pred_thresh = self.predictions['thresholds'].numpy().flatten()
-            true_thresh = self.ground_truth['thresholds'].numpy().flatten()
+            pred_thresh = self.predictions['thresholds'].numpy()
+            true_thresh = self.ground_truth['thresholds'].numpy()
+            
+            # Handle shape mismatch - if predictions have multiple outputs, use first one
+            if len(pred_thresh.shape) > 1 and pred_thresh.shape[1] > 1:
+                pred_thresh = pred_thresh[:, 0]  # Use first threshold output
+            
+            # Ensure both are 1D
+            pred_thresh = pred_thresh.flatten()
+            true_thresh = true_thresh.flatten()
             errors = pred_thresh - true_thresh
             
             ax8.hist(errors, bins=30, alpha=0.7, color='lightblue', edgecolor='black')
@@ -450,8 +466,16 @@ class VisualizationMethods:
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
         fig.suptitle('Threshold Regression Analysis', fontsize=16, fontweight='bold')
         
-        pred_thresholds = self.predictions['thresholds'].numpy().flatten()
-        true_thresholds = self.ground_truth['thresholds'].numpy().flatten()
+        pred_thresholds = self.predictions['thresholds'].numpy()
+        true_thresholds = self.ground_truth['thresholds'].numpy()
+        
+        # Handle shape mismatch - if predictions have multiple outputs, use first one
+        if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
+            pred_thresholds = pred_thresholds[:, 0]  # Use first threshold output
+        
+        # Ensure both are 1D
+        pred_thresholds = pred_thresholds.flatten()
+        true_thresholds = true_thresholds.flatten()
         
         # 1. Scatter plot with perfect prediction line
         ax = axes[0, 0]
@@ -701,13 +725,21 @@ Evaluation time: {results['evaluation_time_seconds']:.2f} seconds
         
         # Save predictions and ground truth
         if len(self.predictions['signals']) > 0:
+            # Handle threshold shape mismatch
+            pred_thresholds = self.predictions['thresholds'].numpy()
+            true_thresholds = self.ground_truth['thresholds'].numpy()
+            
+            # Handle shape mismatch - if predictions have multiple outputs, use first one
+            if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
+                pred_thresholds = pred_thresholds[:, 0]  # Use first threshold output
+            
             # Flatten and save predictions
             pred_data = {
                 'sample_id': range(len(self.predictions['signals'])),
                 'predicted_class': torch.argmax(self.predictions['classifications'], dim=1).numpy(),
                 'true_class': self.ground_truth['classifications'].numpy(),
-                'predicted_threshold': self.predictions['thresholds'].numpy().flatten(),
-                'true_threshold': self.ground_truth['thresholds'].numpy().flatten()
+                'predicted_threshold': pred_thresholds.flatten(),
+                'true_threshold': true_thresholds.flatten()
             }
             
             pred_df = pd.DataFrame(pred_data)
