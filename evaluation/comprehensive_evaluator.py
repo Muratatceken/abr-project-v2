@@ -87,9 +87,14 @@ class ComprehensiveEvaluationMethods:
         
         # Add more robust epsilon and handle edge cases
         epsilon = 1e-10
-        valid_mask = (signal_power > epsilon) & (noise_power > epsilon)
-        snr = np.full(len(signal_power), -50.0)  # Default to -50 dB for invalid cases
-        snr[valid_mask] = 10 * np.log10(signal_power[valid_mask] / (noise_power[valid_mask] + epsilon))
+        valid_mask = (signal_power > epsilon) & (noise_power > epsilon) & np.isfinite(signal_power) & np.isfinite(noise_power)
+        snr = np.full(signal_power.shape, -50.0)  # Default to -50 dB for invalid cases
+        
+        # Only calculate SNR for valid samples
+        if np.any(valid_mask):
+            valid_signal_power = signal_power[valid_mask]
+            valid_noise_power = noise_power[valid_mask]
+            snr[valid_mask] = 10 * np.log10(valid_signal_power / (valid_noise_power + epsilon))
         
         # Clip extreme values
         snr = np.clip(snr, -50, 50)
