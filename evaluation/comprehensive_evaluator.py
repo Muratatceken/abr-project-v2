@@ -292,13 +292,8 @@ class ComprehensiveEvaluationMethods:
         pred_thresholds = self.predictions['thresholds'].numpy()
         true_thresholds = self.ground_truth['thresholds'].numpy()
         
-        # Debug shapes
-        print(f"DEBUG: pred_thresholds.shape = {pred_thresholds.shape}")
-        print(f"DEBUG: true_thresholds.shape = {true_thresholds.shape}")
-        
         # Handle shape mismatch - if predictions have multiple outputs, use first one
         if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
-            print(f"DEBUG: Using first threshold output from {pred_thresholds.shape[1]} outputs")
             pred_thresholds = pred_thresholds[:, 0]  # Use first threshold output
         
         # Ensure both are 1D
@@ -415,8 +410,16 @@ class ComprehensiveEvaluationMethods:
         }
         
         # Use threshold predictions for clinical analysis
-        pred_thresholds = self.predictions['thresholds'].numpy().flatten()
-        true_thresholds = self.ground_truth['thresholds'].numpy().flatten()
+        pred_thresholds = self.predictions['thresholds'].numpy()
+        true_thresholds = self.ground_truth['thresholds'].numpy()
+        
+        # Handle shape mismatch - if predictions have multiple outputs, use first one
+        if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
+            pred_thresholds = pred_thresholds[:, 0]  # Use first threshold output
+        
+        # Ensure both are 1D
+        pred_thresholds = pred_thresholds.flatten()
+        true_thresholds = true_thresholds.flatten()
         
         # Clinical diagnostic categories
         def get_diagnosis(threshold):
