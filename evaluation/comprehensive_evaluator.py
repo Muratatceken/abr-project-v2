@@ -292,6 +292,19 @@ class ComprehensiveEvaluationMethods:
         pred_thresholds = self.predictions['thresholds'].numpy()
         true_thresholds = self.ground_truth['thresholds'].numpy()
         
+        # Debug shapes
+        print(f"DEBUG: pred_thresholds.shape = {pred_thresholds.shape}")
+        print(f"DEBUG: true_thresholds.shape = {true_thresholds.shape}")
+        
+        # Handle shape mismatch - if predictions have multiple outputs, use first one
+        if len(pred_thresholds.shape) > 1 and pred_thresholds.shape[1] > 1:
+            print(f"DEBUG: Using first threshold output from {pred_thresholds.shape[1]} outputs")
+            pred_thresholds = pred_thresholds[:, 0]  # Use first threshold output
+        
+        # Ensure both are 1D
+        pred_thresholds = pred_thresholds.flatten()
+        true_thresholds = true_thresholds.flatten()
+        
         results = {
             'regression_metrics': {},
             'clinical_metrics': {},
@@ -302,7 +315,7 @@ class ComprehensiveEvaluationMethods:
         mae = mean_absolute_error(true_thresholds, pred_thresholds)
         mse = mean_squared_error(true_thresholds, pred_thresholds)
         r2 = r2_score(true_thresholds, pred_thresholds)
-        correlation, _ = pearsonr(true_thresholds.flatten(), pred_thresholds.flatten())
+        correlation, _ = pearsonr(true_thresholds, pred_thresholds)
         
         results['regression_metrics'] = {
             'mae_db': float(mae),
