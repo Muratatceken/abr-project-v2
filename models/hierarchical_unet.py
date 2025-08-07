@@ -221,15 +221,16 @@ class OptimizedHierarchicalUNet(nn.Module):
         
         # ============== ENHANCED OUTPUT HEADS ==============
         
-        # Signal reconstruction head
+        # Signal reconstruction / noise prediction head (locality-preserving TCN)
         self.signal_head = EnhancedSignalHead(
             input_dim=final_channels,
             signal_length=signal_length,
-            hidden_dim=final_channels * 2,
-            num_layers=3,
+            hidden_channels=final_channels,
+            n_blocks=5,
+            kernel_size=3,
             dropout=dropout,
-            use_attention=use_attention_heads,
-            use_sequence_modeling=True
+            use_timestep_conditioning=True,
+            t_embed_dim=128
         )
         
         # Peak prediction head (robust version)
@@ -409,13 +410,20 @@ class OptimizedHierarchicalUNet(nn.Module):
         # ============== ENHANCED OUTPUT HEADS WITH DIFFUSION SUPPORT ==============
         
         # ============== SIGNAL RECONSTRUCTION / NOISE PREDICTION ==============
+        # Pass timesteps into the head for conditioning
         if is_diffusion_mode:
             # During diffusion training (t > 0): predict noise
-            predicted_noise = self.signal_head(task_features['signal'])
-            signal_recon = predicted_noise  # For compatibility
+            predicted_noise = self.signal_head(
+                task_features['signal'] if task_features['signal'].dim() == 3 else task_features['signal'].unsqueeze(-1),
+                timesteps
+            )
+            signal_recon = predicted_noise
         else:
             # During inference (t = 0): predict clean signal
-            signal_recon = self.signal_head(task_features['signal'])
+            signal_recon = self.signal_head(
+                task_features['signal'] if task_features['signal'].dim() == 3 else task_features['signal'].unsqueeze(-1),
+                timesteps
+            )
             predicted_noise = None
         
         # ============== MULTI-TASK PREDICTIONS (ALWAYS FROM CLEAN FEATURES) ==============

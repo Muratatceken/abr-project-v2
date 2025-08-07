@@ -45,15 +45,11 @@ class FocalLoss(nn.Module):
 
 class ABRDiffusionLoss(nn.Module):
     """
-    Comprehensive loss function for ABR diffusion model with curriculum learning support.
-    
-    Combines:
-    - Signal reconstruction loss (MSE/Huber)
-    - Peak prediction with proper masking
-    - Classification with class weighting/focal loss
-    - Threshold regression with log-scale loss
+    Simplified loss for generator-focused training.
+    - Primary: Signal reconstruction (MSE/Huber/MAE)
+    - Optional: classification (if logits provided)
     """
-    
+
     def __init__(
         self,
         n_classes: int = 5,
@@ -61,52 +57,25 @@ class ABRDiffusionLoss(nn.Module):
         use_focal_loss: bool = False,
         focal_alpha: float = 1.0,
         focal_gamma: float = 2.0,
-        peak_loss_type: str = 'mse',
+        signal_loss_type: str = 'mse',
         huber_delta: float = 1.0,
-        use_log_threshold: bool = True,
-        use_uncertainty_threshold: bool = False,
         device: Optional[torch.device] = None,
-        enable_static_param_loss: bool = True,  # For joint generation
-        
-        # Loss weights for optimized model
-        signal_weight: float = 1.0,
-        peak_weight: float = 2.0,  
-        class_weight: float = 3.0,
-        threshold_weight: float = 1.5,
-        joint_generation_weight: float = 0.5
     ):
         super().__init__()
-        
+
         self.n_classes = n_classes
         self.use_focal_loss = use_focal_loss
-        self.peak_loss_type = peak_loss_type
+        self.signal_loss_type = signal_loss_type
         self.huber_delta = huber_delta
-        self.use_log_threshold = use_log_threshold
-        self.use_uncertainty_threshold = use_uncertainty_threshold
-        self.enable_static_param_loss = enable_static_param_loss
         self.device = device or torch.device('cpu')
-        
-        # Classification loss
+
+        # Optional classification loss
         if use_focal_loss:
             self.classification_loss = FocalLoss(alpha=focal_alpha, gamma=focal_gamma)
         else:
             self.classification_loss = nn.CrossEntropyLoss(
                 weight=class_weights.to(self.device) if class_weights is not None else None
             )
-        
-        # Peak existence loss
-        self.peak_exist_loss = nn.BCEWithLogitsLoss()
-        
-        # Initialize loss weights (updated for optimized model)
-        self.loss_weights = {
-            'signal': signal_weight,
-            'peak_exist': 0.5,
-            'peak_latency': peak_weight,
-            'peak_amplitude': peak_weight,
-            'classification': class_weight,
-            'threshold': threshold_weight,
-            'static_params': joint_generation_weight  # Weight for static parameter generation loss
-        }
     
     def update_loss_weights(self, weights: Dict[str, float]):
         """Update loss weights (used for curriculum learning)."""
@@ -132,9 +101,9 @@ class ABRDiffusionLoss(nn.Module):
                 elif true_signal.size(1) == 1 and pred_signal.size(1) != 1:
                     true_signal = true_signal.squeeze(1)
         
-        if self.peak_loss_type == 'huber':
+        if self.signal_loss_type == 'huber':
             return F.huber_loss(pred_signal, true_signal, delta=self.huber_delta)
-        elif self.peak_loss_type == 'mae':
+        elif self.signal_loss_type == 'mae':
             return F.l1_loss(pred_signal, true_signal)
         else:  # mse
             return F.mse_loss(pred_signal, true_signal)
@@ -380,23 +349,12 @@ class ABRDiffusionLoss(nn.Module):
             signal_loss = torch.tensor(0.0, device=device)
             loss_components['signal_loss'] = signal_loss
         
-        # Peak prediction losses with improved handling
-        if 'peak' in outputs:
-            peak_losses = self.compute_peak_loss(
-                outputs['peak'],
-                batch['v_peak'],
-                batch['v_peak_mask']
-            )
-            loss_components['peak_exist_loss'] = peak_losses['exist']
-            loss_components['peak_latency_loss'] = peak_losses['latency']
-            loss_components['peak_amplitude_loss'] = peak_losses['amplitude']
-        else:
-            # Zero losses if peak outputs not available
-            zero_loss = torch.tensor(0.0, device=device)
-            loss_components['peak_exist_loss'] = zero_loss
-            loss_components['peak_latency_loss'] = zero_loss
-            loss_components['peak_amplitude_loss'] = zero_loss
-            peak_losses = {'exist': zero_loss, 'latency': zero_loss, 'amplitude': zero_loss}
+        # No peak losses in simplified setting
+        zero_loss = torch.tensor(0.0, device=device)
+        loss_components['peak_exist_loss'] = zero_loss
+        loss_components['peak_latency_loss'] = zero_loss
+        loss_components['peak_amplitude_loss'] = zero_loss
+        peak_losses = {'exist': zero_loss, 'latency': zero_loss, 'amplitude': zero_loss}
         
         # Classification loss - handle different output keys
         class_key = 'class' if 'class' in outputs else 'classification_logits'
@@ -418,31 +376,13 @@ class ABRDiffusionLoss(nn.Module):
             classification_loss = torch.tensor(0.0, device=device)
             loss_components['classification_loss'] = classification_loss
         
-        # Threshold loss with robust handling
-        if 'threshold' in outputs and 'threshold' in batch:
-            threshold_loss = self.compute_threshold_loss(
-                outputs['threshold'],
-                batch['threshold']
-            )
-            loss_components['threshold_loss'] = threshold_loss
-        else:
-            threshold_loss = torch.tensor(0.0, device=device)
-            loss_components['threshold_loss'] = threshold_loss
+        # No threshold loss in simplified setting
+        threshold_loss = torch.tensor(0.0, device=device)
+        loss_components['threshold_loss'] = threshold_loss
         
-        # Static parameter loss (for joint generation in optimized model)
-        static_param_losses = {}
-        if 'static_params' in outputs and 'static_params' in batch and self.enable_static_param_loss:
-            static_param_losses = self.compute_static_param_loss(
-                outputs['static_params'],
-                batch['static_params']
-            )
-            # Add individual parameter losses to components
-            for key, value in static_param_losses.items():
-                loss_components[f'static_loss_{key}'] = value
-            static_param_total_loss = static_param_losses.get('static_params', torch.tensor(0.0, device=self.device))
-        else:
-            static_param_total_loss = torch.tensor(0.0, device=self.device)
-            loss_components['static_loss_static_params'] = static_param_total_loss
+        # No static param loss in simplified setting
+        static_param_total_loss = torch.tensor(0.0, device=self.device)
+        loss_components['static_loss_static_params'] = static_param_total_loss
         
         # Adaptive loss weighting based on relative magnitudes
         # This helps prevent one loss from dominating during training
@@ -466,16 +406,8 @@ class ABRDiffusionLoss(nn.Module):
                 else:
                     adaptive_weights[key] = 1.0
         
-        # Compute weighted total loss
-        total_loss = (
-            self.loss_weights['signal'] * signal_loss +
-            self.loss_weights['peak_exist'] * peak_losses['exist'] +
-            self.loss_weights['peak_latency'] * peak_losses['latency'] +
-            self.loss_weights['peak_amplitude'] * peak_losses['amplitude'] +
-            self.loss_weights['classification'] * classification_loss +
-            self.loss_weights['threshold'] * threshold_loss +
-            self.loss_weights['static_params'] * static_param_total_loss
-        )
+        # Compute total loss: signal + optional classification
+        total_loss = signal_loss + classification_loss
         
         loss_components['total_loss'] = total_loss
         loss_components['adaptive_weights'] = adaptive_weights

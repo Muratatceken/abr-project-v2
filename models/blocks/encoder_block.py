@@ -487,12 +487,13 @@ class OptimizedEncoderBlock(nn.Module):
         
         # ============== S4 PROCESSING (AFTER DOWNSAMPLING) ==============
         # S4 works better on shorter sequences after downsampling
+        down_len = max(1, sequence_length // downsample_factor)
         if use_enhanced_s4:
             from .s4_layer import EnhancedS4Layer
             self.s4_layers = nn.ModuleList([
                 EnhancedS4Layer(
                     features=out_channels,
-                    lmax=sequence_length,
+                    lmax=down_len,
                     N=s4_state_size,
                     dropout=dropout
                 )

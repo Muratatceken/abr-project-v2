@@ -92,8 +92,8 @@ class ABRDataset(Dataset):
         if not isinstance(self.data, list) or len(self.data) == 0:
             raise ValueError("Dataset is empty or not in expected list format")
         
-        # Check required keys in ultimate dataset format
-        required_keys = {'patient_id', 'static_params', 'signal', 'v_peak', 'v_peak_mask', 'target'}
+        # Check required keys (minimal feature set)
+        required_keys = {'patient_id', 'static_params', 'signal', 'target'}
         sample_keys = set(self.data[0].keys())
         missing_keys = required_keys - sample_keys
         
@@ -106,10 +106,6 @@ class ABRDataset(Dataset):
             raise ValueError(f"Expected 4 static parameters, got {sample['static_params'].shape[0]}")
         if sample['signal'].shape[0] != 200:
             raise ValueError(f"Expected 200 time points, got {sample['signal'].shape[0]}")
-        if sample['v_peak'].shape[0] != 2:
-            raise ValueError(f"Expected 2 V peak values, got {sample['v_peak'].shape[0]}")
-        if sample['v_peak_mask'].shape[0] != 2:
-            raise ValueError(f"Expected 2 V peak mask values, got {sample['v_peak_mask'].shape[0]}")
             
         logging.info("Data validation passed")
     
@@ -164,23 +160,11 @@ class ABRDataset(Dataset):
         
         sample = self.data[idx]
         
-        # Extract and convert data
+        # Extract and convert minimal data
         signal = sample['signal'].astype(np.float32)
         static_params = sample['static_params'].astype(np.float32)
-        v_peak = sample['v_peak'].astype(np.float32)
-        v_peak_mask = sample['v_peak_mask'].astype(bool)
         target = int(sample['target'])
         patient_id = str(sample['patient_id'])
-        
-        # Extract clinical threshold if available (for optimized model)
-        if 'clinical_threshold' in sample:
-            threshold = float(sample['clinical_threshold'])
-        elif 'threshold' in sample:
-            threshold = float(sample['threshold'])
-        else:
-            # Fallback: derive from target class (rough approximation)
-            threshold_map = {0: 15.0, 1: 35.0, 2: 55.0, 3: 75.0, 4: 95.0}
-            threshold = threshold_map.get(target, 50.0)
         
         # Apply signal normalization if requested
         if self.normalize_signal:
@@ -194,9 +178,6 @@ class ABRDataset(Dataset):
             'signal': torch.tensor(signal, dtype=torch.float32),
             'static': torch.tensor(static_params, dtype=torch.float32),
             'target': torch.tensor(target, dtype=torch.long),
-            'v_peak': torch.tensor(v_peak, dtype=torch.float32),
-            'v_peak_mask': torch.tensor(v_peak_mask, dtype=torch.bool),
-            'threshold': torch.tensor(threshold, dtype=torch.float32),
             'patient_id': patient_id
         }
         
@@ -218,7 +199,7 @@ class ABRDataset(Dataset):
         
         sample = self.data[0]
         
-        return {
+        info = {
             'num_samples': len(self.data),
             'num_patients': len(self.unique_patients),
             'signal_length': sample['signal'].shape[0],
@@ -226,11 +207,10 @@ class ABRDataset(Dataset):
             'num_classes': len(set(self.targets)),
             'class_distribution': dict(Counter(self.targets)),
             'patient_level_distribution': dict(Counter(self.patient_targets.values())),
-            'v_peak_dim': sample['v_peak'].shape[0],
-            'has_v_peak_mask': 'v_peak_mask' in sample,
             'data_path': self.data_path,
             'metadata': self.metadata
         }
+        return info
     
     def get_class_weights(self, method: str = 'inverse_freq') -> torch.Tensor:
         """
@@ -464,39 +444,16 @@ def load_ultimate_dataset(
 
 
 def abr_collate_fn(batch):
-    """Custom collate function for ABR data with support for optimized model."""
-    # Stack signals and add channel dimension: [batch, 200] -> [batch, 1, 200]
-    signals = torch.stack([item['signal'] for item in batch]).unsqueeze(1)
-    static_params = torch.stack([item['static'] for item in batch])  # Note: key is 'static', not 'static_params'
-    targets = torch.stack([item['target'] for item in batch])
-    
-    # Handle required fields
-    batch_dict = {
+    """Collate only static parameters, signal, and hearing loss target."""
+    signals = torch.stack([item['signal'] for item in batch]).unsqueeze(1)  # [B,1,200]
+    static_params = torch.stack([item['static'] for item in batch])        # [B,4]
+    targets = torch.stack([item['target'] for item in batch])              # [B]
+
+    return {
         'signal': signals,
-        'static_params': static_params,  # Rename to expected key
+        'static_params': static_params,
         'target': targets
     }
-    
-    # Add V peak data if available
-    if 'v_peak' in batch[0]:
-        v_peaks = torch.stack([item['v_peak'] for item in batch])
-        v_peak_masks = torch.stack([item['v_peak_mask'] for item in batch])
-        batch_dict.update({
-            'v_peak': v_peaks,
-            'v_peak_mask': v_peak_masks
-        })
-    
-    # Add threshold data if available (for optimized model)
-    if 'threshold' in batch[0]:
-        thresholds = torch.stack([item['threshold'] for item in batch])
-        batch_dict['threshold'] = thresholds
-    
-    # Add patient IDs if needed
-    if 'patient_id' in batch[0]:
-        patient_ids = [item['patient_id'] for item in batch]
-        batch_dict['patient_ids'] = patient_ids
-    
-    return batch_dict
 
 
 def create_optimized_dataloaders(
@@ -601,7 +558,7 @@ def create_optimized_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=True,
-            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            prefetch_factor=(prefetch_factor if num_workers > 0 else None),
             persistent_workers=persistent_workers and num_workers > 0
         )
     
@@ -615,7 +572,7 @@ def create_optimized_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=False,
-            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            prefetch_factor=(prefetch_factor if num_workers > 0 else None),
             persistent_workers=persistent_workers and num_workers > 0
         )
     
@@ -629,7 +586,7 @@ def create_optimized_dataloaders(
             num_workers=num_workers,
             pin_memory=pin_memory,
             drop_last=False,
-            prefetch_factor=prefetch_factor if num_workers > 0 else 2,
+            prefetch_factor=(prefetch_factor if num_workers > 0 else None),
             persistent_workers=persistent_workers and num_workers > 0
         )
     

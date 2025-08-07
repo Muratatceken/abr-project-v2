@@ -416,118 +416,103 @@ EnhancedPeakHead = RobustPeakHead
 
 class EnhancedSignalHead(nn.Module):
     """
-    Enhanced signal reconstruction head with attention over decoder output.
+    Locality-preserving signal head (TCN-style) for high-fidelity ABR reconstruction.
+    - Operates on [batch, channels, seq_len] without global pooling
+    - Dilated residual Conv1d blocks capture short-duration transients
+    - Optional timestep conditioning via AdaGN (scale/shift)
     """
-    
+
     def __init__(
         self,
         input_dim: int,
         signal_length: int,
-        hidden_dim: int = None,
-        num_layers: int = 3,
-        dropout: float = 0.1,
-        use_attention: bool = True,
-        use_sequence_modeling: bool = True
+        hidden_channels: int = 128,
+        n_blocks: int = 5,
+        kernel_size: int = 3,
+        dropout: float = 0.05,
+        use_timestep_conditioning: bool = True,
+        t_embed_dim: int = 128,
     ):
         super().__init__()
-        
-        if hidden_dim is None:
-            hidden_dim = input_dim * 2
-        
-        self.input_dim = input_dim
+
         self.signal_length = signal_length
-        self.use_attention = use_attention
-        self.use_sequence_modeling = use_sequence_modeling
-        
-        # Attention pooling for global features
-        if use_attention:
-            self.attention_pool = AttentionPooling(input_dim)
-        else:
-            self.attention_pool = None
-        
-        # Sequence modeling for fine-grained reconstruction
-        if use_sequence_modeling:
-            self.sequence_processor = nn.TransformerEncoder(
-                nn.TransformerEncoderLayer(
-                    d_model=input_dim,
-                    nhead=max(1, input_dim // 64),
-                    dim_feedforward=hidden_dim,
-                    dropout=dropout,
-                    batch_first=True
-                ),
-                num_layers=2
+        self.use_timestep_conditioning = use_timestep_conditioning
+
+        # Project features to conv space
+        self.input_proj = nn.Conv1d(input_dim, hidden_channels, kernel_size=1)
+
+        # Timestep embedding for diffusion (sinusoidal + MLP)
+        if use_timestep_conditioning:
+            self.t_embed = nn.Sequential(
+                nn.Linear(t_embed_dim, hidden_channels),
+                nn.SiLU(),
+                nn.Linear(hidden_channels, hidden_channels * 2),  # scale, shift
             )
         else:
-            self.sequence_processor = None
-        
-        # Main MLP layers
-        layers = []
-        for i in range(num_layers):
-            if i == 0:
-                in_features = input_dim
-            else:
-                in_features = hidden_dim
-            
-            if i == num_layers - 1:
-                out_features = signal_length
-                activation = nn.Identity()
-            else:
-                out_features = hidden_dim
-                activation = nn.GELU()
-            
-            layers.extend([
-                nn.Linear(in_features, out_features),
-                activation,
-                nn.Dropout(dropout) if i < num_layers - 1 else nn.Identity()
-            ])
-        
-        self.mlp = nn.Sequential(*layers)
-        
-        # Optional output refinement
-        self.output_refinement = nn.Sequential(
-            nn.Conv1d(1, 16, kernel_size=7, padding=3),
-            nn.ReLU(),
-            nn.Conv1d(16, 8, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.Conv1d(8, 1, kernel_size=3, padding=1)
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+            self.t_embed = None
+
+        # Dilated residual blocks
+        blocks = []
+        for i in range(n_blocks):
+            dilation = 2 ** i
+            blocks.append(
+                nn.Sequential(
+                    nn.Conv1d(hidden_channels, hidden_channels, kernel_size, padding=dilation*(kernel_size//2), dilation=dilation),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Conv1d(hidden_channels, hidden_channels, kernel_size, padding=dilation*(kernel_size//2), dilation=dilation),
+                )
+            )
+        self.blocks = nn.ModuleList(blocks)
+        self.norm = nn.GroupNorm(1, hidden_channels)
+
+        # Output projection
+        self.out_proj = nn.Conv1d(hidden_channels, 1, kernel_size=1)
+
+    @staticmethod
+    def sinusoidal_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
+        device = timesteps.device
+        half = dim // 2
+        emb = np.log(10000) / (half - 1)
+        emb = torch.exp(torch.arange(half, device=device) * -emb)
+        emb = timesteps.float().unsqueeze(1) * emb.unsqueeze(0)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)
+        if dim % 2 == 1:
+            emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=1)
+        return emb
+
+    def forward(self, x: torch.Tensor, timesteps: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Generate signal reconstruction.
-        
         Args:
-            x: Input features [batch, input_dim] or [batch, seq_len, input_dim] or [batch, input_dim, seq_len]
-            
+            x: [batch, channels, seq_len] or [batch, seq_len, channels]
+            timesteps: [batch] diffusion steps for conditioning
         Returns:
-            Reconstructed signal [batch, signal_length]
+            [batch, signal_length]
         """
-        if x.dim() == 3:
-            # Process sequence input
-            if self.sequence_processor is not None:
-                # Ensure [batch, seq_len, input_dim] format
-                if x.size(1) == self.input_dim:
-                    x = x.transpose(1, 2)
-                x = self.sequence_processor(x)
-            
-            # Pool to vector
-            if self.attention_pool is not None:
-                x = self.attention_pool(x)
-            else:
-                x = x.mean(dim=1)  # Simple average pooling
-        
-        # Generate signal through MLP
-        signal = self.mlp(x)  # [batch, signal_length]
-        
-        # Optional refinement with 1D convolution
-        signal_refined = signal.unsqueeze(1)  # [batch, 1, signal_length]
-        signal_refined = self.output_refinement(signal_refined)
-        signal_refined = signal_refined.squeeze(1)  # [batch, signal_length]
-        
-        # Residual connection
-        signal = signal + signal_refined
-        
-        return signal
+        if x.dim() == 3 and x.size(1) != self.input_proj.in_channels and x.size(2) == self.input_proj.in_channels:
+            x = x.transpose(1, 2)
+
+        x = self.input_proj(x)
+
+        cond_scale = cond_shift = None
+        if self.use_timestep_conditioning and timesteps is not None:
+            t_emb = self.sinusoidal_embedding(timesteps, self.t_embed[0].in_features)
+            cond = self.t_embed(t_emb)
+            cond_scale, cond_shift = cond.chunk(2, dim=1)  # [B, C]
+
+        for block in self.blocks:
+            residual = x
+            h = block(x)
+            if cond_scale is not None and cond_shift is not None:
+                # AdaGN-style mod
+                h = self.norm(h)
+                h = h * (1 + cond_scale.unsqueeze(-1)) + cond_shift.unsqueeze(-1)
+            x = residual + h
+
+        x = self.out_proj(x)
+        if x.size(-1) != self.signal_length:
+            x = F.interpolate(x, size=self.signal_length, mode='linear', align_corners=False)
+        return x.squeeze(1)
 
 
 class RobustClassificationHead(nn.Module):

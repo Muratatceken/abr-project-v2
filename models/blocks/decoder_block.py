@@ -68,8 +68,8 @@ class EnhancedDecoderBlock(nn.Module):
             out_channels=out_channels,
             skip_channels=skip_channels,
             upsample_factor=upsample_factor,
-            method='interpolate',  # More stable than conv_transpose
-            kernel_size=3,
+            method='conv_transpose',  # Sharper than interpolate for transients
+            kernel_size=upsample_factor * 2 + 1,
             normalization='layer',
             activation=activation,
             dropout=dropout

@@ -1,0 +1,54 @@
+# Colab A100 training configuration for the professional ABR diffusion trainer
+# Update `data.path` to your dataset location in Colab if different (e.g., /content/drive/...)
+
+training:
+  device: cuda                 # Force GPU usage on Colab A100
+  mixed_precision: true        # AMP for speed and memory
+  random_seed: 42
+  early_stopping_patience: 20
+
+logging:
+  checkpoint_dir: checkpoints/colab_a100
+  log_dir: logs/colab_a100
+  use_tensorboard: true
+  use_wandb: false             # Set true if you want W&B logging
+  wandb_project: abr-diffusion-colab
+  wandb_run_name: abr_colab_a100
+  log_interval: 50
+  val_preview_samples: 8
+
+data:
+  path: data/processed/ultimate_dataset_with_clinical_thresholds.pkl
+  batch_size: 128              # Safe default for A100; increase to 256 if headroom
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  num_workers: 8               # Use multiple workers on Colab GPU runtime
+  pin_memory: true             # Enable pinned memory for GPU transfer
+
+model:
+  signal_length: 200
+  static_dim: 4
+  base_channels: 64
+  n_levels: 4
+  dropout: 0.10
+  s4_state_size: 64
+  num_s4_layers: 2
+  num_transformer_layers: 2
+  num_heads: 8
+  # num_classes: 5             # Optional; auto-detected if omitted
+
+diffusion:
+  schedule_type: cosine
+  num_timesteps: 1000
+
+optimization:
+  epochs: 200                  # Full training
+  learning_rate: 0.0002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  accumulation_steps: 1        # Increase if you push batch_size higher and hit OOM
+  warmup_epochs: 5
+  ema_decay: 0.999
+  classification_weight: 0.0   # Keep generator primary; enable >0.0 if you use class logits
+

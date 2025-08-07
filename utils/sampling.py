@@ -112,7 +112,13 @@ class DDIMSampler:
                 # Standard conditional prediction
                 noise_pred = model(x, static_params, t)
                 if isinstance(noise_pred, dict):
-                    noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
+                    # Prefer explicit noise when in diffusion mode, else recon
+                    if 'noise' in noise_pred:
+                        noise_pred = noise_pred['noise']
+                    elif 'recon' in noise_pred:
+                        noise_pred = noise_pred['recon']
+                    else:
+                        noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
             
             # DDIM step
             x = self._ddim_step(x, noise_pred, timestep, i, timesteps)
@@ -160,8 +166,12 @@ class DDIMSampler:
         
         # Handle different output formats
         if isinstance(noise_pred_combined, dict):
-            noise_pred_combined = noise_pred_combined.get('noise_pred', 
-                                                        noise_pred_combined.get('pred', x_combined))
+            if 'noise' in noise_pred_combined:
+                noise_pred_combined = noise_pred_combined['noise']
+            elif 'recon' in noise_pred_combined:
+                noise_pred_combined = noise_pred_combined['recon']
+            else:
+                noise_pred_combined = noise_pred_combined.get('noise_pred', noise_pred_combined.get('pred', x_combined))
         
         # Split conditional and unconditional predictions
         noise_pred_cond, noise_pred_uncond = noise_pred_combined.chunk(2, dim=0)
@@ -243,7 +253,12 @@ class DDIMSampler:
         else:
             noise_pred = model(x, static_params, t)
             if isinstance(noise_pred, dict):
-                noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
+                if 'noise' in noise_pred:
+                    noise_pred = noise_pred['noise']
+                elif 'recon' in noise_pred:
+                    noise_pred = noise_pred['recon']
+                else:
+                    noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
         
         # Final denoising
         alpha_cumprod = self.alphas_cumprod[0]
@@ -295,7 +310,12 @@ class DDIMSampler:
             # Predict noise
             noise_pred = model(x, static_params, t)
             if isinstance(noise_pred, dict):
-                noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
+                if 'noise' in noise_pred:
+                    noise_pred = noise_pred['noise']
+                elif 'recon' in noise_pred:
+                    noise_pred = noise_pred['recon']
+                else:
+                    noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
             
             # Reverse DDIM step
             x = self._ddim_reverse_step(x, noise_pred, timestep, i, timesteps)
