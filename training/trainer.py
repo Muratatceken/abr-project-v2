@@ -34,6 +34,7 @@ from data.dataset import create_optimized_dataloaders
 from models.hierarchical_unet import OptimizedHierarchicalUNet
 from utils.schedule import get_noise_schedule, NoiseSchedule
 from utils.sampling import create_ddim_sampler
+from utils.monitoring import TrainingMonitor
 
 
 def set_seed(seed: int):
@@ -158,6 +159,10 @@ class ABRTrainer:
         tb_dir = Path(logging_cfg.get('log_dir', 'logs/pro')) / 'tensorboard'
         tb_dir.mkdir(parents=True, exist_ok=True)
         self.writer = SummaryWriter(str(tb_dir)) if logging_cfg.get('use_tensorboard', True) else None
+        # Enhanced monitoring setup
+        monitor_dir = Path(logging_cfg.get('log_dir', 'logs/pro')) / 'enhanced_monitoring'
+        monitor_dir.mkdir(parents=True, exist_ok=True)
+        self.monitor = TrainingMonitor(log_dir=str(monitor_dir), n_classes=num_classes)
 
         # W&B (optional)
         self.use_wandb = logging_cfg.get('use_wandb', False)
@@ -241,31 +246,52 @@ class ABRTrainer:
             with autocast(enabled=self.mixed_precision):
                 outputs = self.model(x_noisy, static, t)
                 total_loss, metrics = self._compute_losses(outputs, noise, targets)
-                loss = total_loss / accum_steps
+                loss = total_loss / max(1, accum_steps)
 
-            self.scaler.scale(loss).backward()
+                self.scaler.scale(loss).backward()
 
             if (batch_idx + 1) % accum_steps == 0:
                 if self.grad_clip_norm and self.grad_clip_norm > 0:
-                    self.scaler.unscale_(self.optimizer)
+                        self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
                 self.ema.update(self.model)
-
-            # Logging
-            self.global_step += 1
+                
+            # Bookkeeping
+                self.global_step += 1
             running['total'] += metrics['loss_total']
             running['noise'] += metrics['loss_noise']
             running['cls'] += metrics['loss_cls']
             count += 1
+
+            # TB/W&B
             if self.writer and (self.global_step % self.cfg.get('logging', {}).get('log_interval', 50) == 0):
                 self.writer.add_scalar('train/loss_total', metrics['loss_total'], self.global_step)
                 self.writer.add_scalar('train/loss_noise', metrics['loss_noise'], self.global_step)
                 self.writer.add_scalar('train/loss_cls', metrics['loss_cls'], self.global_step)
             if self.use_wandb:
                 self.wandb.log({'train/loss_total': metrics['loss_total'], 'train/loss_noise': metrics['loss_noise'], 'train/loss_cls': metrics['loss_cls'], 'step': self.global_step})
+
+            # Enhanced monitor per step
+            try:
+                loss_components = {
+                    'total_loss': metrics['loss_total'],
+                    'noise_loss': metrics['loss_noise'],
+                    'classification_loss': metrics['loss_cls'],
+                }
+                self.monitor.log_step(
+                        step=self.global_step,
+                    epoch=epoch,
+                        loss_components=loss_components,
+                    outputs=None,
+                    targets=None,
+                        model=self.model,
+                    optimizer=self.optimizer,
+                )
+            except Exception:
+                pass
 
             pbar.set_postfix({
                 'total': f"{metrics['loss_total']:.4f}",
@@ -315,7 +341,7 @@ class ABRTrainer:
         if self.use_wandb:
             self.wandb.log({'val/total': metrics['val_total'], 'val/noise': metrics['val_noise'], 'val/cls': metrics['val_cls'], 'epoch': epoch})
         return metrics
-
+    
     @torch.no_grad()
     def log_preview_samples(self, epoch: int, num_samples: int = 8, steps: int = 50):
         # Use EMA for preview
@@ -330,7 +356,9 @@ class ABRTrainer:
             # Take a batch of static params from val loader
             batch = next(iter(self.val_loader))
             static = batch['static_params'][:num_samples].to(self.device)
-            shape = (static.size(0), 1, self.cfg.get('model', {}).get('signal_length', 200))
+            signal_length = self.cfg.get('model', {}).get('signal_length', 200)
+            in_channels = getattr(self.model, 'input_channels', 1)
+            shape = (static.size(0), in_channels, signal_length)
             samples = sampler.sample(self.model, shape=shape, static_params=static, device=self.device, num_steps=steps, cfg_scale=1.0, progress=False)
             # Log to TensorBoard as images
             if self.writer:
@@ -345,6 +373,10 @@ class ABRTrainer:
                 plt.tight_layout()
                 self.writer.add_figure('preview/samples', fig, epoch)
                 plt.close(fig)
+            except Exception as e:
+            # Do not fail training on preview issues
+        if self.writer:
+                self.writer.add_text('preview/error', str(e), epoch)
         finally:
             self.ema.restore(self.model)
 
@@ -380,6 +412,7 @@ class ABRTrainer:
     def train(self, resume: bool = False):
         start_epoch = self.load_checkpoint() if resume else 0
         for epoch in range(start_epoch, self.total_epochs):
+            epoch_start = time.time()
             lr = self._apply_lr(epoch)
             if self.writer:
                 self.writer.add_scalar('lr', lr, epoch)
@@ -393,22 +426,39 @@ class ABRTrainer:
             val_metrics = self.validate_epoch(epoch)
             self.ema.restore(self.model)
 
+            # Epoch monitoring summary
+            try:
+                self.monitor.log_epoch(
+                    epoch=epoch,
+                    train_metrics={'loss_total': train_metrics['total'], 'loss_noise': train_metrics['noise'], 'loss_cls': train_metrics['cls']},
+                    val_metrics={'loss_total': val_metrics['val_total'], 'loss_noise': val_metrics['val_noise'], 'loss_cls': val_metrics['val_cls']},
+                    epoch_time=time.time() - epoch_start,
+                )
+            except Exception:
+                pass
+
             # Preview
             if (epoch + 1) % 5 == 0:
                 self.log_preview_samples(epoch, num_samples=self.cfg.get('logging', {}).get('val_preview_samples', 8), steps=50)
 
             # Checkpointing / early stopping
             is_best = val_metrics['val_total'] < self.best_val
-            if is_best:
+                if is_best:
                 self.best_val = val_metrics['val_total']
                 self.epochs_no_improve = 0
-            else:
+                else:
                 self.epochs_no_improve += 1
             self.save_checkpoint(epoch, is_best=is_best)
 
             if self.epochs_no_improve >= self.early_stop_patience:
                 print(f"Early stopping at epoch {epoch+1}")
-                break
-
+                    break
+            
         print("Training completed. Best val loss:", self.best_val)
+        # Save enhanced monitoring plots and report
+        try:
+            self.monitor.generate_training_report()
+            self.monitor.plot_training_progress()
+        except Exception:
+            pass
 
