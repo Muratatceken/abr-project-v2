@@ -1,0 +1,156 @@
+{
+  "evaluation_summary": {
+    "timestamp": "2025-08-08 16:22:25",
+    "model_config": {
+      "training": "{'device': 'cuda', 'mixed_precision': True, 'random_seed': 42, 'early_stopping_patience': 20}",
+      "logging": "{'checkpoint_dir': 'checkpoints/colab_a100', 'log_dir': 'logs/colab_a100', 'use_tensorboard': True, 'use_wandb': False, 'wandb_project': 'abr-diffusion-colab', 'wandb_run_name': 'abr_colab_a100', 'log_interval': 50, 'val_preview_samples': 8}",
+      "data": "{'path': 'data/processed/ultimate_dataset_with_clinical_thresholds.pkl', 'batch_size': 4, 'train_ratio': 0.7, 'val_ratio': 0.15, 'test_ratio': 0.15, 'num_workers': 8, 'pin_memory': True}",
+      "model": "{'signal_length': 200, 'static_dim': 4, 'base_channels': 64, 'n_levels': 4, 'dropout': 0.1, 's4_state_size': 64, 'num_s4_layers': 2, 'num_transformer_layers': 2, 'num_heads': 8}",
+      "diffusion": "{'schedule_type': 'cosine', 'num_timesteps': 1000}",
+      "optimization": "{'epochs': 200, 'learning_rate': 0.0002, 'weight_decay': 0.0001, 'grad_clip_norm': 1.0, 'accumulation_steps': 1, 'warmup_epochs': 5, 'ema_decay': 0.999}"
+    },
+    "evaluation_metrics": {
+      "mse": {
+        "mean": 1.998116930325826,
+        "std": 0.09978177900578947,
+        "min": 1.776626706123352,
+        "max": 2.1408700942993164,
+        "median": 2.0085947513580322
+      },
+      "mae": {
+        "mean": 1.1585405468940735,
+        "std": 0.03982392363239483,
+        "min": 1.0629521608352661,
+        "max": 1.2124251127243042,
+        "median": 1.169257938861847
+      },
+      "rmse": {
+        "mean": 1.4130991796652477,
+        "std": 0.035604166751473425,
+        "min": 1.3329015970230103,
+        "max": 1.4631712436676025,
+        "median": 1.4172396659851074
+      },
+      "snr": {
+        "mean": -3.0006618797779083,
+        "std": 0.22086906785004276,
+        "min": -3.3059030771255493,
+        "max": -2.495962083339691,
+        "median": -3.0288079380989075
+      },
+      "psnr": {
+        "mean": -3.000661849975586,
+        "std": 0.22086907923221588,
+        "min": -3.3059029579162598,
+        "max": -2.495961904525757,
+        "median": -3.028808116912842
+      },
+      "amplitude_envelope_similarity": {
+        "mean": 0.005204869218452644,
+        "std": 0.02559301759709343,
+        "min": -0.03849708376598154,
+        "max": 0.0547281867076487,
+        "median": 0.00019827074298752693
+      },
+      "phase_coherence": {
+        "mean": 0.3158315400265394,
+        "std": 0.041352386507320454,
+        "min": 0.22905947290773576,
+        "max": 0.3789806832606909,
+        "median": 0.31884428271331355
+      },
+      "correlation": {
+        "pearson_r": {
+          "mean": -0.0074407554165866335,
+          "std": 0.050673112144590166
+        }
+      },
+      "frequency_response": {
+        "frequency_mse": {
+          "mean": 296.4195861816406,
+          "std": 21.189651489257812
+        }
+      }
+    },
+    "generation_stats": {
+      "sampling_steps": 50,
+      "cfg_scale": 1.0,
+      "generation_times": [
+        6.4589550495147705,
+        6.4985692501068115,
+        6.463976144790649,
+        6.3856892585754395
+      ],
+      "signal_properties": [
+        {
+          "rms": 0.992249608039856,
+          "peak_amplitude": 0.9973251223564148,
+          "dynamic_range": 1.9938323497772217,
+          "mean_amplitude": 0.04931921884417534,
+          "std_amplitude": 0.9910231828689575,
+          "skewness": -0.10012414351502873,
+          "kurtosis": -1.989957174834083,
+          "zero_crossings": 96,
+          "total_energy": 196.911865234375,
+          "signal_power": 0.9845592975616455,
+          "dominant_frequency": 25.0,
+          "bandwidth": 405.0
+        },
+        {
+          "rms": 0.9920722842216492,
+          "peak_amplitude": 0.9993008375167847,
+          "dynamic_range": 1.9952244758605957,
+          "mean_amplitude": -0.10933367908000946,
+          "std_amplitude": 0.9860291481018066,
+          "skewness": 0.22133947543430826,
+          "kurtosis": -1.950996395940293,
+          "zero_crossings": 105,
+          "total_energy": 196.8414764404297,
+          "signal_power": 0.9842073917388916,
+          "dominant_frequency": 235.0,
+          "bandwidth": 495.0
+        },
+        {
+          "rms": 0.9918995499610901,
+          "peak_amplitude": 0.9978135228157043,
+          "dynamic_range": 1.9939675331115723,
+          "mean_amplitude": -0.06975624710321426,
+          "std_amplitude": 0.9894436597824097,
+          "skewness": 0.14034182900196787,
+          "kurtosis": -1.9802922427854668,
+          "zero_crossings": 114,
+          "total_energy": 196.77294921875,
+          "signal_power": 0.9838647246360779,
+          "dominant_frequency": 430.0,
+          "bandwidth": 415.0
+        },
+        {
+          "rms": 0.9923473596572876,
+          "peak_amplitude": 0.9972079992294312,
+          "dynamic_range": 1.993886947631836,
+          "mean_amplitude": -0.00024513722746632993,
+          "std_amplitude": 0.9923473000526428,
+          "skewness": -8.539197999189141e-07,
+          "kurtosis": -1.999982799050145,
+          "zero_crossings": 105,
+          "total_energy": 196.95065307617188,
+          "signal_power": 0.9847532510757446,
+          "dominant_frequency": 445.0,
+          "bandwidth": 460.0
+        }
+      ],
+      "avg_generation_time": 6.451797425746918,
+      "std_generation_time": 0.04110184331715901
+    },
+    "analysis_results": {}
+  },
+  "recommendations": [
+    "Low SNR detected. Consider increasing training epochs or adjusting loss weighting.",
+    "Low signal correlation. Consider improving model architecture or training data quality.",
+    "Generation time is high. Consider using fewer DDIM steps or model optimization."
+  ],
+  "visualizations": [
+    "evaluation_results_quick/plots/sample_comparisons.png",
+    "evaluation_results_quick/plots/metrics_distribution.png"
+  ]
+}

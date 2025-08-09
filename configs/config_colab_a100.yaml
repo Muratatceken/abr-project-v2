@@ -50,5 +50,5 @@ optimization:
   accumulation_steps: 1        # Increase if you push batch_size higher and hit OOM
   warmup_epochs: 5
   ema_decay: 0.999
-  classification_weight: 0.0   # Keep generator primary; enable >0.0 if you use class logits
+  # classification_weight removed - signal generation only
 

@@ -119,6 +119,15 @@ class DDIMSampler:
                         noise_pred = noise_pred['recon']
                     else:
                         noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
+                
+                # Ensure noise_pred has the same shape as x
+                if noise_pred.dim() == 2 and x.dim() == 3:
+                    noise_pred = noise_pred.unsqueeze(1)  # Add channel dimension
+                elif noise_pred.shape != x.shape:
+                    # Handle other shape mismatches
+                    if noise_pred.size(0) == x.size(0) and noise_pred.size(-1) == x.size(-1):
+                        # Reshape to match input channels
+                        noise_pred = noise_pred.view(x.shape)
             
             # DDIM step
             x = self._ddim_step(x, noise_pred, timestep, i, timesteps)
@@ -137,9 +146,11 @@ class DDIMSampler:
     
     def _get_timestep_schedule(self, num_steps: int) -> torch.Tensor:
         """Create timestep schedule for sampling."""
-        # Linear schedule from T-1 to 0
-        timesteps = torch.linspace(self.num_timesteps - 1, 0, num_steps, dtype=torch.long)
-        return timesteps.flip(0)  # Reverse to go from noise to clean
+        # We must iterate from high noise to low noise (T-1 -> 0)
+        # Returning in descending order ensures the DDIM update uses the
+        # previous (less noisy) timestep correctly.
+        timesteps = torch.linspace(self.num_timesteps - 1, 0, steps=num_steps, dtype=torch.long)
+        return timesteps  # Already descending: [T-1, ..., 0]
     
     def _apply_cfg(
         self,
@@ -172,6 +183,15 @@ class DDIMSampler:
                 noise_pred_combined = noise_pred_combined['recon']
             else:
                 noise_pred_combined = noise_pred_combined.get('noise_pred', noise_pred_combined.get('pred', x_combined))
+        
+        # Ensure noise_pred_combined has the same shape as x_combined
+        if noise_pred_combined.dim() == 2 and x_combined.dim() == 3:
+            noise_pred_combined = noise_pred_combined.unsqueeze(1)  # Add channel dimension
+        elif noise_pred_combined.shape != x_combined.shape:
+            # Handle other shape mismatches
+            if noise_pred_combined.size(0) == x_combined.size(0) and noise_pred_combined.size(-1) == x_combined.size(-1):
+                # Reshape to match input channels
+                noise_pred_combined = noise_pred_combined.view(x_combined.shape)
         
         # Split conditional and unconditional predictions
         noise_pred_cond, noise_pred_uncond = noise_pred_combined.chunk(2, dim=0)
@@ -259,6 +279,15 @@ class DDIMSampler:
                     noise_pred = noise_pred['recon']
                 else:
                     noise_pred = noise_pred.get('noise_pred', noise_pred.get('pred', x))
+            
+            # Ensure noise_pred has the same shape as x
+            if noise_pred.dim() == 2 and x.dim() == 3:
+                noise_pred = noise_pred.unsqueeze(1)  # Add channel dimension
+            elif noise_pred.shape != x.shape:
+                # Handle other shape mismatches
+                if noise_pred.size(0) == x.size(0) and noise_pred.size(-1) == x.size(-1):
+                    # Reshape to match input channels
+                    noise_pred = noise_pred.view(x.shape)
         
         # Final denoising
         alpha_cumprod = self.alphas_cumprod[0]

@@ -76,7 +76,6 @@ class OptimizedHierarchicalUNet(nn.Module):
         n_levels: int = 4,
         sequence_length: int = 200,
         signal_length: int = 200,
-        num_classes: int = 5,
         
         # S4 configuration
         s4_state_size: int = 64,
@@ -115,7 +114,6 @@ class OptimizedHierarchicalUNet(nn.Module):
         self.n_levels = n_levels
         self.sequence_length = sequence_length
         self.signal_length = signal_length
-        self.num_classes = num_classes
         self.use_cfg = use_cfg
         self.enable_joint_generation = enable_joint_generation
         self.use_task_specific_extractors = use_task_specific_extractors
@@ -247,18 +245,7 @@ class OptimizedHierarchicalUNet(nn.Module):
             amplitude_range=(-0.5, 0.5)
         )
         
-        # Classification head (robust version)
-        from .blocks.heads import RobustClassificationHead
-        self.class_head = RobustClassificationHead(
-            input_dim=final_channels,
-            num_classes=num_classes,
-            hidden_dim=final_channels,
-            num_layers=3,
-            dropout=dropout,
-            use_attention=use_attention_heads,
-            use_focal_loss_prep=True,
-            use_class_weights=True
-        )
+        # Classification head removed - signal generation only
         
         # Threshold regression head (robust version)
         from .blocks.heads import RobustThresholdHead
@@ -409,22 +396,17 @@ class OptimizedHierarchicalUNet(nn.Module):
         
         # ============== ENHANCED OUTPUT HEADS WITH DIFFUSION SUPPORT ==============
         
-        # ============== SIGNAL RECONSTRUCTION / NOISE PREDICTION ==============
-        # Pass timesteps into the head for conditioning
-        if is_diffusion_mode:
-            # During diffusion training (t > 0): predict noise
-            predicted_noise = self.signal_head(
-                task_features['signal'] if task_features['signal'].dim() == 3 else task_features['signal'].unsqueeze(-1),
-                timesteps
-            )
-            signal_recon = predicted_noise
-        else:
-            # During inference (t = 0): predict clean signal
-            signal_recon = self.signal_head(
-                task_features['signal'] if task_features['signal'].dim() == 3 else task_features['signal'].unsqueeze(-1),
-                timesteps
-            )
-            predicted_noise = None
+        # ============== SIGNAL NOISE PREDICTION (DIFFUSION PARADIGM) ==============
+        # ALWAYS predict noise for proper diffusion sampling
+        # The signal head should predict noise at ALL timesteps for consistent generation
+        predicted_noise = self.signal_head(
+            task_features['signal'] if task_features['signal'].dim() == 3 else task_features['signal'].unsqueeze(-1),
+            timesteps
+        )
+        
+        # For compatibility, set signal_recon = predicted_noise
+        # The sampling process will handle the noise-to-signal conversion
+        signal_recon = predicted_noise
         
         # ============== MULTI-TASK PREDICTIONS (ALWAYS FROM CLEAN FEATURES) ==============
         # These predictions should be consistent regardless of diffusion mode
@@ -434,14 +416,12 @@ class OptimizedHierarchicalUNet(nn.Module):
             # Use the final features as they contain semantic information
             clean_features = {
                 'peaks': x_final,
-                'classification': x_final,
                 'threshold': x_final
             }
         else:
             # For inference mode, features are already clean
             clean_features = {
                 'peaks': task_features['peaks'],
-                'classification': task_features['classification'],
                 'threshold': task_features['threshold']
             }
         
@@ -454,8 +434,7 @@ class OptimizedHierarchicalUNet(nn.Module):
             peak_exists, peak_latency, peak_amplitude = peak_output
             peak_result = (peak_exists, peak_latency, peak_amplitude)
         
-        # Classification
-        class_logits = self.class_head(clean_features['classification'])
+        # Classification removed - signal generation only
         
         # Threshold regression
         threshold = self.threshold_head(clean_features['threshold'])
@@ -464,13 +443,11 @@ class OptimizedHierarchicalUNet(nn.Module):
         outputs = {
             'recon': signal_recon,
             'peak': peak_result,
-            'class': class_logits,
             'threshold': threshold
         }
         
-        # Add explicit noise output for diffusion training
-        if predicted_noise is not None:
-            outputs['noise'] = predicted_noise
+        # Always include noise output for consistent diffusion sampling
+        outputs['noise'] = predicted_noise
         
         # Add diffusion mode information for loss computation
         outputs['is_diffusion_mode'] = is_diffusion_mode

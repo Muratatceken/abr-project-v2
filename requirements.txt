@@ -37,9 +37,11 @@ xlrd>=2.0.0
 
 # Additional Scientific Libraries for Signal Processing
 fastdtw>=0.3.4
+librosa>=0.10.0
 
-# Optional: Enhanced Reporting (for evaluation pipeline)
+# Optional: Enhanced Reporting and Visualization (for evaluation pipeline)
 reportlab>=4.0.0
+plotly>=5.15.0
 
 # Development and Testing (optional)
 pytest>=7.4.0

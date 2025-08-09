@@ -1,0 +1,80 @@
+# Fixed Signal-Only Training Configuration
+# This config addresses the conditioning and multi-task dilution issues
+
+training:
+  device: cuda
+  mixed_precision: true
+  random_seed: 42
+  early_stopping_patience: 30
+
+logging:
+  checkpoint_dir: checkpoints/signal_only_fixed
+  log_dir: logs/signal_only_fixed
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: abr-signal-generation
+  wandb_run_name: signal_only_fixed
+  log_interval: 25
+  val_preview_samples: 12
+  save_every_n_epochs: 5  # More frequent saves for monitoring
+
+data:
+  path: data/processed/ultimate_dataset_with_clinical_thresholds.pkl
+  batch_size: 64               # Smaller batch for better gradient quality
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+  num_workers: 8
+  pin_memory: true
+
+model:
+  input_channels: 1            # Explicit channel specification
+  signal_length: 200
+  static_dim: 4
+  base_channels: 64
+  n_levels: 4
+  dropout: 0.05                # Reduced dropout for better learning
+  s4_state_size: 64
+  num_s4_layers: 2
+  num_transformer_layers: 2
+  num_heads: 8
+
+diffusion:
+  schedule_type: cosine
+  num_timesteps: 1000
+  
+  # Improved noise scheduling for better training
+  beta_start: 0.0001
+  beta_end: 0.02
+  
+  # Loss weighting for different timesteps
+  loss_type: l2                # Clear loss specification
+  
+optimization:
+  epochs: 150                  # Focused training
+  learning_rate: 0.0001        # Slightly lower LR for stability
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  accumulation_steps: 2        # Larger effective batch size
+  warmup_epochs: 10            # Longer warmup for stability
+  ema_decay: 0.9995           # Better EMA for generation
+  
+  # SIGNAL-ONLY FOCUS
+  signal_loss_weight: 1.0      # Full focus on signal generation
+  
+  # Conditioning improvements
+  static_conditioning_strength: 1.0    # Ensure conditioning works
+  unconditional_guidance_prob: 0.1     # 10% unconditional for CFG training
+
+# Enhanced monitoring for signal quality
+monitoring:
+  track_signal_metrics: true
+  track_conditioning_effectiveness: true
+  save_generation_samples: true
+  sample_generation_steps: [10, 25, 50]  # Different DDIM steps
+  
+scheduler:
+  type: cosine_with_restarts
+  T_0: 25                      # Restart every 25 epochs
+  T_mult: 2                    # Double restart period
+  eta_min: 1e-6               # Minimum learning rate
