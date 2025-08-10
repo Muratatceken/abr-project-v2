@@ -96,18 +96,7 @@ class EnhancedABRTrainer:
         opt_cfg = config.get('optimization', {})
         diffusion_cfg = config.get('diffusion', {})
 
-        # Create augmentation transform
-        augmentation_transform = None
-        if model_cfg.get('use_augmentation', False):
-            aug_cfg = model_cfg.get('augmentation', {})
-            augmentation_transform = create_augmentation(
-                enable=True,
-                time_shift_samples=aug_cfg.get('time_shift_samples', 2),
-                noise_std=aug_cfg.get('noise_std', 0.01),
-                apply_prob=aug_cfg.get('apply_prob', 0.3)
-            )
-
-        # Data loaders
+        # Data loaders (augmentation temporarily disabled for stability)
         self.train_loader, self.val_loader, self.test_loader, self.full_dataset = create_optimized_dataloaders(
             data_path=data_cfg.get('path', 'data/processed/ultimate_dataset_with_clinical_thresholds.pkl'),
             batch_size=data_cfg.get('batch_size', 128),
@@ -165,6 +154,11 @@ class EnhancedABRTrainer:
             diffusion_cfg.get('num_timesteps', 1000)
         )
         self.noise_schedule = NoiseSchedule(schedule)
+        
+        # Move noise schedule tensors to device
+        for key, tensor in self.noise_schedule.__dict__.items():
+            if isinstance(tensor, torch.Tensor):
+                setattr(self.noise_schedule, key, tensor.to(self.device))
 
         # V-prediction support
         self.use_v_prediction = diffusion_cfg.get('prediction_type', 'noise') == 'v_prediction'
