@@ -57,8 +57,8 @@ class SignalGenerationEvaluator:
         self.sampler = create_ddim_sampler(
             noise_schedule_type=config.get('diffusion', {}).get('schedule_type', 'cosine'),
             num_timesteps=config.get('diffusion', {}).get('num_timesteps', 1000),
-            eta=0.0,
-            clip_denoised=True
+            eta=config.get('diffusion', {}).get('eta', 0.0),
+            clip_denoised=config.get('diffusion', {}).get('clip_denoised', False)
         )
         
         # Results storage

@@ -31,7 +31,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from data.dataset import create_optimized_dataloaders
+from data.augmentations import create_augmentation
 from models.hierarchical_unet import OptimizedHierarchicalUNet
+from models.enhanced_hierarchical_unet import EnhancedHierarchicalUNet
 from utils.schedule import get_noise_schedule, NoiseSchedule
 from utils.sampling import create_ddim_sampler
 from utils.monitoring import TrainingMonitor
@@ -203,13 +205,27 @@ class ABRTrainer:
         high = self.noise_schedule.num_timesteps - 1
         return torch.randint(low, high, (batch_size,), device=self.device, dtype=torch.long)
 
-    def _compute_losses(self, outputs: Dict[str, torch.Tensor], noise_target: torch.Tensor, targets: Optional[torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def _compute_losses(self, outputs: Dict[str, torch.Tensor], noise_target: torch.Tensor, targets: Optional[torch.Tensor], timesteps: torch.Tensor = None) -> Tuple[torch.Tensor, Dict[str, float]]:
         pred_noise = outputs.get('noise', outputs.get('recon', None))
         if pred_noise is None:
             raise RuntimeError("Model outputs must contain 'noise' or 'recon' for diffusion training.")
         if pred_noise.dim() == 2:
             pred_noise = pred_noise.unsqueeze(1)
-        loss_noise = F.mse_loss(pred_noise, noise_target)
+        
+        # Apply P2 weighting if enabled
+        if self.cfg.get('diffusion', {}).get('use_p2_weighting', False) and timesteps is not None:
+            # P2 weighting: w(t) = (alpha_cumprod_t^k / (1 - alpha_cumprod_t)^gamma)
+            alpha_cumprod_t = self.noise_schedule.alphas_cumprod[timesteps]
+            p2_k = self.cfg.get('diffusion', {}).get('p2_k', 1.0)
+            p2_gamma = self.cfg.get('diffusion', {}).get('p2_gamma', 1.0)
+            
+            weights = (alpha_cumprod_t ** p2_k) / ((1 - alpha_cumprod_t) ** p2_gamma)
+            weights = weights.view(-1, 1, 1)  # Broadcast to [B, 1, 1]
+            
+            loss_noise = F.mse_loss(pred_noise, noise_target, reduction='none')
+            loss_noise = (loss_noise * weights).mean()
+        else:
+            loss_noise = F.mse_loss(pred_noise, noise_target)
 
         total = loss_noise
         metrics = {
@@ -236,7 +252,7 @@ class ABRTrainer:
 
             with autocast(enabled=self.mixed_precision):
                 outputs = self.model(x_noisy, static, t)
-                total_loss, metrics = self._compute_losses(outputs, noise, targets)
+                total_loss, metrics = self._compute_losses(outputs, noise, targets, t)
                 loss = total_loss / max(1, accum_steps)
 
                 self.scaler.scale(loss).backward()
@@ -333,8 +349,8 @@ class ABRTrainer:
             sampler = create_ddim_sampler(
                 noise_schedule_type=self.cfg.get('diffusion', {}).get('schedule_type', 'cosine'),
                 num_timesteps=self.cfg.get('diffusion', {}).get('num_timesteps', 1000),
-                eta=0.0,
-                clip_denoised=True,
+                eta=self.cfg.get('diffusion', {}).get('eta', 0.0),
+                clip_denoised=self.cfg.get('diffusion', {}).get('clip_denoised', False),
             )
             batch = next(iter(self.val_loader))
             static = batch['static_params'][:num_samples].to(self.device)

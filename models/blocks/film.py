@@ -901,10 +901,10 @@ class CFGWrapper(nn.Module):
         if 'threshold' in constrained and isinstance(constrained['threshold'], torch.Tensor):
             constrained['threshold'] = torch.clamp(constrained['threshold'], min=0.0, max=120.0)
         
-        # Ensure signal amplitude is within reasonable bounds
+        # Ensure signal amplitude is within reasonable bounds (disabled for better dynamics)
         if 'recon' in constrained and isinstance(constrained['recon'], torch.Tensor):
-            # Clamp to [-1, 1] range and apply smoothing
-            constrained['recon'] = torch.clamp(constrained['recon'], min=-1.0, max=1.0)
+            # Skip clamping to preserve dynamics - let the model learn proper ranges
+            pass  # constrained['recon'] = torch.clamp(constrained['recon'], min=-1.0, max=1.0)
         
         return constrained
 
