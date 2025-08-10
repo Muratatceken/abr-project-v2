@@ -252,8 +252,10 @@ class EnhancedABRTrainer:
 
     def _compute_v_prediction_target(self, x_start: torch.Tensor, noise: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
         """Compute v-prediction target: v = sqrt(alpha_cumprod) * noise - sqrt(1 - alpha_cumprod) * x_start"""
-        sqrt_alpha_cumprod = self.noise_schedule.sqrt_alphas_cumprod[timesteps].view(-1, 1, 1)
-        sqrt_one_minus_alpha_cumprod = self.noise_schedule.sqrt_one_minus_alphas_cumprod[timesteps].view(-1, 1, 1)
+        # Ensure timesteps are on CPU for indexing, then move results to device
+        timesteps_cpu = timesteps.cpu() if timesteps.device != torch.device('cpu') else timesteps
+        sqrt_alpha_cumprod = self.noise_schedule.sqrt_alphas_cumprod[timesteps_cpu].to(self.device).view(-1, 1, 1)
+        sqrt_one_minus_alpha_cumprod = self.noise_schedule.sqrt_one_minus_alphas_cumprod[timesteps_cpu].to(self.device).view(-1, 1, 1)
         
         v_target = sqrt_alpha_cumprod * noise - sqrt_one_minus_alpha_cumprod * x_start
         return v_target
@@ -274,7 +276,9 @@ class EnhancedABRTrainer:
 
         # Apply P2 weighting if enabled
         if self.use_p2_weighting and timesteps is not None:
-            alpha_cumprod_t = self.noise_schedule.alphas_cumprod[timesteps]
+            # Ensure timesteps are on CPU for indexing, then move result to device
+            timesteps_cpu = timesteps.cpu() if timesteps.device != torch.device('cpu') else timesteps
+            alpha_cumprod_t = self.noise_schedule.alphas_cumprod[timesteps_cpu].to(self.device)
             p2_k = self.cfg.get('diffusion', {}).get('p2_k', 1.0)
             p2_gamma = self.cfg.get('diffusion', {}).get('p2_gamma', 1.0)
             

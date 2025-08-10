@@ -2,7 +2,7 @@
 # Addresses architectural mismatches and improves training stability
 
 training:
-  device: auto                 # Auto-detect CUDA/CPU
+  device: cuda                 # Auto-detect CUDA/CPU
   mixed_precision: true        # Enable AMP for speed and memory efficiency
   random_seed: 42
   early_stopping_patience: 30  # Increased patience for better convergence
