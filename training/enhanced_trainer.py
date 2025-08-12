@@ -350,11 +350,13 @@ class EnhancedABRTrainer:
             running['envelope'] += metrics.get('loss_envelope', 0.0)
             count += 1
 
-            if self.writer and (self.global_step % 50 == 0):
+            # Log every 10 steps instead of 50 for better monitoring
+            if self.writer and (self.global_step % 10 == 0 or self.global_step <= 5):
                 self.writer.add_scalar('train/loss_total', metrics['loss_total'], self.global_step)
                 self.writer.add_scalar('train/loss_main', metrics['loss_main'], self.global_step)
                 if metrics.get('loss_envelope', 0.0) > 0:
                     self.writer.add_scalar('train/loss_envelope', metrics['loss_envelope'], self.global_step)
+                self.writer.flush()  # Force write to disk
 
             if self.use_wandb:
                 log_dict = {
@@ -540,6 +542,21 @@ class EnhancedABRTrainer:
             if val_metrics.get('val_envelope', 0.0) > 0:
                 print(f"          Envelope: {val_metrics['val_envelope']:.4f}")
             print(f"  LR: {current_lr:.6f}")
+
+            # TensorBoard epoch logging
+            if self.writer:
+                self.writer.add_scalar('epoch/train_loss_total', train_metrics['total'], epoch)
+                self.writer.add_scalar('epoch/train_loss_main', train_metrics['main'], epoch)
+                self.writer.add_scalar('epoch/val_loss_total', val_metrics['val_total'], epoch)
+                self.writer.add_scalar('epoch/val_loss_main', val_metrics['val_main'], epoch)
+                self.writer.add_scalar('epoch/learning_rate', current_lr, epoch)
+                
+                if train_metrics.get('envelope', 0.0) > 0:
+                    self.writer.add_scalar('epoch/train_loss_envelope', train_metrics['envelope'], epoch)
+                if val_metrics.get('val_envelope', 0.0) > 0:
+                    self.writer.add_scalar('epoch/val_loss_envelope', val_metrics['val_envelope'], epoch)
+                    
+                self.writer.flush()  # Ensure immediate write
 
             # Checkpointing
             is_best = val_metrics['val_total'] < self.best_val
