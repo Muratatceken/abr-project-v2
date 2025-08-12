@@ -174,8 +174,11 @@ def extract(a: torch.Tensor, t: torch.Tensor, x_shape: tuple) -> torch.Tensor:
         Extracted and reshaped tensor
     """
     batch_size = t.shape[0]
-    out = a.gather(-1, t.cpu())
-    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
+    # Ensure both tensors are on the same device for gather operation
+    if a.device != t.device:
+        a = a.to(t.device)
+    out = a.gather(-1, t)
+    return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
 
 
 class NoiseSchedule:

@@ -214,13 +214,13 @@ class ABRTrainer:
         
         # Apply P2 weighting if enabled
         if self.cfg.get('diffusion', {}).get('use_p2_weighting', False) and timesteps is not None:
+            from utils.schedule import extract
             # P2 weighting: w(t) = (alpha_cumprod_t^k / (1 - alpha_cumprod_t)^gamma)
-            alpha_cumprod_t = self.noise_schedule.alphas_cumprod[timesteps]
+            alpha_cumprod_t = extract(self.noise_schedule.alphas_cumprod, timesteps, noise_target.shape)
             p2_k = self.cfg.get('diffusion', {}).get('p2_k', 1.0)
             p2_gamma = self.cfg.get('diffusion', {}).get('p2_gamma', 1.0)
             
             weights = (alpha_cumprod_t ** p2_k) / ((1 - alpha_cumprod_t) ** p2_gamma)
-            weights = weights.view(-1, 1, 1)  # Broadcast to [B, 1, 1]
             
             loss_noise = F.mse_loss(pred_noise, noise_target, reduction='none')
             loss_noise = (loss_noise * weights).mean()
