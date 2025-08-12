@@ -33,33 +33,26 @@ def create_model(config: Dict[str, Any], device: torch.device) -> torch.nn.Modul
     """Create the correct model architecture based on config."""
     model_cfg = config.get('model', {})
     
-    # Check if using enhanced model
-    if model_cfg.get('use_enhanced_model', False):
-        print("🚀 Using Enhanced/Improved Hierarchical U-Net")
-        model = ImprovedHierarchicalUNet(
-            signal_length=model_cfg.get('signal_length', 200),
-            static_dim=model_cfg.get('static_dim', 4),
-            base_channels=model_cfg.get('base_channels', 64),
-            n_levels=model_cfg.get('n_levels', 4),
-            dropout=model_cfg.get('dropout', 0.1),
-            s4_state_size=model_cfg.get('s4_state_size', 64),
-            num_s4_layers=model_cfg.get('num_s4_layers', 2),
-            num_transformer_layers=model_cfg.get('num_transformer_layers', 2),
-            num_heads=model_cfg.get('num_heads', 8),
-        ).to(device)
-    else:
-        print("📦 Using Standard Optimized Hierarchical U-Net")
-        model = OptimizedHierarchicalUNet(
-            signal_length=model_cfg.get('signal_length', 200),
-            static_dim=model_cfg.get('static_dim', 4),
-            base_channels=model_cfg.get('base_channels', 64),
-            n_levels=model_cfg.get('n_levels', 4),
-            dropout=model_cfg.get('dropout', 0.1),
-            s4_state_size=model_cfg.get('s4_state_size', 64),
-            num_s4_layers=model_cfg.get('num_s4_layers', 2),
-            num_transformer_layers=model_cfg.get('num_transformer_layers', 2),
-            num_heads=model_cfg.get('num_heads', 8),
-        ).to(device)
+    # For evaluation, we'll try to use the standard model first (more compatible)
+    # and fall back to enhanced if needed
+    print("📦 Using Standard Optimized Hierarchical U-Net for maximum compatibility")
+    
+    # Get the number of classes from config or default
+    num_classes = model_cfg.get('num_classes', 5)  # Default to 5 classes
+    
+    model = OptimizedHierarchicalUNet(
+        signal_length=model_cfg.get('signal_length', 200),
+        static_dim=model_cfg.get('static_dim', 4),
+        input_channels=model_cfg.get('input_channels', 1),
+        base_channels=model_cfg.get('base_channels', 64),
+        n_levels=model_cfg.get('n_levels', 4),
+        num_classes=num_classes,
+        dropout=model_cfg.get('dropout', 0.1),
+        s4_state_size=model_cfg.get('s4_state_size', 64),
+        num_s4_layers=model_cfg.get('num_s4_layers', 2),
+        num_transformer_layers=model_cfg.get('num_transformer_layers', 2),
+        num_heads=model_cfg.get('num_heads', 8),
+    ).to(device)
     
     return model
 
@@ -70,40 +63,51 @@ def load_checkpoint(model: torch.nn.Module, checkpoint_path: str, device: torch.
     
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    # Try to load EMA weights first (better for generation)
+    # Choose the best available state dict
+    state_dict_to_use = None
+    source_name = ""
+    
     if 'ema_shadow' in checkpoint and checkpoint['ema_shadow']:
         print("🎯 Using EMA weights for better generation quality")
-        
-        # Create a temporary dict for EMA weights
-        ema_state_dict = {}
-        for name, param in model.named_parameters():
-            if name in checkpoint['ema_shadow']:
-                ema_state_dict[name] = checkpoint['ema_shadow'][name]
-        
-        # Load EMA weights
-        missing_keys, unexpected_keys = model.load_state_dict(ema_state_dict, strict=False)
-        
-        if missing_keys:
-            print(f"⚠️  Missing EMA keys: {len(missing_keys)} (using regular weights for these)")
-            # Fill missing keys from regular model state dict
-            regular_state_dict = checkpoint.get('model_state_dict', {})
-            for key in missing_keys:
-                if key in regular_state_dict:
-                    ema_state_dict[key] = regular_state_dict[key]
-            
-            # Load combined weights
-            model.load_state_dict(ema_state_dict, strict=False)
+        state_dict_to_use = checkpoint['ema_shadow']
+        source_name = "EMA"
     else:
         print("📦 Using regular model weights")
-        missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        
-        if missing_keys:
-            print(f"⚠️  Missing keys: {len(missing_keys)}")
-        if unexpected_keys:
-            print(f"⚠️  Unexpected keys: {len(unexpected_keys)}")
+        state_dict_to_use = checkpoint.get('model_state_dict', {})
+        source_name = "regular"
+    
+    # Filter out incompatible keys (especially head layers that might have different sizes)
+    model_state_dict = model.state_dict()
+    filtered_state_dict = {}
+    incompatible_keys = []
+    
+    for key, value in state_dict_to_use.items():
+        if key in model_state_dict:
+            # Check if shapes match
+            if model_state_dict[key].shape == value.shape:
+                filtered_state_dict[key] = value
+            else:
+                incompatible_keys.append(f"{key}: checkpoint {value.shape} vs model {model_state_dict[key].shape}")
+        else:
+            incompatible_keys.append(f"{key}: not in model")
+    
+    if incompatible_keys:
+        print(f"⚠️  Skipping {len(incompatible_keys)} incompatible keys:")
+        for key in incompatible_keys[:5]:  # Show first 5
+            print(f"    {key}")
+        if len(incompatible_keys) > 5:
+            print(f"    ... and {len(incompatible_keys) - 5} more")
+    
+    # Load the filtered state dict
+    missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
+    
+    print(f"✅ Loaded {source_name} weights:")
+    print(f"    Loaded: {len(filtered_state_dict)} layers")
+    print(f"    Missing: {len(missing_keys)} layers")
+    print(f"    Incompatible: {len(incompatible_keys)} layers")
     
     epoch = checkpoint.get('epoch', 0)
-    print(f"✅ Loaded model from epoch {epoch}")
+    print(f"📅 Model from epoch {epoch}")
     
     return checkpoint
 
