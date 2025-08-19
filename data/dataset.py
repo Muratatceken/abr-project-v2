@@ -50,6 +50,11 @@ class ABRDataset(Dataset):
         self.normalize_signal = normalize_signal
         self.normalize_static = normalize_static
         
+        # Properties for training pipeline compatibility
+        self.sequence_length = 200
+        self.static_dim = 4
+        self.static_names = ["Age", "Intensity", "StimulusRate", "FMP"]
+        
         # Load the preprocessed data
         self._load_data()
         
@@ -100,12 +105,11 @@ class ABRDataset(Dataset):
         if missing_keys:
             raise ValueError(f"Missing required keys in data samples: {missing_keys}")
         
-        # Validate shapes
+        # Validate shapes with strict assertion for T=200
         sample = self.data[0]
         if sample['static_params'].shape[0] != 4:
             raise ValueError(f"Expected 4 static parameters, got {sample['static_params'].shape[0]}")
-        if sample['signal'].shape[0] != 200:
-            raise ValueError(f"Expected 200 time points, got {sample['signal'].shape[0]}")
+        assert sample['signal'].shape[0] == 200, f"Expected exactly 200 time points, got {sample['signal'].shape[0]}. No resampling allowed in dataset."
             
         logging.info("Data validation passed")
     
@@ -140,31 +144,30 @@ class ABRDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
         """
-        Get a sample from the dataset.
+        Get a sample from the dataset for training pipeline.
         
         Args:
             idx (int): Sample index
             
         Returns:
             Dict containing:
-                - signal: ABR time series [200]
-                - static: Static parameters [4] 
-                - target: Hearing loss classification label (int)
-                - v_peak: V peak data [2] (latency, amplitude)
-                - v_peak_mask: Validity mask [2] (bool)
-                - threshold: Clinical threshold (for optimized model)
-                - patient_id: Patient identifier (str)
+                - x0: ABR time series [1, 200] (normalized)
+                - stat: Static parameters [4] in order [Age, Intensity, StimulusRate, FMP]
+                - meta: Metadata dict with patient_id and target
         """
         if idx >= len(self.data):
             raise IndexError(f"Index {idx} out of range for dataset of size {len(self.data)}")
         
         sample = self.data[idx]
         
-        # Extract and convert minimal data
+        # Extract and convert data
         signal = sample['signal'].astype(np.float32)
         static_params = sample['static_params'].astype(np.float32)
         target = int(sample['target'])
         patient_id = str(sample['patient_id'])
+        
+        # Strict length assertion (no resampling allowed)
+        assert len(signal) == self.sequence_length, f"Signal length {len(signal)} != {self.sequence_length}. No resampling in dataset."
         
         # Apply signal normalization if requested
         if self.normalize_signal:
@@ -173,12 +176,15 @@ class ABRDataset(Dataset):
             if signal_std > 1e-8:  # Avoid division by zero
                 signal = (signal - np.mean(signal)) / signal_std
         
-        # Convert to tensors with proper types
+        # Convert to required format for training pipeline
         result = {
-            'signal': torch.tensor(signal, dtype=torch.float32),
-            'static': torch.tensor(static_params, dtype=torch.float32),
-            'target': torch.tensor(target, dtype=torch.long),
-            'patient_id': patient_id
+            'x0': torch.tensor(signal, dtype=torch.float32).unsqueeze(0),  # [1, T] for conv1d
+            'stat': torch.tensor(static_params, dtype=torch.float32),      # [S] static params
+            'meta': {
+                'patient_id': patient_id,
+                'target': target,
+                'sample_idx': idx
+            }
         }
         
         # Apply optional transform
@@ -186,6 +192,26 @@ class ABRDataset(Dataset):
             result = self.transform(result)
         
         return result
+    
+    def denormalize_signal(self, x_norm: torch.Tensor) -> torch.Tensor:
+        """
+        Denormalize signal for visualization in TensorBoard.
+        
+        Since we apply z-score normalization per sample, we cannot perfectly
+        recover the original signal without storing per-sample statistics.
+        This method provides a reasonable approximation for visualization.
+        
+        Args:
+            x_norm: Normalized signal tensor of shape [..., T] 
+            
+        Returns:
+            Denormalized signal (approximate) in physical units
+        """
+        # Since we can't perfectly denormalize per-sample z-score,
+        # we apply a typical ABR amplitude scale for visualization
+        # Typical ABR amplitudes range from -0.5 to +0.5 µV
+        typical_scale = 0.2  # µV
+        return x_norm * typical_scale
     
     def get_sample_info(self) -> Dict[str, Any]:
         """
@@ -444,15 +470,15 @@ def load_ultimate_dataset(
 
 
 def abr_collate_fn(batch):
-    """Collate only static parameters, signal, and hearing loss target."""
-    signals = torch.stack([item['signal'] for item in batch]).unsqueeze(1)  # [B,1,200]
-    static_params = torch.stack([item['static'] for item in batch])        # [B,4]
-    targets = torch.stack([item['target'] for item in batch])              # [B]
+    """Collate function for training pipeline format."""
+    x0_batch = torch.stack([item['x0'] for item in batch])                 # [B, 1, 200]
+    stat_batch = torch.stack([item['stat'] for item in batch])             # [B, 4]
+    meta_batch = [item['meta'] for item in batch]                          # List of meta dicts
 
     return {
-        'signal': signals,
-        'static_params': static_params,
-        'target': targets
+        'x0': x0_batch,
+        'stat': stat_batch,
+        'meta': meta_batch
     }
 
 

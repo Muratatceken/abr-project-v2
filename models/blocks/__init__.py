@@ -1,43 +1,32 @@
 """
-Modular components for ABR Hierarchical U-Net
+Core components for ABR Transformer Generator
 
-Professional implementation following SSSD-ECG patterns
+Exports only the essential components needed for the new transformer architecture.
+Legacy U-Net and S4 components are kept for backward compatibility but not exported.
 """
 
-from .s4_layer import S4Layer, S4Block, EnhancedS4Layer
+# Core components for ABR Transformer
 from .transformer_block import (
-    TransformerBlock, MultiHeadAttention, MultiLayerTransformerBlock,
-    DeepTransformerDecoder, EnhancedMultiHeadAttention
+    TransformerBlock, MultiHeadAttention, MultiLayerTransformerBlock
 )
 from .film import (
-    FiLMLayer, ConditionalEmbedding, AdaptiveFiLMWithDropout, 
-    MultiFiLM, CFGWrapper
+    FiLMLayer, ConditionalEmbedding
 )
 from .positional import PositionalEmbedding, SinusoidalEmbedding
 from .heads import (
-    RobustPeakHead, RobustClassificationHead, RobustThresholdHead,
-    EnhancedSignalHead, AttentionPooling, StaticParameterGenerationHead,
-    # Aliases for backward compatibility
-    EnhancedPeakHead, EnhancedClassificationHead, EnhancedThresholdHead
+    BaseHead, EnhancedSignalHead, AttentionPooling
 )
-from .conv_blocks import Conv1dBlock, ResidualBlock, DownsampleBlock, UpsampleBlock, SkipConnection, EnhancedConvBlock, ResidualS4Block
-from .encoder_block import EnhancedEncoderBlock, MultiScaleEncoderStack, OptimizedEncoderBlock, OptimizedBottleneckProcessor
-from .decoder_block import EnhancedDecoderBlock, MultiScaleDecoderStack, BottleneckProcessor, OptimizedDecoderBlock, EnhancedSkipFusion, TaskSpecificFeatureExtractor
 
 __all__ = [
-    'S4Layer', 'S4Block', 'EnhancedS4Layer',
-    'TransformerBlock', 'MultiHeadAttention', 'MultiLayerTransformerBlock',
-    'DeepTransformerDecoder', 'EnhancedMultiHeadAttention',
-    'FiLMLayer', 'ConditionalEmbedding', 'AdaptiveFiLMWithDropout', 
-    'MultiFiLM', 'CFGWrapper',
-    'PositionalEmbedding', 'SinusoidalEmbedding',
-    'RobustPeakHead', 'RobustClassificationHead', 'RobustThresholdHead',
-    'EnhancedSignalHead', 'AttentionPooling', 'StaticParameterGenerationHead',
-    'EnhancedPeakHead', 'EnhancedClassificationHead', 'EnhancedThresholdHead', 
-    'Conv1dBlock', 'ResidualBlock', 'DownsampleBlock', 'UpsampleBlock', 'SkipConnection',
-    'EnhancedConvBlock', 'ResidualS4Block',
-    'EnhancedEncoderBlock', 'MultiScaleEncoderStack',
-    'EnhancedDecoderBlock', 'MultiScaleDecoderStack', 'BottleneckProcessor',
-    'OptimizedEncoderBlock', 'OptimizedDecoderBlock', 'OptimizedBottleneckProcessor',
-    'TaskSpecificFeatureExtractor', 'EnhancedSkipFusion'
+    # Core Transformer components for ABR Transformer Generator
+    'TransformerBlock', 
+    'MultiHeadAttention', 
+    'MultiLayerTransformerBlock',
+    'FiLMLayer', 
+    'ConditionalEmbedding',
+    'PositionalEmbedding', 
+    'SinusoidalEmbedding',
+    'BaseHead', 
+    'EnhancedSignalHead', 
+    'AttentionPooling',
 ] 

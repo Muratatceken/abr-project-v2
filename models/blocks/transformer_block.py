@@ -15,6 +15,35 @@ from typing import Optional, Tuple, List
 from einops import rearrange
 
 
+class ConvModule(nn.Module):
+    """
+    Depthwise separable conv with GLU/SwiGLU-style gating.
+    Operates on [B, T, D] -> LN -> PW -> DWConv -> GELU -> PW -> Dropout + Residual.
+    """
+    def __init__(self, d_model: int, kernel_size: int = 7, dropout: float = 0.1):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.pw1  = nn.Linear(d_model, 2 * d_model)  # for GLU
+        self.dw   = nn.Conv1d(d_model, d_model, kernel_size=kernel_size,
+                              padding=kernel_size // 2, groups=d_model)
+        self.act  = nn.GELU()
+        self.pw2  = nn.Linear(d_model, d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x):  # x: [B, T, D]
+        y = self.norm(x)
+        y = self.pw1(y)
+        a, b = y.chunk(2, dim=-1)  # GLU
+        y = a * torch.sigmoid(b)   # [B, T, D]
+        y = y.transpose(1, 2)      # [B, D, T]
+        y = self.dw(y)
+        y = y.transpose(1, 2)      # [B, T, D]
+        y = self.act(y)
+        y = self.pw2(y)
+        y = self.drop(y)
+        return x + y
+
+
 class MultiHeadAttention(nn.Module):
     """
     Multi-head attention mechanism with support for self-attention and cross-attention.
@@ -250,13 +279,20 @@ class TransformerBlock(nn.Module):
         activation: str = 'gelu',
         layer_norm_eps: float = 1e-6,
         pre_norm: bool = True,
-        bias: bool = True
+        bias: bool = True,
+        use_conv_module: bool = False,
+        conv_kernel_size: int = 7
     ):
         super().__init__()
         
         self.d_model = d_model
         self.n_heads = n_heads
         self.pre_norm = pre_norm
+        self.use_conv_module = use_conv_module
+        
+        # Optional conv module
+        if use_conv_module:
+            self.conv_module = ConvModule(d_model, conv_kernel_size, dropout)
         
         # Multi-head attention
         self.self_attention = MultiHeadAttention(
@@ -307,6 +343,10 @@ class TransformerBlock(nn.Module):
             attn_output, _ = self.self_attention(x_norm, mask, key_padding_mask)
             x = x + self.dropout1(attn_output)
             
+            # Optional conv module
+            if self.use_conv_module:
+                x = self.conv_module(x)
+            
             # Feed-forward sublayer
             x_norm = self.norm2(x)
             ff_output = self.feed_forward(x_norm)
@@ -316,6 +356,10 @@ class TransformerBlock(nn.Module):
             # Self-attention sublayer
             attn_output, _ = self.self_attention(x, mask, key_padding_mask)
             x = self.norm1(x + self.dropout1(attn_output))
+            
+            # Optional conv module
+            if self.use_conv_module:
+                x = self.conv_module(x)
             
             # Feed-forward sublayer
             ff_output = self.feed_forward(x)
@@ -581,7 +625,9 @@ class MultiLayerTransformerBlock(nn.Module):
         activation: str = 'gelu',
         pre_norm: bool = True,
         use_relative_position: bool = True,
-        max_relative_position: int = 32
+        max_relative_position: int = 32,
+        use_conv_module: bool = False,
+        conv_kernel_size: int = 7
     ):
         super().__init__()
         
@@ -597,7 +643,9 @@ class MultiLayerTransformerBlock(nn.Module):
                 d_ff=d_ff,
                 dropout=dropout,
                 activation=activation,
-                pre_norm=pre_norm
+                pre_norm=pre_norm,
+                use_conv_module=use_conv_module,
+                conv_kernel_size=conv_kernel_size
             )
             for _ in range(num_layers)
         ])
