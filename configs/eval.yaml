@@ -1,0 +1,130 @@
+# ABR Transformer Evaluation Configuration
+# Professional evaluation pipeline for trained ABR Transformer models
+
+# Basic experiment settings
+seed: 1337
+device: "cuda"                 # "cuda" | "cpu"
+log_dir: "runs/abr_transformer"
+exp_name: "abr_eval"
+
+# Data configuration (point to the SAME data your training used)
+data:
+  val_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
+  test_csv: ""                 # optional; if empty, evaluate on val
+  sequence_length: 200
+  static_order: ["Age", "Intensity", "Stimulus Rate", "FMP"]
+
+# Model architecture (must match training)
+model:
+  input_channels: 1
+  static_dim: 4
+  sequence_length: 200
+  d_model: 256
+  n_layers: 6
+  n_heads: 8
+  ff_mult: 4
+  dropout: 0.10
+  use_timestep_cond: true
+  use_static_film: true
+
+# Checkpoint configuration
+checkpoint:
+  path: "checkpoints/abr_transformer/abr_vpred_base_best.pt"
+  use_ema: true                # if true, swap in EMA weights before eval
+
+# Diffusion settings (must match training)
+diffusion:
+  num_train_steps: 1000        # must match training T
+  schedule: "cosine"
+  sample_steps: 60             # DDIM steps for generation
+  ddim_eta: 0.0                # deterministic sampling
+
+# Evaluation modes
+modes:
+  reconstruction: true         # q-sample x_t and denoise -> x0_hat
+  generation: true             # sample from noise conditioned on stat -> x_gen
+
+# Data loading
+loader:
+  batch_size: 128         # Smaller batch for evaluation
+  num_workers: 8
+  pin_memory: true
+
+# Metrics configuration
+metrics:
+  use_stft: true
+  stft:
+    n_fft: 64
+    hop_length: 16
+    win_length: 64
+  use_dtw: true                # O(T^2), fine for T=200
+  use_corr: true
+  use_snr: true
+  
+  # Peak metrics (auto-enabled if dataset has peak columns)
+  peaks:
+    enable_if_available: true
+    find_peaks:
+      height_sigma: 1.0        # threshold relative to signal std (normalized units)
+      min_distance: 6          # min samples between peaks
+    latency_windows:           # sample indices to search around classical latencies
+      I:   [20, 50]            # Wave I latency window (adjust for T=200 mapping)
+      III: [70, 110]           # Wave III latency window
+      V:   [130, 170]          # Wave V latency window
+
+# Reporting configuration
+report:
+  out_dir: "results/abr_eval"
+  save_csv: true
+  csv_prefix: "eval"
+  save_topk_examples: 12       # save & log best/worst by MSE
+  tensorboard:
+    write_scalars: true
+    write_figures: true
+    write_audio: false
+    audio_sample_rate: 20000   # 20kHz for ABR (if audio enabled)
+
+# Advanced evaluation options
+advanced:
+  # Multiple seeds for robustness (start with 1)
+  num_seeds: 1
+  
+  # Reconstruction timestep sampling
+  reconstruction:
+    timestep_strategy: "uniform"  # "uniform" | "fixed" | "random_subset"
+    fixed_timestep: 500          # if strategy="fixed"
+    
+  # Generation options
+  generation:
+    cfg_scale: 1.0              # classifier-free guidance scale
+    
+  # Subset evaluation (for quick testing)
+  max_samples: null             # null = evaluate all, or set int limit
+
+# Visualization
+viz:
+  # Waveform plots
+  waveform_plots: true
+  denormalize_for_plots: true   # use physical units (µV)
+  
+  # Spectrogram plots
+  spectrogram_plots: true
+  spectrogram_params:
+    n_fft: 64
+    hop_length: 16
+    win_length: 64
+    
+  # Error analysis plots
+  error_plots: true
+  scatter_plots: true
+  
+  # Figure formatting
+  figsize: [12, 8]
+  dpi: 100
+  max_plots_per_figure: 8
+
+# Logging configuration
+logging:
+  console_level: "INFO"
+  save_config: true            # save eval config with results
+  save_model_summary: true     # save model architecture info

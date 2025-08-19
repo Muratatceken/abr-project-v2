@@ -1,11 +1,13 @@
 """
-Simple metrics for training monitoring and evaluation.
+Comprehensive metrics for training monitoring and evaluation.
 
-Basic time-domain metrics for signal reconstruction quality.
+Basic time-domain metrics plus advanced evaluation metrics for signal reconstruction quality.
 """
 
 import torch
 import torch.nn.functional as F
+import numpy as np
+from typing import Tuple, Optional
 
 
 def l1_time(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -165,3 +167,240 @@ def compute_basic_metrics(x_hat: torch.Tensor, x: torch.Tensor) -> dict:
     }
     
     return metrics
+
+
+# ===== ADVANCED EVALUATION METRICS =====
+
+def stft_l1(x_hat: torch.Tensor, x: torch.Tensor, n_fft: int = 64, 
+           hop_length: int = 16, win_length: int = 64) -> torch.Tensor:
+    """
+    STFT-based L1 loss for frequency domain comparison.
+    
+    Args:
+        x_hat: Predicted signal [B, 1, T] or [B, T]
+        x: Target signal [B, 1, T] or [B, T]
+        n_fft: FFT size
+        hop_length: Hop length
+        win_length: Window length
+        
+    Returns:
+        STFT L1 loss scalar
+    """
+    # Ensure input is [B, T] format for torch.stft
+    if x_hat.dim() == 3:
+        x_hat = x_hat.squeeze(1)
+    if x.dim() == 3:
+        x = x.squeeze(1)
+    
+    # Compute STFT
+    device = x_hat.device
+    window = torch.hann_window(win_length, device=device)
+    
+    stft_hat = torch.stft(x_hat, n_fft=n_fft, hop_length=hop_length, 
+                         win_length=win_length, window=window, return_complex=True)
+    stft_target = torch.stft(x, n_fft=n_fft, hop_length=hop_length,
+                            win_length=win_length, window=window, return_complex=True)
+    
+    # L1 on magnitude spectrograms
+    mag_hat = torch.abs(stft_hat)
+    mag_target = torch.abs(stft_target)
+    
+    return F.l1_loss(mag_hat, mag_target)
+
+
+def pearson_r_batch(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Pearson correlation per batch item, then averaged.
+    
+    Args:
+        x_hat: Predicted signal [B, ...]
+        x: Target signal [B, ...]
+        eps: Small epsilon for numerical stability
+        
+    Returns:
+        Average Pearson correlation across batch
+    """
+    batch_size = x_hat.shape[0]
+    correlations = []
+    
+    for i in range(batch_size):
+        x_hat_i = x_hat[i].flatten()
+        x_i = x[i].flatten()
+        
+        # Center the signals
+        x_hat_mean = torch.mean(x_hat_i)
+        x_mean = torch.mean(x_i)
+        
+        x_hat_centered = x_hat_i - x_hat_mean
+        x_centered = x_i - x_mean
+        
+        # Compute correlation
+        numerator = torch.sum(x_hat_centered * x_centered)
+        denominator = torch.sqrt(torch.sum(x_hat_centered ** 2) * torch.sum(x_centered ** 2))
+        
+        correlation = numerator / (denominator + eps)
+        correlations.append(correlation)
+    
+    return torch.stack(correlations).mean()
+
+
+def dtw_distance(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
+    """
+    Dynamic Time Warping distance for 1D signals.
+    
+    Lightweight O(T²) implementation suitable for T=200.
+    
+    Args:
+        x_hat: Predicted signal [B, T] or [B, 1, T]
+        x: Target signal [B, T] or [B, 1, T]
+        
+    Returns:
+        Average DTW distance across batch
+    """
+    # Ensure signals are [B, T]
+    if x_hat.dim() == 3:
+        x_hat = x_hat.squeeze(1)
+    if x.dim() == 3:
+        x = x.squeeze(1)
+    
+    batch_size, seq_len = x_hat.shape
+    distances = []
+    
+    for b in range(batch_size):
+        s1 = x_hat[b].cpu().numpy()
+        s2 = x[b].cpu().numpy()
+        
+        # DTW dynamic programming
+        dtw_matrix = np.full((seq_len + 1, seq_len + 1), np.inf)
+        dtw_matrix[0, 0] = 0
+        
+        for i in range(1, seq_len + 1):
+            for j in range(1, seq_len + 1):
+                cost = abs(s1[i-1] - s2[j-1])
+                dtw_matrix[i, j] = cost + min(
+                    dtw_matrix[i-1, j],     # insertion
+                    dtw_matrix[i, j-1],     # deletion
+                    dtw_matrix[i-1, j-1]    # match
+                )
+        
+        distances.append(dtw_matrix[seq_len, seq_len])
+    
+    return torch.tensor(np.mean(distances), device=x_hat.device)
+
+
+def snr_db_batch(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Signal-to-Noise Ratio computed per batch item, then averaged.
+    
+    Args:
+        x_hat: Predicted signal [B, ...]
+        x: Target signal [B, ...]
+        eps: Small epsilon to avoid log(0)
+        
+    Returns:
+        Average SNR in dB across batch
+    """
+    batch_size = x_hat.shape[0]
+    snrs = []
+    
+    for i in range(batch_size):
+        signal_power = torch.mean(x[i] ** 2)
+        noise_power = torch.mean((x_hat[i] - x[i]) ** 2)
+        
+        snr = 10 * torch.log10(signal_power / (noise_power + eps))
+        snrs.append(snr)
+    
+    return torch.stack(snrs).mean()
+
+
+def compute_evaluation_metrics(x_hat: torch.Tensor, x: torch.Tensor, 
+                             use_stft: bool = True, use_dtw: bool = True,
+                             stft_params: Optional[dict] = None) -> dict:
+    """
+    Compute comprehensive evaluation metrics for ABR signal comparison.
+    
+    Args:
+        x_hat: Predicted signals [B, 1, T] or [B, T]
+        x: Target signals [B, 1, T] or [B, T]
+        use_stft: Whether to compute STFT-based metrics
+        use_dtw: Whether to compute DTW distance (can be slow)
+        stft_params: Parameters for STFT computation
+        
+    Returns:
+        Dictionary of metric values
+    """
+    if stft_params is None:
+        stft_params = {'n_fft': 64, 'hop_length': 16, 'win_length': 64}
+    
+    metrics = {
+        'mse': mse_time(x_hat, x).item(),
+        'l1': l1_time(x_hat, x).item(),
+        'corr': pearson_r_batch(x_hat, x).item(),
+        'snr_db': snr_db_batch(x_hat, x).item(),
+    }
+    
+    if use_stft:
+        try:
+            metrics['stft_l1'] = stft_l1(x_hat, x, **stft_params).item()
+        except Exception as e:
+            print(f"Warning: STFT computation failed: {e}")
+            metrics['stft_l1'] = float('nan')
+    
+    if use_dtw:
+        try:
+            metrics['dtw'] = dtw_distance(x_hat, x).item()
+        except Exception as e:
+            print(f"Warning: DTW computation failed: {e}")
+            metrics['dtw'] = float('nan')
+    
+    return metrics
+
+
+def compute_per_sample_metrics(x_hat: torch.Tensor, x: torch.Tensor,
+                              use_stft: bool = True, use_dtw: bool = True,
+                              stft_params: Optional[dict] = None) -> list:
+    """
+    Compute metrics per sample in the batch.
+    
+    Args:
+        x_hat: Predicted signals [B, 1, T] or [B, T]
+        x: Target signals [B, 1, T] or [B, T]
+        use_stft: Whether to compute STFT-based metrics
+        use_dtw: Whether to compute DTW distance
+        stft_params: Parameters for STFT computation
+        
+    Returns:
+        List of dictionaries with per-sample metrics
+    """
+    if stft_params is None:
+        stft_params = {'n_fft': 64, 'hop_length': 16, 'win_length': 64}
+    
+    batch_size = x_hat.shape[0]
+    per_sample_metrics = []
+    
+    for i in range(batch_size):
+        x_hat_i = x_hat[i:i+1]  # Keep batch dimension
+        x_i = x[i:i+1]
+        
+        sample_metrics = {
+            'mse': mse_time(x_hat_i, x_i).item(),
+            'l1': l1_time(x_hat_i, x_i).item(),
+            'corr': pearson_correlation(x_hat_i, x_i).item(),
+            'snr_db': snr_db(x_hat_i, x_i).item(),
+        }
+        
+        if use_stft:
+            try:
+                sample_metrics['stft_l1'] = stft_l1(x_hat_i, x_i, **stft_params).item()
+            except:
+                sample_metrics['stft_l1'] = float('nan')
+        
+        if use_dtw:
+            try:
+                sample_metrics['dtw'] = dtw_distance(x_hat_i, x_i).item()
+            except:
+                sample_metrics['dtw'] = float('nan')
+        
+        per_sample_metrics.append(sample_metrics)
+    
+    return per_sample_metrics

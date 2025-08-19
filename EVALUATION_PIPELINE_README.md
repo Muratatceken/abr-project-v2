@@ -1,295 +1,289 @@
-# ABR Signal Generation Model - Evaluation Pipeline
+# ABR Transformer Evaluation Pipeline
 
-This comprehensive evaluation pipeline provides detailed assessment of your trained ABR signal generation model across multiple dimensions of quality, consistency, and performance.
+Comprehensive evaluation pipeline for trained ABR Transformer models with detailed metrics, rich visualizations, and professional reporting.
 
 ## 🎯 Overview
 
-The evaluation pipeline assesses:
-- **Signal Quality**: Time-domain and frequency-domain metrics
-- **Generation Performance**: Speed, consistency, and reliability  
-- **Conditional Control**: Response to different input conditions
-- **Physiological Accuracy**: ABR-specific wave analysis
-- **Statistical Validation**: Comparison with real signals
+The evaluation pipeline provides two core evaluation modes:
 
-## 📦 Components
+1. **Reconstruction**: Denoise from noisy `x_t` back to `x̂_0` (tests denoising capability)
+2. **Conditional Generation**: Sample from noise using static conditioning, compare to real `x_0` (tests generation quality)
 
-### Core Modules
+## 📊 Features
 
-1. **`evaluation/metrics.py`** - Comprehensive signal quality metrics
-2. **`evaluation/evaluator.py`** - Main evaluation orchestrator
-3. **`evaluation/visualization.py`** - Advanced plotting and dashboards
-4. **`evaluation/analysis.py`** - Specialized signal analysis tools
-5. **`evaluate_model.py`** - Command-line evaluation script
+### ✅ **Comprehensive Metrics**
+- **Time-domain**: MSE, L1, correlation, SNR
+- **Frequency-domain**: Multi-resolution STFT L1 loss
+- **Temporal alignment**: Dynamic Time Warping (DTW) distance  
+- **Peak analysis**: ABR waves I, III, V latency/amplitude metrics (auto-enabled if labels available)
 
-### Key Features
+### ✅ **Rich Visualizations**
+- **Overlay plots**: Reference vs generated waveforms
+- **Error curves**: `|reference - generated|` analysis
+- **Spectrograms**: Frequency-domain comparison
+- **Scatter plots**: Metric correlation analysis
+- **Best/worst samples**: Automatic selection by MSE
 
-- **Time-Domain Metrics**: MSE, RMSE, SNR, PSNR, correlation
-- **Frequency Analysis**: Power spectral density, spectral features
-- **Perceptual Metrics**: Morphological similarity, phase coherence
-- **ABR-Specific Analysis**: Wave component detection and analysis
-- **Interactive Dashboards**: HTML reports with Plotly visualizations
-- **Statistical Tests**: Comprehensive comparisons with real signals
+### ✅ **Professional Reporting**
+- **TensorBoard**: Real-time scalars and figures
+- **CSV exports**: Per-sample metrics for further analysis
+- **JSON summaries**: Aggregated statistics with metadata
+- **Console tables**: Immediate results overview
+
+### ✅ **Flexible Configuration**
+- **Multiple evaluation modes**: Mix and match reconstruction/generation
+- **Configurable metrics**: Enable/disable specific computations
+- **Batch processing**: Efficient evaluation of large datasets
+- **EMA support**: Use exponential moving average weights
 
 ## 🚀 Quick Start
 
-### Basic Evaluation
-
+### 1. Basic Evaluation
 ```bash
-python evaluate_model.py \
-    --config configs/config_colab_a100.yaml \
-    --checkpoint checkpoints/pro/best.pth \
-    --output_dir evaluation_results
+# Evaluate both reconstruction and generation
+python eval.py --config configs/eval.yaml
 ```
 
-### Comprehensive Evaluation
-
+### 2. Mode-Specific Evaluation
 ```bash
-python evaluate_model.py \
-    --config configs/config_colab_a100.yaml \
-    --checkpoint checkpoints/pro/best.pth \
-    --output_dir evaluation_results \
-    --detailed_analysis \
-    --num_samples 500 \
-    --num_ddim_steps 100
+# Only reconstruction evaluation
+python eval.py --config configs/eval.yaml --override "modes.generation: false"
+
+# Only generation evaluation  
+python eval.py --config configs/eval.yaml --override "modes.reconstruction: false"
 ```
 
-### Custom Configuration
-
+### 3. Custom Checkpoint
 ```bash
-python evaluate_model.py \
-    --config configs/config_colab_a100.yaml \
-    --checkpoint checkpoints/pro/best.pth \
-    --output_dir my_evaluation \
-    --device cuda \
-    --batch_size 64 \
-    --cfg_scale 1.5
+# Evaluate specific checkpoint
+python eval.py --config configs/eval.yaml --override "
+  checkpoint.path: 'checkpoints/abr_transformer/abr_vpred_base_e95.pt',
+  exp_name: 'eval_epoch_95'
+"
 ```
 
-## 📊 Evaluation Phases
-
-### Phase 1: Dataset Evaluation
-- Evaluates model on test dataset
-- Computes comprehensive metrics for each sample
-- Aggregates statistics across all samples
-- Saves sample comparisons for visualization
-
-### Phase 2: Generation Quality Assessment
-- Tests generation with different sampling parameters
-- Measures generation speed and consistency
-- Analyzes signal properties across generations
-- Evaluates sampling parameter effects
-
-### Phase 3: Conditional Control Analysis *(Detailed mode)*
-- Tests model response to different conditions
-- Evaluates interpolation and extrapolation
-- Measures conditional control accuracy
-- Analyzes condition-signal relationships
-
-### Phase 4: Consistency Evaluation *(Detailed mode)*
-- Tests generation consistency with same inputs
-- Measures intra-condition variance
-- Evaluates model determinism/stochasticity
-- Analyzes generation stability
-
-### Phase 5: Report Generation
-- Creates comprehensive JSON report
-- Generates visualization plots
-- Saves summary CSV files
-- Creates interactive HTML dashboard
-
-## 📈 Output Structure
-
-```
-evaluation_results/
-├── evaluation_report.json          # Comprehensive results
-├── summary_metrics.csv             # Key metrics summary
-└── plots/
-    ├── sample_comparisons.png       # Generated vs real samples
-    ├── overlay_comparison.png       # Signal overlays
-    ├── frequency_analysis.png       # Frequency domain analysis
-    ├── metrics_distribution.png     # Metrics distributions
-    ├── conditional_analysis.png     # Conditional control analysis
-    └── interactive_dashboard.html   # Interactive Plotly dashboard
-```
-
-## 🔬 Metrics Details
-
-### Time-Domain Metrics
-
-| Metric | Description | Good Range |
-|--------|-------------|------------|
-| **MSE** | Mean Squared Error | < 0.01 |
-| **RMSE** | Root Mean Squared Error | < 0.1 |
-| **SNR** | Signal-to-Noise Ratio (dB) | > 20 dB |
-| **PSNR** | Peak Signal-to-Noise Ratio | > 30 dB |
-| **Correlation** | Pearson correlation | > 0.8 |
-
-### Frequency-Domain Metrics
-
-| Metric | Description | Purpose |
-|--------|-------------|---------|
-| **Spectral Centroid** | Center of spectral mass | Frequency content |
-| **Spectral Bandwidth** | Spread of spectrum | Signal complexity |
-| **PSD Comparison** | Power spectral density | Frequency accuracy |
-| **Frequency Response** | Magnitude spectrum | Spectral fidelity |
-
-### ABR-Specific Metrics
-
-| Metric | Description | Clinical Relevance |
-|--------|-------------|-------------------|
-| **Wave Detection** | I, III, V wave identification | Physiological accuracy |
-| **Interpeak Latencies** | Time between waves | Neural conduction |
-| **Amplitude Ratios** | Relative wave amplitudes | Hearing assessment |
-| **Morphological Similarity** | Waveform shape matching | Clinical utility |
-
-## 🎛️ Configuration Options
-
-### Command Line Arguments
-
+### 4. Advanced Sampling
 ```bash
---config PATH              # Configuration file path
---checkpoint PATH           # Model checkpoint path  
---output_dir DIR           # Output directory
---device DEVICE            # cuda/cpu/auto
---num_samples N            # Number of samples to evaluate
---batch_size N             # Evaluation batch size
---num_ddim_steps N         # DDIM sampling steps
---cfg_scale FLOAT          # Classifier-free guidance scale
---detailed_analysis        # Enable comprehensive analysis
+# More DDIM steps for higher quality
+python eval.py --config configs/eval.yaml --override "
+  diffusion.sample_steps: 100,
+  diffusion.ddim_eta: 0.1
+"
 ```
 
-### Configuration File Settings
+## ⚙️ Configuration
+
+Edit `configs/eval.yaml` to customize evaluation:
 
 ```yaml
-data:
-  path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
-  batch_size: 32
-  sampling_rate: 1000
+# Evaluation modes
+modes:
+  reconstruction: true    # Denoise from x_t to x_0
+  generation: true       # Sample from noise conditioned on static params
 
-model:
-  signal_length: 200
-  static_dim: 4
-  # ... other model parameters
+# Metrics to compute
+metrics:
+  use_stft: true         # Frequency-domain metrics
+  use_dtw: true          # Temporal alignment metrics
+  use_corr: true         # Correlation analysis
+  use_snr: true          # Signal-to-noise ratio
 
-diffusion:
-  schedule_type: "cosine"
-  num_timesteps: 1000
+# Checkpoint settings
+checkpoint:
+  path: "checkpoints/abr_transformer/abr_vpred_base_best.pt"
+  use_ema: true          # Use EMA weights if available
+
+# Output configuration
+report:
+  out_dir: "results/abr_eval"
+  save_csv: true         # Per-sample metrics
+  save_topk_examples: 12 # Best/worst samples to visualize
+```
+
+## 📁 Output Structure
+
+After evaluation, results are saved to `results/abr_eval/`:
+
+```
+results/abr_eval/
+├── eval_reconstruction_metrics.csv    # Per-sample reconstruction metrics
+├── eval_reconstruction_summary.json   # Reconstruction summary statistics
+├── eval_generation_metrics.csv        # Per-sample generation metrics
+├── eval_generation_summary.json       # Generation summary statistics
+└── figures/ (if enabled)
+    ├── overlay_best_reconstruction.png
+    ├── overlay_worst_reconstruction.png
+    ├── error_curves_reconstruction.png
+    └── spectrograms_*.png
+```
+
+## 📈 TensorBoard Monitoring
+
+### Launch TensorBoard:
+```bash
+tensorboard --logdir runs/abr_transformer
+```
+
+### What You'll See:
+
+#### **Scalars** (`eval/{mode}/`)
+- `mse_mean`, `mse_std` - Mean squared error statistics
+- `l1_mean`, `l1_std` - L1 error statistics  
+- `corr_mean`, `corr_std` - Correlation statistics
+- `snr_db_mean`, `snr_db_std` - Signal-to-noise ratio
+- `stft_l1_mean`, `stft_l1_std` - Frequency domain errors
+- `dtw_mean`, `dtw_std` - Dynamic time warping distances
+
+#### **Images** (`eval/{mode}/`)
+- `overlay_best` - Best samples (reference vs generated)
+- `overlay_worst` - Worst samples (reference vs generated)
+- `error_curves` - Error analysis plots
+- `spectrogram_ref/gen` - Frequency domain visualization
+- `scatter_corr_dtw` - Correlation vs DTW analysis
+
+## 🔬 Peak Analysis (Automatic)
+
+If your dataset contains ABR peak labels, the pipeline automatically enables peak analysis:
+
+### **Required Labels:**
+- `I_Latency`, `III_Latency`, `V_Latency` (in ms)
+- `I_Amplitude`, `III_Amplitude`, `V_Amplitude` (optional)
+
+### **Computed Metrics:**
+- **Detection Rate**: Percentage of peaks found within expected windows
+- **Latency MAE**: Mean absolute error in peak timing (ms)
+- **Amplitude MAE**: Mean absolute error in peak amplitude
+- **Per-wave Analysis**: Separate metrics for waves I, III, and V
+
+### **Configuration:**
+```yaml
+metrics:
+  peaks:
+    enable_if_available: true
+    find_peaks:
+      height_sigma: 1.0      # Peak detection threshold
+      min_distance: 6        # Minimum samples between peaks
+    latency_windows:         # Search windows (sample indices)
+      I:   [20, 50]          # Wave I window
+      III: [70, 110]         # Wave III window  
+      V:   [130, 170]        # Wave V window
 ```
 
 ## 📊 Understanding Results
 
-### Signal Quality Assessment
+### **Reconstruction Mode**
+- **Purpose**: Tests the model's denoising capability
+- **Process**: Add noise at timestep `t`, then reconstruct `x_0`
+- **Interpretation**: Lower MSE/L1 = better denoising, higher correlation = better signal preservation
 
-- **SNR > 20 dB**: Excellent signal quality
-- **Correlation > 0.8**: High fidelity reconstruction
-- **RMSE < 0.1**: Low reconstruction error
+### **Generation Mode**  
+- **Purpose**: Tests unconditional generation quality
+- **Process**: Generate from pure noise conditioned only on static parameters
+- **Interpretation**: Lower DTW = better temporal alignment, higher SNR = cleaner signals
 
-### Generation Performance
-
-- **Generation Time < 1s**: Real-time capable
-- **Consistency Score > 0.7**: Stable generation
-- **Condition Response**: Appropriate to clinical expectations
-
-### Recommendations Interpretation
-
-The pipeline provides automatic recommendations based on results:
-
-- **Low SNR**: Increase training epochs or adjust loss weights
-- **Poor Correlation**: Improve model architecture or data quality
-- **Slow Generation**: Reduce DDIM steps or optimize model
-- **Inconsistency**: Adjust noise schedule or model capacity
+### **Key Metrics**
+- **MSE/L1**: Overall reconstruction fidelity
+- **Correlation**: Signal shape preservation  
+- **SNR**: Signal quality vs noise
+- **STFT L1**: Frequency content accuracy
+- **DTW**: Temporal pattern alignment
 
 ## 🔧 Advanced Usage
 
-### Custom Metrics
-
-Add custom metrics by extending the `SignalMetrics` class:
-
-```python
-from evaluation.metrics import SignalMetrics
-
-class CustomMetrics(SignalMetrics):
-    @staticmethod
-    def my_custom_metric(predicted, target):
-        # Your custom metric implementation
-        return result
+### **Multiple Seeds for Robustness**
+```yaml
+advanced:
+  num_seeds: 3  # Generate 3 samples per condition, average metrics
 ```
 
-### Custom Analysis
-
-Extend the `SignalAnalyzer` for specialized analysis:
-
-```python
-from evaluation.analysis import SignalAnalyzer
-
-class CustomAnalyzer(SignalAnalyzer):
-    def custom_analysis(self, signal):
-        # Your custom analysis
-        return results
+### **Subset Evaluation (Quick Testing)**
+```yaml
+advanced:
+  max_samples: 1000  # Limit to first 1000 samples
 ```
 
-### Batch Evaluation
-
-Evaluate multiple checkpoints:
-
-```bash
-for checkpoint in checkpoints/*.pth; do
-    python evaluate_model.py \
-        --config configs/config_colab_a100.yaml \
-        --checkpoint "$checkpoint" \
-        --output_dir "results/$(basename $checkpoint .pth)"
-done
+### **Custom Timestep Strategy (Reconstruction)**
+```yaml
+advanced:
+  reconstruction:
+    timestep_strategy: "fixed"  # "uniform" | "fixed" | "random_subset"
+    fixed_timestep: 500         # If strategy="fixed"
 ```
 
-## 🐛 Troubleshooting
+### **Classifier-Free Guidance (Generation)**
+```yaml
+advanced:
+  generation:
+    cfg_scale: 1.5  # Stronger conditioning (>1.0)
+```
 
-### Common Issues
+## 🎯 Example Results
 
-1. **CUDA Memory Error**
+### **Good Model Performance:**
+- MSE: ~0.001-0.01
+- Correlation: >0.8
+- SNR: >10 dB
+- DTW: <50
+- Peak detection: >80%
+
+### **Poor Model Performance:**
+- MSE: >0.1
+- Correlation: <0.5
+- SNR: <5 dB  
+- DTW: >200
+- Peak detection: <50%
+
+## 🛠️ Troubleshooting
+
+### **Common Issues:**
+
+1. **"STFT computation failed"**
+   - Reduce `n_fft` or increase `sequence_length`
+   - Set `use_stft: false` to disable
+
+2. **"DTW computation failed"**
+   - DTW is O(T²), can be slow for long sequences
+   - Set `use_dtw: false` for faster evaluation
+
+3. **Memory errors**
+   - Reduce `batch_size` in config
+   - Disable visualizations temporarily
+
+4. **No peak metrics**
+   - Check if dataset has `I_Latency`, `III_Latency`, `V_Latency` columns
+   - Peak analysis auto-enables only if labels are present
+
+### **Performance Tips:**
+
+1. **Faster evaluation**: Set `use_dtw: false`, reduce `batch_size`
+2. **More thorough**: Increase `sample_steps`, enable all metrics
+3. **Quick testing**: Set `max_samples: 100` for rapid iteration
+
+## 📈 Interpreting TensorBoard
+
+### **Look for:**
+- **Consistent metrics**: Low variance across samples
+- **Realistic correlation**: >0.6 for good ABR morphology
+- **Proper spectrograms**: Clear frequency patterns
+- **Good peak detection**: >70% for clinical relevance
+
+### **Red flags:**
+- **Very high DTW**: Poor temporal alignment
+- **Low correlation**: Generated signals don't match ABR patterns
+- **NaN values**: Numerical instability or configuration issues
+
+## 🎉 Ready to Evaluate!
+
+The evaluation pipeline is comprehensive and production-ready. Use it to:
+
+- **Validate model performance** across different checkpoints
+- **Compare different architectures** with standardized metrics  
+- **Analyze failure modes** through worst-case visualizations
+- **Generate publication-quality results** with rich documentation
+
+Start evaluating with:
    ```bash
-   # Reduce batch size
-   --batch_size 16
-   ```
+python eval.py --config configs/eval.yaml
+```
 
-2. **Missing Dependencies**
-   ```bash
-   pip install librosa plotly scikit-learn
-   ```
-
-3. **Slow Evaluation**
-   ```bash
-   # Reduce samples or disable detailed analysis
-   --num_samples 100
-   # Remove --detailed_analysis flag
-   ```
-
-4. **Checkpoint Loading Error**
-   ```
-   # Ensure checkpoint path is correct and model architecture matches
-   ```
-
-### Performance Tips
-
-- Use `--num_samples` to limit evaluation size during development
-- Remove `--detailed_analysis` for faster basic evaluation
-- Reduce `--num_ddim_steps` for faster generation
-- Use smaller `--batch_size` if memory limited
-
-## 📚 References
-
-- **DDIM Sampling**: Denoising Diffusion Implicit Models
-- **ABR Analysis**: Auditory Brainstem Response clinical standards
-- **Signal Metrics**: Standard signal processing evaluation metrics
-- **Perceptual Metrics**: Human auditory perception research
-
-## 💡 Tips for Best Results
-
-1. **Baseline Comparison**: Always compare with baseline models
-2. **Multiple Runs**: Average results across multiple evaluation runs
-3. **Condition Testing**: Test diverse conditional inputs
-4. **Clinical Validation**: Validate with domain experts
-5. **Iterative Improvement**: Use results to guide model improvements
-
----
-
-*This evaluation pipeline provides comprehensive assessment of your ABR signal generation model. Use the results to understand model performance, identify improvement areas, and validate clinical utility.*
+Monitor progress in TensorBoard and analyze detailed results in the output directory! 📊⚡
