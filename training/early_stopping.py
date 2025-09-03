@@ -621,7 +621,7 @@ class EarlyStoppingCallback:
         
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
-    def on_epoch_end(self, epoch: int, metrics: Dict[str, float], model=None, **kwargs) -> bool:
+    def on_epoch_end(self, epoch: int, metrics: Dict[str, float], model=None, optimizer=None, **kwargs) -> bool:
         """
         Called at the end of each epoch.
         
