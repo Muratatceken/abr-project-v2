@@ -270,18 +270,11 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
             train_dataset
         )
         if curriculum_dataset is not None:
-            # Import and create CurriculumSampler
-            from data.curriculum import CurriculumSampler
-            
-            curriculum_sampler = CurriculumSampler(
-                difficulties=curriculum_dataset.difficulties,
-                scheduler=curriculum_dataset.scheduler,
-                num_samples=len(curriculum_dataset),
-                replacement=True
-            )
-            
+            # Use CurriculumDataset which handles filtering internally
+            # No need for CurriculumSampler as the dataset already filters samples
             train_dataset = curriculum_dataset
             logging.info("✓ Created curriculum learning dataset wrapper and sampler")
+            logging.info("✓ Using curriculum sampler for training")
         else:
             logging.warning("Failed to create curriculum dataset, using original dataset")
     
@@ -354,7 +347,7 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
         else:
             logging.info(f"⚠️  Peak-balanced sampling disabled (use loader.use_peak_balanced_sampler: true)")
     
-    return train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline, curriculum_sampler
+    return train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline
 
 
 def create_model(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
@@ -1053,7 +1046,7 @@ def main():
     logging.info(f"Using device: {device}")
     
     # Create datasets and loaders with advanced features
-    train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline, curriculum_sampler = create_datasets_and_loaders(cfg)
+    train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline = create_datasets_and_loaders(cfg)
     
     # Create model
     model = create_model(cfg, device)
@@ -1115,15 +1108,20 @@ def main():
         if curriculum_dataset is not None:
             curriculum_dataset.update_epoch(epoch, cfg['trainer']['max_epochs'])
             
-            # Update curriculum sampler
-            if curriculum_sampler is not None:
-                curriculum_sampler.update_epoch(epoch)
-            
             # Log curriculum stats
             curriculum_stats = curriculum_dataset.get_curriculum_stats()
             if curriculum_stats:
                 for stat_name, stat_value in curriculum_stats.items():
-                    writer.add_scalar(f'curriculum/{stat_name}', stat_value, epoch)
+                    # Handle tuple values (e.g., difficulty_range)
+                    if isinstance(stat_value, tuple):
+                        if len(stat_value) == 2:
+                            writer.add_scalar(f'curriculum/{stat_name}_min', stat_value[0], epoch)
+                            writer.add_scalar(f'curriculum/{stat_name}_max', stat_value[1], epoch)
+                        else:
+                            # Skip complex tuples that can't be easily logged
+                            continue
+                    else:
+                        writer.add_scalar(f'curriculum/{stat_name}', stat_value, epoch)
                 logging.info(f"Curriculum stats: {curriculum_stats}")
             
         # Update augmentation progress for curriculum-aware augmentation

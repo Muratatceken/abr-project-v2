@@ -92,6 +92,9 @@ class DifficultyMetrics:
         # Handle single boolean peak_exists from ABR dataset
         if isinstance(peaks_present, (bool, int, float)):
             missing_peaks_ratio = 0.0 if peaks_present else 1.0
+        elif hasattr(peaks_present, 'ndim') and peaks_present.ndim == 0:
+            # Handle 0-d tensor/array (scalar)
+            missing_peaks_ratio = 0.0 if bool(peaks_present) else 1.0
         else:
             # Handle array of peak indicators
             missing_peaks_ratio = 1.0 - (peaks_present.sum() / len(peaks_present))
@@ -234,7 +237,13 @@ class DifficultyMetrics:
                         # Handle 2D signal data [1, 200] -> [200]
                         if signal_data.ndim > 1:
                             signal_data = signal_data.squeeze()
-                        peaks_present = sample.get('peak_exists', True)  # Default to peak present
+                        
+                        # Handle peak_exists which can be a 0-d tensor or boolean
+                        peaks_present = sample.get('peak_exists', True)
+                        if torch.is_tensor(peaks_present):
+                            peaks_present = peaks_present.item() if peaks_present.ndim == 0 else peaks_present.numpy()
+                        elif hasattr(peaks_present, 'numpy'):
+                            peaks_present = peaks_present.numpy()
                         
                         # Handle hearing loss from meta
                         meta = sample.get('meta', {})
