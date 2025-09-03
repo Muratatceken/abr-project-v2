@@ -1,2 +1,0 @@
-Run,mse_baseline,mse_current,mse_improvement,correlation_baseline,correlation_current,correlation_improvement,accuracy_baseline,accuracy_current,accuracy_improvement,f1_baseline,f1_current,f1_improvement,auroc_baseline,auroc_current,auroc_improvement
-no_attention,0.2500,0.3500,+40.00%,0.8500,0.7500,-11.76%,0.7500,0.6500,-13.33%,0.7000,0.6000,-14.29%,0.8000,0.7000,-12.50%
