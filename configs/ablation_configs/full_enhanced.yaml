@@ -83,6 +83,10 @@ multi_task:
     signal: 1.0
     peak_classification: 0.8
     static_reconstruction: 1.2
+  validation_metric: "combined"
+  validation_weights:
+    signal: 0.7
+    peak_classification: 0.3
 
 # Diffusion configuration
 diffusion:
@@ -158,3 +162,269 @@ loss:
     hop_length: 16
     win_length: 64
     eps: 0.00000001
+
+# Advanced training options
+advanced:
+  # Classifier-free guidance dropout during training
+  cfg_dropout_prob: 0.1
+  
+  # Gradient monitoring
+  log_grad_norm: true
+  log_param_norm: true
+  grad_norm_clip: 1.0
+  
+  # Learning rate scheduling
+  lr_scheduler: "cosine"  # Options: cosine, linear, constant
+  lr_warmup_steps: 1000
+  
+  # Validation options
+  val_sample_cfg_scales: [1.0, 1.5, 2.0]  # Different CFG scales for validation
+
+# Multi-task logging configuration
+logging:
+  # Classification metrics logging
+  log_classification_metrics: true
+  log_confusion_matrix: true
+  log_pr_curves: true
+  
+  # Task-specific monitoring
+  log_gradient_norms_per_task: true
+  log_parameter_norms_per_task: true
+  
+  # Advanced visualizations
+  log_peak_logits_histograms: true
+  log_precision_recall_curves: true
+  # TensorBoard scalars
+  log_loss_components: true
+  log_learning_rate: true
+  log_gradient_norm: true
+  log_parameter_histograms: false  # Can be expensive
+  
+  # Console logging
+  console_log_level: "INFO"
+  
+  # Checkpoint metadata
+  save_config_with_checkpoint: true
+  save_model_summary: true
+
+# Hardware and performance
+performance:
+  # Memory optimization
+  gradient_checkpointing: false
+  pin_memory: true
+  non_blocking: true
+  
+  # Multi-GPU (future extension)
+  distributed: false
+  find_unused_parameters: false
+
+# Reproducibility
+reproducibility:
+  deterministic: false  # Set to true for full reproducibility (slower)
+  benchmark: true      # Use cudNN benchmarking for speed
+
+# Curriculum Learning Configuration
+curriculum_learning:
+  enabled: true                  # Enable for better convergence
+  difficulty_metric: 'combined'  # Options: 'snr', 'peak_complexity', 'hearing_loss', 'combined'
+  scheduler_type: 'linear'       # Options: 'linear', 'exponential', 'step'
+  start_difficulty: 0.3          # Start with easier 30% of samples
+  end_difficulty: 1.0            # End with all samples
+  curriculum_epochs: 50          # Epochs to complete curriculum
+  anti_curriculum: false         # Option for hard-to-easy training
+  update_frequency: 1            # Update curriculum every N epochs
+  difficulty_weights:            # Weights for combined difficulty metric
+    snr: 0.4
+    peaks: 0.4
+    hearing_loss: 0.2
+
+# Focal Loss Configuration
+focal_loss:
+  enabled: true                  # Enable for better peak detection
+  alpha: 0.25                    # Class weighting parameter
+  gamma: 2.0                     # Focusing parameter for hard examples
+  reduction: 'mean'              # Loss reduction method
+
+# Advanced Augmentation Configuration
+advanced_augmentation:
+  enabled: true                  # Enable advanced augmentations
+  mixup_prob: 0.2               # Probability of applying mixup
+  cutmix_prob: 0.2              # Probability of applying cutmix
+  time_stretch_prob: 0.1        # Probability of time stretching
+  amplitude_scaling_range: [0.8, 1.2]  # Amplitude scaling range
+  preserve_peaks: true          # Preserve peak structure during augmentation
+  curriculum_aware: true        # Easier augmentations early in training
+  augmentation_strength: 1.0    # Overall augmentation intensity multiplier
+  
+  # ABR-specific augmentations
+  abr_specific:
+    peak_jitter_std: 0.05       # Peak timing jitter (ms)
+    baseline_drift_std: 0.01    # Baseline drift standard deviation
+    electrode_noise_std: 0.005  # Electrode noise standard deviation
+    stimulus_artifact_prob: 0.1 # Probability of stimulus artifacts
+
+# Knowledge Distillation Configuration
+knowledge_distillation:
+  enabled: false                # Can be enabled with teacher model
+  teacher_checkpoint: null      # Path to teacher model checkpoint
+  temperature: 4.0              # Distillation temperature
+  alpha: 0.7                    # Balance between student loss and distillation loss
+  feature_distillation: true    # Enable feature-level distillation
+  distillation_layers: ['transformer.4', 'transformer.5']  # Layers for feature matching
+  feature_weight: 0.1           # Weight for feature matching loss
+  
+  # Multi-task distillation
+  multi_task:
+    enabled: false
+    task_types:
+      signal: 'regression'          # Signal generation is regression
+      peak_classification: 'classification'  # Peak detection is classification
+    task_configs:
+      signal:
+        temperature: 4.0
+        alpha: 0.7
+        loss_fn: 'mse'
+        feature_matching: false
+      peak_classification:
+        temperature: 4.0
+        alpha: 0.5
+        loss_fn: 'ce'
+        feature_matching: true
+        feature_weight: 0.1
+    global_temperature: 4.0
+    cross_task_distillation: false
+
+# Ensemble Training Configuration
+ensemble_training:
+  enabled: false                # Can be enabled for better performance
+  snapshot_ensemble: true       # Collect snapshots during training
+  snapshot_epochs: [20, 40, 60, 80, 100]  # Epochs to collect snapshots
+  ensemble_size: 5              # Maximum number of models in ensemble
+  diversity_weight: 0.1         # Weight for diversity regularization
+  
+  # Ensemble strategies
+  weighting_strategy: 'performance'  # Options: 'equal', 'performance', 'diversity'
+  uncertainty_estimation: true  # Enable uncertainty quantification
+
+# Hyperparameter Optimization Configuration
+hyperparameter_optimization:
+  enabled: false                # Can be enabled for automatic tuning
+  backend: 'optuna'             # Optimization backend
+  n_trials: 100                 # Number of optimization trials
+  timeout: 3600                 # Timeout per trial in seconds
+  pruning: true                 # Enable early pruning of unpromising trials
+  search_space: 'default'       # Predefined search space
+  
+  # Optuna-specific settings
+  optuna:
+    sampler: 'tpe'              # Options: 'tpe', 'random', 'cmaes'
+    pruner: 'median'            # Options: 'median', 'hyperband', 'none'
+    n_startup_trials: 10
+    n_warmup_steps: 5
+    
+  # Multi-objective optimization
+  multi_objective:
+    enabled: false
+    objectives: ['val_combined_score', 'training_time']
+    directions: ['maximize', 'minimize']
+
+# Cross-Validation Configuration
+cross_validation:
+  enabled: false                # Can be enabled for robust evaluation
+  n_folds: 5                    # Number of CV folds
+  stratified: true              # Use stratified splitting
+  patient_level: true           # Ensure no patient overlap between folds
+  parallel_training: false      # Train folds in parallel
+  
+  # CV-specific settings
+  cv_type: 'stratified_patient' # Options: 'stratified_patient', 'time_series', 'standard'
+  min_samples_per_class: 1      # Minimum samples per class per fold
+  
+  # Result aggregation
+  aggregation_method: 'mean'    # Options: 'mean', 'weighted_mean'
+  confidence_intervals: true    # Compute confidence intervals
+  statistical_tests: true      # Perform statistical significance tests
+
+# Comprehensive Monitoring Configuration
+monitoring:
+  enabled: true                 # Enable comprehensive monitoring
+  save_dir: 'monitoring/full_enhanced'  # Directory to save monitoring data
+  
+  # Metric tracking
+  track_gradients: true         # Monitor gradient norms and flow
+  track_activations: false      # Monitor layer activations (expensive)
+  track_resources: true         # Monitor system resources
+  smoothing_window: 10          # Window for metric smoothing
+  
+  # Resource monitoring
+  resource_monitoring:
+    enabled: true
+    update_interval: 1.0        # Update interval in seconds
+    monitor_gpu: true           # Monitor GPU usage and memory
+    
+  # Model health monitoring
+  model_health:
+    enabled: true
+    dead_neuron_threshold: 1e-6 # Threshold for dead neuron detection
+    gradient_clip_threshold: 10.0  # Threshold for gradient clipping alerts
+    
+  # Alerting system
+  alerts:
+    enabled: true
+    alert_configs:
+      - metric_name: 'gradient_norm'
+        threshold: 10.0
+        condition: 'greater'
+        consecutive_violations: 3
+      - metric_name: 'memory_percent'
+        threshold: 90.0
+        condition: 'greater'
+        consecutive_violations: 2
+      - metric_name: 'val_loss'
+        threshold: 0.001
+        condition: 'less'
+        consecutive_violations: 5
+        
+  # Dashboard configuration
+  dashboard:
+    enabled: false              # Real-time dashboard (requires web framework)
+    port: 8080                  # Dashboard port
+    update_interval: 5.0        # Dashboard update interval
+
+# Advanced Loss Configuration
+advanced_loss:
+  # Combined loss for multi-task learning
+  combined_loss:
+    enabled: false
+    adaptive_weighting: true    # Automatic loss balancing
+    uncertainty_weighting: false  # Uncertainty-based weighting
+    
+  # Loss scheduling
+  loss_scheduling:
+    enabled: false
+    schedule_type: 'linear'     # Options: 'linear', 'cosine', 'step'
+
+# Advanced Optimizer Configuration
+advanced_optimizer:
+  # Parameter groups with different learning rates
+  parameter_groups:
+    enabled: false
+    groups:
+      backbone:
+        lr_multiplier: 1.0
+        weight_decay_multiplier: 1.0
+      head:
+        lr_multiplier: 2.0
+        weight_decay_multiplier: 0.5
+        
+  # Advanced scheduling
+  lr_scheduling:
+    scheduler: 'cosine'         # Options: 'cosine', 'linear', 'step', 'plateau'
+    warmup_epochs: 5
+    cosine_restarts: false
+    eta_min: 1e-6
+    
+  # Gradient modifications
+  gradient_modifications:
+    gradient_centralization: false
+    gradient_standardization: false
