@@ -108,6 +108,7 @@ trainer:
   validate_every_epochs: 1
   sample_every_epochs: 2
   num_val_plots: 8
+  num_sample_plots: 8
   resume: false
   save_every_epochs: 5
 
