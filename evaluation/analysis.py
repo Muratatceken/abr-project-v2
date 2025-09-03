@@ -377,7 +377,10 @@ def bootstrap_classification_metrics(logits: np.ndarray, targets: np.ndarray,
         indices, = data
         sample_logits = logits[indices]
         sample_targets = targets[indices]
-        return compute_classification_metrics(sample_logits, sample_targets)
+        # Convert numpy arrays to torch tensors for the metrics function
+        sample_logits_torch = torch.from_numpy(sample_logits).float()
+        sample_targets_torch = torch.from_numpy(sample_targets).float()
+        return compute_classification_metrics(sample_logits_torch, sample_targets_torch)
     
     # Generate bootstrap samples
     bootstrap_samples = []

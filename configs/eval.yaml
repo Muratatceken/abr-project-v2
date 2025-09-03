@@ -4,14 +4,14 @@
 # Dataset configuration
 dataset:
   data_path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"  # Path to dataset
-  batch_size: 32
-  num_workers: 4
+  batch_size: 128
+  num_workers: 8
   pin_memory: true
   return_peak_labels: true  # Enable peak labels for classification evaluation
 
 # Model configuration
 model:
-  checkpoint_path: "checkpoints/enhanced/best.pth"
+  checkpoint_path: "checkpoints/enhanced/abr_full_enhanced_best.pt"
   device: "cuda"  # or "cpu"
   precision: "float32"  # or "float16"
   # Model architecture parameters
@@ -28,7 +28,7 @@ model:
 
 # Evaluation configuration
 evaluation:
-  mode: "generation"  # "reconstruction" or "generation"
+  mode: "reconstruction"  # "reconstruction" or "generation"
   num_samples: 1000  # Number of samples to evaluate
   seed: 42  # Random seed for reproducibility
   

@@ -156,15 +156,15 @@ def create_evaluation_dataset(cfg: Dict[str, Any]) -> Tuple[DataLoader, ABRDatas
     
     # For evaluation, we can use the full dataset or create a validation split
     # If we're using the same file as training, create a split
-        # Create splits to get validation portion
-        _, val_dataset, _ = create_stratified_datasets(
-            dataset,
-            train_ratio=0.7,
-            val_ratio=0.15, 
-            test_ratio=0.15,
+    # Create splits to get validation portion
+    _, val_dataset, _ = create_stratified_datasets(
+        dataset,
+        train_ratio=0.7,
+        val_ratio=0.15, 
+        test_ratio=0.15,
         random_state=cfg['evaluation']['seed']
-        )
-        eval_dataset = val_dataset
+    )
+    eval_dataset = val_dataset
     
     # Apply max_samples limit if specified
     max_samples = cfg['evaluation'].get('num_samples')
@@ -203,7 +203,12 @@ def load_model_and_checkpoint(cfg: Dict[str, Any], device: torch.device) -> Tupl
     """
     Load model and checkpoint with optional EMA weights.
     """
-    # Create model using model config
+    # Load checkpoint first to inspect what model architecture was used
+    checkpoint_path = cfg['model']['checkpoint_path']
+    logging.info(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Create model using model config with enhanced features detection
     model_config = {
         'input_channels': cfg['model']['input_channels'],
         'static_dim': cfg['model']['static_dim'],
@@ -217,17 +222,78 @@ def load_model_and_checkpoint(cfg: Dict[str, Any], device: torch.device) -> Tupl
         'use_static_film': cfg['model']['use_static_film']
     }
     
+    # Auto-detect enhanced features from checkpoint keys
+    checkpoint_keys = set(checkpoint['model_state_dict'].keys())
+    
+    # Detect cross attention
+    if any('cross_attention' in key for key in checkpoint_keys):
+        model_config['use_cross_attention'] = True
+        logging.info("✓ Detected cross attention in checkpoint")
+    else:
+        model_config['use_cross_attention'] = cfg['model'].get('use_cross_attention', False)
+    
+    # Detect joint static generation
+    if any('static_recon_head' in key for key in checkpoint_keys):
+        model_config['joint_static_generation'] = True
+        logging.info("✓ Detected joint static generation in checkpoint")
+    else:
+        model_config['joint_static_generation'] = cfg['model'].get('joint_static_generation', False)
+    
+    # Detect multi-scale fusion
+    if any('multi_scale_fusion' in key for key in checkpoint_keys):
+        model_config['use_multi_scale_fusion'] = True
+        logging.info("✓ Detected multi-scale fusion in checkpoint")
+    else:
+        model_config['use_multi_scale_fusion'] = cfg['model'].get('use_multi_scale_fusion', False)
+    
+    # Detect advanced transformer blocks
+    if any('scale_attentions' in key for key in checkpoint_keys):
+        model_config['use_advanced_blocks'] = True
+        model_config['use_multi_scale_attention'] = True
+        logging.info("✓ Detected advanced transformer blocks in checkpoint")
+    else:
+        model_config['use_advanced_blocks'] = cfg['model'].get('use_advanced_blocks', False)
+        model_config['use_multi_scale_attention'] = cfg['model'].get('use_multi_scale_attention', False)
+    
+    # Detect gated feed forward
+    if any('gate_proj' in key for key in checkpoint_keys):
+        model_config['use_gated_ffn'] = True
+        logging.info("✓ Detected gated feed forward in checkpoint")
+    else:
+        model_config['use_gated_ffn'] = cfg['model'].get('use_gated_ffn', False)
+    
+    # Detect learned positional embeddings
+    if any('pos.position_embeddings' in key for key in checkpoint_keys):
+        model_config['use_learned_pos_emb'] = True
+        logging.info("✓ Detected learned positional embeddings in checkpoint")
+    else:
+        model_config['use_learned_pos_emb'] = cfg['model'].get('use_learned_pos_emb', False)
+    
+    # Additional enhanced features
+    model_config['film_residual'] = cfg['model'].get('film_residual', True)
+    model_config['ablation_mode'] = cfg['model'].get('ablation_mode', 'full')
+    
     model = ABRTransformerGenerator(**model_config)
     model = model.to(device)
     
-    # Load checkpoint
-    checkpoint_path = cfg['model']['checkpoint_path']
-    logging.info(f"Loading checkpoint from {checkpoint_path}")
-    
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    # Load model weights
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load model weights with error handling
+    try:
+        model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        logging.info("✓ Successfully loaded checkpoint with strict matching")
+    except RuntimeError as e:
+        if "Missing key(s)" in str(e) or "Unexpected key(s)" in str(e):
+            logging.warning("Checkpoint architecture mismatch detected, attempting flexible loading...")
+            # Try loading with strict=False to allow partial loading
+            missing_keys, unexpected_keys = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            if missing_keys:
+                logging.warning(f"Missing keys in checkpoint: {len(missing_keys)} keys")
+                logging.debug(f"Missing keys: {missing_keys[:5]}...")  # Show first 5 for brevity
+            if unexpected_keys:
+                logging.warning(f"Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+                logging.debug(f"Unexpected keys: {unexpected_keys[:5]}...")  # Show first 5 for brevity
+            logging.info("✓ Loaded checkpoint with partial matching (some weights may be randomly initialized)")
+        else:
+            raise e
     
     # Apply EMA weights if requested and available
     if cfg['model'].get('use_ema', False) and 'ema_state_dict' in checkpoint:
@@ -289,7 +355,7 @@ def evaluate_reconstruction(
             recon_cfg = cfg.get('evaluation', {}).get('advanced', {}).get('reconstruction', {})
             if not recon_cfg and 'advanced' in cfg:
                 # Backward compatibility fallback
-            recon_cfg = cfg.get('advanced', {}).get('reconstruction', {})
+                recon_cfg = cfg.get('advanced', {}).get('reconstruction', {})
                 logging.info("Using legacy 'advanced.reconstruction' config path for backward compatibility")
             timestep_strategy = recon_cfg.get('timestep_strategy', 'uniform')
             if not recon_cfg:
@@ -661,9 +727,12 @@ def create_visualizations(
         
         # Scatter plots for metrics correlation
         if len(metrics) > 1:
-            fig_scatter = scatter_xy(metrics, 'mse', 'corr', mode)
+            # Extract MSE and correlation values for scatter plot
+            mse_values = np.array([m.get('mse', 0) for m in metrics])
+            corr_values = np.array([m.get('corr', 0) for m in metrics])
+            fig_scatter = scatter_xy(mse_values, corr_values, 'MSE', 'Correlation', f'{mode.title()} MSE vs Correlation')
             writer.add_figure(f'eval/{mode}/metrics_correlation', fig_scatter, epoch)
-                close_figure(fig_scatter)
+            close_figure(fig_scatter)
         
         # Metrics summary plot
         fig_summary = metrics_summary_plot(metrics, mode)
@@ -683,7 +752,7 @@ def save_results(metrics: List[Dict[str, Any]], mode: str, cfg: Dict[str, Any], 
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Convert to DataFrame
-        df = pd.DataFrame(metrics)
+    df = pd.DataFrame(metrics)
     
     # Save detailed results
     if cfg['output']['save_samples']:
@@ -724,7 +793,7 @@ def save_results(metrics: List[Dict[str, Any]], mode: str, cfg: Dict[str, Any], 
     if cfg['output']['save_format'] == 'json':
         with open(summary_file, 'w') as f:
             json.dump(summary, f, indent=2)
-        else:
+    else:
         with open(summary_file, 'wb') as f:
             import pickle
             pickle.dump(summary, f)
@@ -857,7 +926,6 @@ def save_peak_classification_results(
         # Compute ROC analysis with specificity targets
         roc_results = roc_analysis(
             logits, targets,
-            threshold=cfg['metrics']['peak_classification']['threshold'],
             specificity_targets=cfg['metrics']['clinical_metrics']['specificity_targets']
         )
         
@@ -1107,7 +1175,7 @@ def main():
         
         # Visualizations
         if writer and cfg['tensorboard']['log_plots']:
-        create_visualizations(recon_ref, recon_gen, recon_metrics, 'reconstruction', cfg, writer)
+            create_visualizations(recon_ref, recon_gen, recon_metrics, 'reconstruction', cfg, writer)
     
     # Generation evaluation
     if cfg['evaluation']['mode'] == 'generation':
@@ -1144,10 +1212,10 @@ def main():
         
         # Visualizations
         if writer and cfg['tensorboard']['log_plots']:
-        create_visualizations(gen_ref, gen_gen, gen_metrics, 'generation', cfg, writer)
+            create_visualizations(gen_ref, gen_gen, gen_metrics, 'generation', cfg, writer)
     
     if writer:
-    writer.close()
+        writer.close()
     
     # Save unified evaluation summary
     save_evaluation_summary(all_results, cfg)
@@ -1157,7 +1225,7 @@ def main():
     logging.info("="*60)
     logging.info(f"Results saved to: {cfg['output']['save_dir']}")
     if cfg['tensorboard']['enabled']:
-    logging.info(f"TensorBoard logs: {log_dir}")
+        logging.info(f"TensorBoard logs: {log_dir}")
     
     return all_results
 
