@@ -404,3 +404,171 @@ def compute_per_sample_metrics(x_hat: torch.Tensor, x: torch.Tensor,
         per_sample_metrics.append(sample_metrics)
     
     return per_sample_metrics
+
+
+# ============================================================================
+# Classification Metrics for Peak Detection
+# ============================================================================
+
+def binary_accuracy(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.0) -> torch.Tensor:
+    """
+    Calculate binary classification accuracy.
+    
+    Args:
+        logits: Model output logits [B] or [B, 1]
+        targets: Binary targets [B] (0 or 1)
+        threshold: Classification threshold (default: 0.0 for sigmoid)
+        
+    Returns:
+        Accuracy as scalar tensor
+    """
+    # Ensure logits are 1D
+    if logits.dim() > 1:
+        logits = logits.squeeze(-1)
+    
+    # Convert logits to predictions
+    predictions = (logits > threshold).float()
+    
+    # Calculate accuracy
+    correct = (predictions == targets).float()
+    accuracy = correct.mean()
+    
+    return accuracy
+
+
+def binary_precision_recall_f1(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.0) -> dict:
+    """
+    Calculate binary classification precision, recall, and F1 score.
+    
+    Args:
+        logits: Model output logits [B] or [B, 1]
+        targets: Binary targets [B] (0 or 1)
+        threshold: Classification threshold (default: 0.0 for sigmoid)
+        
+    Returns:
+        Dictionary with precision, recall, f1 values
+    """
+    # Ensure logits are 1D
+    if logits.dim() > 1:
+        logits = logits.squeeze(-1)
+    
+    # Convert logits to predictions
+    predictions = (logits > threshold).float()
+    
+    # Calculate confusion matrix components
+    true_positives = ((predictions == 1) & (targets == 1)).float().sum()
+    false_positives = ((predictions == 1) & (targets == 0)).float().sum()
+    false_negatives = ((predictions == 0) & (targets == 1)).float().sum()
+    true_negatives = ((predictions == 0) & (targets == 0)).float().sum()
+    
+    # Calculate metrics with small epsilon to avoid division by zero
+    eps = 1e-8
+    
+    precision = true_positives / (true_positives + false_positives + eps)
+    recall = true_positives / (true_positives + false_negatives + eps)
+    
+    # Calculate F1 score
+    if precision + recall > 0:
+        f1 = 2 * (precision * recall) / (precision + recall + eps)
+    else:
+        f1 = torch.tensor(0.0, device=logits.device)
+    
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'true_positives': true_positives,
+        'false_positives': false_positives,
+        'false_negatives': false_negatives,
+        'true_negatives': true_negatives
+    }
+
+
+def auroc_score(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """
+    Calculate Area Under ROC Curve (AUROC) score.
+    
+    Args:
+        logits: Model output logits [B] or [B, 1]
+        targets: Binary targets [B] (0 or 1)
+        
+    Returns:
+        AUROC score as scalar tensor, or NaN if not computable
+    """
+    # Ensure logits are 1D
+    if logits.dim() > 1:
+        logits = logits.squeeze(-1)
+    
+    # Check if we have both classes
+    unique_targets = torch.unique(targets)
+    if len(unique_targets) < 2:
+        return torch.tensor(float('nan'), device=logits.device)
+    
+    # Sort logits and targets by logit values (descending)
+    sorted_indices = torch.argsort(logits, descending=True)
+    sorted_logits = logits[sorted_indices]
+    sorted_targets = targets[sorted_indices]
+    
+    # Calculate TPR and FPR at each threshold
+    total_positives = targets.sum()
+    total_negatives = (targets == 0).sum()
+    
+    if total_positives == 0 or total_negatives == 0:
+        return torch.tensor(float('nan'), device=logits.device)
+    
+    # Initialize arrays
+    tpr = torch.zeros(len(logits) + 1, device=logits.device)  # True Positive Rate
+    fpr = torch.zeros(len(logits) + 1, device=logits.device)  # False Positive Rate
+    
+    # Calculate TPR and FPR at each threshold
+    tp = 0
+    fp = 0
+    
+    for i in range(len(sorted_logits)):
+        if sorted_targets[i] == 1:
+            tp += 1
+        else:
+            fp += 1
+        
+        tpr[i + 1] = tp / total_positives
+        fpr[i + 1] = fp / total_negatives
+    
+    # Calculate AUROC using trapezoidal rule
+    auroc = 0.0
+    for i in range(len(tpr) - 1):
+        auroc += (fpr[i + 1] - fpr[i]) * (tpr[i] + tpr[i + 1]) / 2
+    
+    return torch.tensor(auroc, device=logits.device)
+
+
+def compute_classification_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.0) -> dict:
+    """
+    Compute comprehensive classification metrics for binary classification.
+    
+    Args:
+        logits: Model output logits [B] or [B, 1]
+        targets: Binary targets [B] (0 or 1)
+        threshold: Classification threshold (default: 0.0 for sigmoid)
+        
+    Returns:
+        Dictionary with all classification metrics
+    """
+    # Basic metrics
+    accuracy = binary_accuracy(logits, targets, threshold)
+    precision_recall_f1 = binary_precision_recall_f1(logits, targets, threshold)
+    auroc = auroc_score(logits, targets)
+    
+    # Combine all metrics
+    metrics = {
+        'accuracy': accuracy.item(),
+        'precision': precision_recall_f1['precision'].item(),
+        'recall': precision_recall_f1['recall'].item(),
+        'f1': precision_recall_f1['f1'].item(),
+        'auroc': auroc.item() if not torch.isnan(auroc) else float('nan'),
+        'true_positives': precision_recall_f1['true_positives'].item(),
+        'false_positives': precision_recall_f1['false_positives'].item(),
+        'false_negatives': precision_recall_f1['false_negatives'].item(),
+        'true_negatives': precision_recall_f1['true_negatives'].item()
+    }
+    
+    return metrics

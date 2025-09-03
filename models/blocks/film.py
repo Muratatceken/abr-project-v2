@@ -141,6 +141,108 @@ class FiLMLayer(nn.Module):
         return gamma * x + beta
 
 
+class TokenFiLM(nn.Module):
+    """
+    FiLM conditioning for token embeddings [B, T, D].
+    Produces per-feature (D) gamma/beta from static params [B, S] and
+    broadcasts over T.
+    
+    Supports residual connections for improved gradient flow and training stability.
+    """
+    def __init__(
+        self, 
+        static_dim: int, 
+        d_model: int, 
+        hidden: int = 256, 
+        dropout: float = 0.1,
+        init_gamma: float = 0.0, 
+        init_beta: float = 0.0,
+        use_residual: bool = False
+    ):
+        super().__init__()
+        self.static_dim = static_dim
+        self.d_model = d_model
+        self.use_residual = use_residual
+        
+        if static_dim > 0:
+            self.embed = nn.Sequential(
+                nn.Linear(static_dim, hidden),
+                nn.GELU(),
+                nn.LayerNorm(hidden),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, 2 * d_model)  # gamma and beta
+            )
+        else:
+            self.embed = None
+            
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.init_gamma = init_gamma
+        self.init_beta = init_beta
+        
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights for stable training."""
+        if self.embed is not None:
+            # Initialize the final layer specially
+            with torch.no_grad():
+                # Initialize gamma to init_gamma and beta to init_beta
+                final_layer = self.embed[-1]
+                nn.init.zeros_(final_layer.weight)
+                if final_layer.bias is not None:
+                    final_layer.bias[:self.d_model].fill_(self.init_gamma)  # gamma
+                    final_layer.bias[self.d_model:].fill_(self.init_beta)   # beta
+
+    def forward(self, x: torch.Tensor, static_params: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        Apply FiLM conditioning to token embeddings.
+        
+        Args:
+            x: Token embeddings [B, T, D]
+            static_params: Static parameters [B, S] or None
+            
+        Returns:
+            Modulated embeddings [B, T, D]
+        """
+        if static_params is None or self.embed is None:
+            return x
+        
+        B, T, D = x.shape
+        
+        # Generate gamma and beta from static params
+        gam_beta = self.embed(static_params)  # [B, 2D]
+        gamma, beta = gam_beta.chunk(2, dim=-1)  # [B, D], [B, D]
+        
+        # Store original input for residual connection before normalization
+        if self.use_residual:
+            x_pre = x
+        
+        # Apply layer norm first
+        x_norm = self.layer_norm(x)
+        
+        # Apply FiLM: x_norm * (1 + gamma) + beta
+        x_film = x_norm * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+        
+        # Apply residual connection if enabled
+        if self.use_residual:
+            x = x_pre + x_film
+        else:
+            x = x_film
+        
+        return x
+
+    def enable_residual(self):
+        """Enable residual connections for better gradient flow."""
+        self.use_residual = True
+
+    def disable_residual(self):
+        """Disable residual connections."""
+        self.use_residual = False
+
+
 class ConditionalEmbedding(nn.Module):
     """
     Embedding layer for conditional information.

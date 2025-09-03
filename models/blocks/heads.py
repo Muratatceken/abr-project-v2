@@ -65,10 +65,29 @@ class MultiScaleFeatureExtractor(nn.Module):
     def __init__(self, input_dim: int, scales: List[int] = [1, 3, 5, 7]):
         super().__init__()
         self.scales = scales
+        self.num_scales = len(scales)
+        
+        # Compute output channels per branch to sum to input_dim
+        base_channels = input_dim // self.num_scales
+        remainder = input_dim % self.num_scales
+        
+        # Allocate channels: first (num_scales - remainder) branches get base_channels
+        # last remainder branches get (base_channels + 1)
+        self.out_channels_per_branch = []
+        for i in range(self.num_scales):
+            if i < self.num_scales - remainder:
+                self.out_channels_per_branch.append(base_channels)
+            else:
+                self.out_channels_per_branch.append(base_channels + 1)
+        
+        # Verify total channels sum to input_dim
+        total_channels = sum(self.out_channels_per_branch)
+        assert total_channels == input_dim, f"Total channels {total_channels} != input_dim {input_dim}"
+        
         self.convs = nn.ModuleList([
-            nn.Conv1d(input_dim, input_dim // len(scales), 
+            nn.Conv1d(input_dim, out_channels, 
                      kernel_size=scale, padding=scale//2)
-            for scale in scales
+            for scale, out_channels in zip(scales, self.out_channels_per_branch)
         ])
         self.fusion = nn.Conv1d(input_dim, input_dim, kernel_size=1)
         
@@ -92,7 +111,7 @@ class AttentionPooling(nn.Module):
     Attention-based pooling mechanism for sequence-to-vector tasks.
     """
     
-    def __init__(self, input_dim: int, attention_dim: int = None):
+    def __init__(self, input_dim: int, attention_dim: int = None, dropout: float = 0.1):
         super().__init__()
         
         if attention_dim is None:
@@ -100,6 +119,9 @@ class AttentionPooling(nn.Module):
         
         self.attention_dim = attention_dim
         self.input_dim = input_dim
+        
+        # Layer normalization for feature dimension
+        self.feature_norm = nn.LayerNorm(input_dim)
         
         # Attention mechanism
         self.attention = nn.Sequential(
@@ -109,12 +131,15 @@ class AttentionPooling(nn.Module):
             nn.Softmax(dim=1)
         )
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Apply attention pooling.
+        Apply attention pooling with optional masking.
         
         Args:
             x: Input tensor [batch, seq_len, input_dim] or [batch, input_dim, seq_len]
+            mask: Optional mask tensor [batch, seq_len] where 1 = valid, 0 = masked
             
         Returns:
             Pooled tensor [batch, input_dim]
@@ -123,11 +148,24 @@ class AttentionPooling(nn.Module):
         if x.dim() == 3 and x.size(1) == self.input_dim:
             x = x.transpose(1, 2)  # [batch, seq_len, input_dim]
         
+        # Apply feature normalization
+        x = self.feature_norm(x)
+        
         # Compute attention weights
         attention_weights = self.attention(x)  # [batch, seq_len, 1]
         
+        # Apply mask if provided
+        if mask is not None:
+            # Expand mask to match attention weights shape
+            mask = mask.unsqueeze(-1)  # [batch, seq_len, 1]
+            # Apply -inf masking before softmax (already applied in attention mechanism)
+            attention_weights = attention_weights * mask
+        
         # Apply attention pooling
         pooled = torch.sum(x * attention_weights, dim=1)  # [batch, input_dim]
+        
+        # Apply dropout for regularization
+        pooled = self.dropout(pooled)
         
         return pooled
 

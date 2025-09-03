@@ -7,13 +7,16 @@ including physiological analysis, statistical tests, and quality assessments.
 
 import torch
 import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Union
 from scipy import stats, signal
 from scipy.signal import find_peaks
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.metrics import silhouette_score
 from sklearn.cluster import KMeans
+from scipy.stats import bootstrap
+from sklearn.metrics import roc_curve, precision_recall_curve, auc
+import warnings
 
 
 class SignalAnalyzer:
@@ -350,3 +353,610 @@ class SignalAnalyzer:
             return float(abs(bandwidth))
         else:
             return 0.0
+
+def bootstrap_classification_metrics(logits: np.ndarray, targets: np.ndarray, 
+                                   n_bootstrap: int = 1000, 
+                                   confidence_level: float = 0.95,
+                                   method: str = 'percentile') -> Dict:
+    """
+    Calculate bootstrap confidence intervals for classification metrics.
+    
+    Args:
+        logits: Model output logits [N]
+        targets: Ground truth labels [N]
+        n_bootstrap: Number of bootstrap resamples
+        confidence_level: Confidence level (e.g., 0.95 for 95% CI)
+        method: Bootstrap method ('percentile', 'bca', 'basic')
+    
+    Returns:
+        Dictionary with mean, std, and confidence intervals for each metric
+    """
+    from utils.metrics import compute_classification_metrics
+    
+    def compute_metrics_bootstrap(data):
+        indices, = data
+        sample_logits = logits[indices]
+        sample_targets = targets[indices]
+        return compute_classification_metrics(sample_logits, sample_targets)
+    
+    # Generate bootstrap samples
+    bootstrap_samples = []
+    for _ in range(n_bootstrap):
+        indices = np.random.choice(len(logits), size=len(logits), replace=True)
+        metrics = compute_metrics_bootstrap((indices,))
+        bootstrap_samples.append(metrics)
+    
+    # Calculate statistics
+    results = {}
+    metric_names = bootstrap_samples[0].keys()
+    
+    for metric in metric_names:
+        values = [sample[metric] for sample in bootstrap_samples if metric in sample]
+        if not values:
+            continue
+            
+        values = np.array(values)
+        mean_val = np.mean(values)
+        std_val = np.std(values)
+        
+        # Calculate confidence intervals
+        if method == 'percentile':
+            alpha = 1 - confidence_level
+            lower = np.percentile(values, alpha/2 * 100)
+            upper = np.percentile(values, (1-alpha/2) * 100)
+        elif method == 'basic':
+            alpha = 1 - confidence_level
+            lower = 2 * mean_val - np.percentile(values, (1-alpha/2) * 100)
+            upper = 2 * mean_val - np.percentile(values, alpha/2 * 100)
+        else:  # BCa method
+            try:
+                bootstrap_result = bootstrap((np.arange(len(logits)),), 
+                                          compute_metrics_bootstrap, 
+                                          n_resamples=n_bootstrap,
+                                          confidence_level=confidence_level)
+                lower, upper = bootstrap_result.confidence_interval
+                # Extract specific metric from bootstrap result
+                lower = lower[metric] if hasattr(lower, '__getitem__') else lower
+                upper = upper[metric] if hasattr(upper, '__getitem__') else upper
+            except:
+                # Fallback to percentile method
+                alpha = 1 - confidence_level
+                lower = np.percentile(values, alpha/2 * 100)
+                upper = np.percentile(values, (1-alpha/2) * 100)
+        
+        results[metric] = {
+            'mean': mean_val,
+            'std': std_val,
+            'ci_lower': lower,
+            'ci_upper': upper,
+            'confidence_level': confidence_level
+        }
+    
+    return results
+
+def statistical_significance_tests(logits: np.ndarray, targets: np.ndarray,
+                                 prevalence: Optional[float] = None,
+                                 multiple_testing_correction: str = 'bonferroni') -> Dict:
+    """
+    Perform statistical significance tests for classification performance.
+    
+    Args:
+        logits: Model output logits [N]
+        targets: Ground truth labels [N]
+        prevalence: Dataset prevalence (if None, calculated from targets)
+        multiple_testing_correction: Correction method ('bonferroni', 'holm', 'fdr')
+    
+    Returns:
+        Dictionary with test results, p-values, and effect sizes
+    """
+    from utils.metrics import compute_classification_metrics
+    
+    if prevalence is None:
+        prevalence = np.mean(targets)
+    
+    # Calculate metrics
+    metrics = compute_classification_metrics(logits, targets)
+    
+    # Convert logits to predictions
+    predictions = (logits > 0).astype(int)
+    
+    results = {}
+    
+    # Test accuracy against chance
+    chance_accuracy = max(prevalence, 1 - prevalence)  # Best random performance
+    if len(targets) > 30:  # Use t-test for large samples
+        t_stat, p_value = stats.ttest_1samp(predictions == targets, chance_accuracy)
+        test_type = 'one_sample_t_test'
+    else:  # Use exact binomial test for small samples
+        correct_predictions = np.sum(predictions == targets)
+        p_value = stats.binomtest(correct_predictions, len(targets), chance_accuracy).proportions_ci()[1]
+        t_stat = None
+        test_type = 'exact_binomial_test'
+    
+    results['accuracy_test'] = {
+        'test_type': test_type,
+        'null_hypothesis': f'accuracy = {chance_accuracy:.3f}',
+        'statistic': t_stat,
+        'p_value': p_value,
+        'significant': p_value < 0.05
+    }
+    
+    # Calculate effect sizes
+    if 'accuracy' in metrics:
+        cohens_d = calculate_cohens_d(metrics['accuracy'], chance_accuracy, len(targets))
+        cliff_delta = calculate_cliff_delta(predictions == targets, 
+                                         np.random.binomial(1, chance_accuracy, len(targets)))
+        
+        results['effect_sizes'] = {
+            'cohens_d': cohens_d,
+            'cliff_delta': cliff_delta,
+            'interpretation': interpret_effect_size(cohens_d)
+        }
+    
+    # Test other metrics if available
+    test_metrics = ['precision', 'recall', 'f1', 'auroc']
+    p_values = []
+    
+    for metric in test_metrics:
+        if metric in metrics:
+            metric_value = metrics[metric]
+            if metric == 'auroc':
+                # Test AUROC against 0.5 (random)
+                null_value = 0.5
+            else:
+                # Test other metrics against prevalence-based baseline
+                null_value = prevalence if metric in ['precision', 'recall'] else 2 * prevalence * (1 - prevalence) / (prevalence + (1 - prevalence))
+            
+            if len(targets) > 30:
+                # Use t-test for large samples
+                t_stat, p_value = stats.ttest_1samp([metric_value], null_value)
+            else:
+                # Use Wilcoxon signed-rank test for small samples
+                _, p_value = stats.wilcoxon([metric_value], [null_value])
+            
+            p_values.append(p_value)
+            results[f'{metric}_test'] = {
+                'test_type': 'one_sample_test',
+                'null_hypothesis': f'{metric} = {null_value:.3f}',
+                'p_value': p_value,
+                'significant': p_value < 0.05
+            }
+    
+    # Apply multiple testing correction
+    if len(p_values) > 1:
+        corrected_p_values = apply_multiple_testing_correction(p_values, method=multiple_testing_correction)
+        
+        # Update results with corrected p-values
+        for i, metric in enumerate(test_metrics):
+            if f'{metric}_test' in results:
+                results[f'{metric}_test']['corrected_p_value'] = corrected_p_values[i]
+                results[f'{metric}_test']['significant_corrected'] = corrected_p_values[i] < 0.05
+    
+    return results
+
+def roc_analysis(logits: np.ndarray, targets: np.ndarray,
+                 specificity_targets: List[float] = [0.8, 0.9, 0.95]) -> Dict:
+    """
+    Perform comprehensive ROC analysis.
+    
+    Args:
+        logits: Model output logits [N]
+        targets: Ground truth labels [N]
+        specificity_targets: Specificity levels for sensitivity analysis
+    
+    Returns:
+        Dictionary with ROC curve data, optimal threshold, and sensitivity analysis
+    """
+    # Calculate ROC curve
+    fpr, tpr, thresholds = roc_curve(targets, logits)
+    auroc = auc(fpr, tpr)
+    
+    # Find optimal threshold using Youden's index
+    youden_index = tpr - fpr
+    optimal_idx = np.argmax(youden_index)
+    optimal_threshold = thresholds[optimal_idx]
+    optimal_sensitivity = tpr[optimal_idx]
+    optimal_specificity = 1 - fpr[optimal_idx]
+    
+    # Calculate sensitivity at specific specificity levels
+    sensitivity_at_specificity = {}
+    for target_spec in specificity_targets:
+        # Find threshold that gives closest specificity
+        spec_diff = np.abs(1 - fpr - target_spec)
+        closest_idx = np.argmin(spec_diff)
+        sensitivity_at_specificity[f'sensitivity_at_specificity_{target_spec:.2f}'] = {
+            'sensitivity': tpr[closest_idx],
+            'specificity': 1 - fpr[closest_idx],
+            'threshold': thresholds[closest_idx]
+        }
+    
+    # Bootstrap confidence interval for AUROC
+    try:
+        auroc_ci = bootstrap_auroc_confidence_interval(logits, targets)
+    except:
+        auroc_ci = {'lower': auroc, 'upper': auroc}
+    
+    return {
+        'roc_curve': {
+            'fpr': fpr.tolist(),
+            'tpr': tpr.tolist(),
+            'thresholds': thresholds.tolist()
+        },
+        'auroc': auroc,
+        'auroc_ci': auroc_ci,
+        'optimal_threshold': {
+            'threshold': optimal_threshold,
+            'sensitivity': optimal_sensitivity,
+            'specificity': optimal_specificity,
+            'youden_index': youden_index[optimal_idx]
+        },
+        'sensitivity_at_specificity': sensitivity_at_specificity
+    }
+
+def precision_recall_analysis(logits: np.ndarray, targets: np.ndarray) -> Dict:
+    """
+    Perform precision-recall curve analysis.
+    
+    Args:
+        logits: Model output logits [N]
+        targets: Ground truth labels [N]
+    
+    Returns:
+        Dictionary with PR curve data and optimal threshold information
+    """
+    # Calculate PR curve
+    precision, recall, thresholds = precision_recall_curve(targets, logits)
+    average_precision = auc(recall, precision)
+    
+    # Find optimal threshold for F1 score maximization
+    f1_scores = []
+    valid_thresholds = []
+    
+    for threshold in thresholds:
+        predictions = (logits >= threshold).astype(int)
+        if np.sum(predictions) > 0:  # Avoid division by zero
+            precision_val = np.sum((predictions == 1) & (targets == 1)) / np.sum(predictions == 1)
+            recall_val = np.sum((predictions == 1) & (targets == 1)) / np.sum(targets == 1)
+            
+            if precision_val + recall_val > 0:
+                f1 = 2 * (precision_val * recall_val) / (precision_val + recall_val)
+                f1_scores.append(f1)
+                valid_thresholds.append(threshold)
+    
+    if f1_scores:
+        optimal_idx = np.argmax(f1_scores)
+        optimal_threshold = valid_thresholds[optimal_idx]
+        optimal_f1 = f1_scores[optimal_idx]
+    else:
+        optimal_threshold = 0.0
+        optimal_f1 = 0.0
+    
+    # Bootstrap confidence interval for average precision
+    try:
+        ap_ci = bootstrap_average_precision_confidence_interval(logits, targets)
+    except:
+        ap_ci = {'lower': average_precision, 'upper': average_precision}
+    
+    return {
+        'pr_curve': {
+            'precision': precision.tolist(),
+            'recall': recall.tolist(),
+            'thresholds': thresholds.tolist()
+        },
+        'average_precision': average_precision,
+        'average_precision_ci': ap_ci,
+        'optimal_threshold': {
+            'threshold': optimal_threshold,
+            'f1_score': optimal_f1
+        }
+    }
+
+def clinical_validation_analysis(logits: np.ndarray, targets: np.ndarray,
+                                prevalence: Optional[float] = None) -> Dict:
+    """
+    Perform clinical validation analysis for ABR peak detection.
+    
+    Args:
+        logits: Model output logits [N]
+        targets: Ground truth labels [N]
+        prevalence: Dataset prevalence (if None, calculated from targets)
+    
+    Returns:
+        Dictionary with clinical validation metrics
+    """
+    if prevalence is None:
+        prevalence = np.mean(targets)
+    
+    predictions = (logits > 0).astype(int)
+    
+    # Calculate confusion matrix components
+    tp = np.sum((predictions == 1) & (targets == 1))
+    tn = np.sum((predictions == 0) & (targets == 0))
+    fp = np.sum((predictions == 1) & (targets == 0))
+    fn = np.sum((predictions == 0) & (targets == 1))
+    
+    # Basic clinical metrics
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+    
+    # Predictive values
+    ppv = tp / (tp + fp) if (tp + fp) > 0 else 0  # Positive predictive value
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0  # Negative predictive value
+    
+    # Diagnostic odds ratio
+    if fp > 0 and fn > 0:
+        diagnostic_odds_ratio = (tp * tn) / (fp * fn)
+        dor_ci = calculate_dor_confidence_interval(tp, tn, fp, fn)
+    else:
+        diagnostic_odds_ratio = np.inf
+        dor_ci = {'lower': np.inf, 'upper': np.inf}
+    
+    # Likelihood ratios
+    lr_positive = sensitivity / (1 - specificity) if specificity < 1 else np.inf
+    lr_negative = (1 - sensitivity) / specificity if specificity > 0 else np.inf
+    
+    # Number needed to diagnose (NND)
+    nnd = 1 / (sensitivity - (1 - specificity)) if (sensitivity + specificity) > 1 else np.inf
+    
+    # Prevalence-adjusted metrics
+    adjusted_ppv = (sensitivity * prevalence) / (sensitivity * prevalence + (1 - specificity) * (1 - prevalence))
+    adjusted_npv = (specificity * (1 - prevalence)) / (specificity * (1 - prevalence) + (1 - sensitivity) * prevalence)
+    
+    return {
+        'basic_metrics': {
+            'sensitivity': sensitivity,
+            'specificity': specificity,
+            'positive_predictive_value': ppv,
+            'negative_predictive_value': npv
+        },
+        'diagnostic_odds_ratio': {
+            'value': diagnostic_odds_ratio,
+            'confidence_interval': dor_ci
+        },
+        'likelihood_ratios': {
+            'positive_likelihood_ratio': lr_positive,
+            'negative_likelihood_ratio': lr_negative
+        },
+        'clinical_utility': {
+            'number_needed_to_diagnose': nnd,
+            'prevalence_adjusted_ppv': adjusted_ppv,
+            'prevalence_adjusted_npv': adjusted_npv
+        },
+        'prevalence': prevalence
+    }
+
+def comparative_statistical_analysis(results1: Dict, results2: Dict,
+                                   paired: bool = True,
+                                   significance_level: float = 0.05) -> Dict:
+    """
+    Perform comparative statistical analysis between two evaluation results.
+    
+    Args:
+        results1: First evaluation results
+        results2: Second evaluation results
+        paired: Whether the results are from paired samples
+        significance_level: Statistical significance threshold
+    
+    Returns:
+        Dictionary with comparative analysis results
+    """
+    comparison_results = {}
+    
+    # Extract metrics for comparison
+    metrics_to_compare = ['accuracy', 'precision', 'recall', 'f1', 'auroc']
+    
+    for metric in metrics_to_compare:
+        if metric in results1 and metric in results2:
+            val1 = results1[metric]
+            val2 = results2[metric]
+            
+            # Calculate difference
+            diff = val2 - val1
+            
+            if paired:
+                # Paired t-test
+                t_stat, p_value = stats.ttest_rel([val1], [val2])
+                test_type = 'paired_t_test'
+            else:
+                # Independent t-test
+                t_stat, p_value = stats.ttest_ind([val1], [val2])
+                test_type = 'independent_t_test'
+            
+            # Calculate effect size
+            cohens_d = calculate_cohens_d(val2, val1, 2)  # Sample size = 2 for paired comparison
+            
+            comparison_results[metric] = {
+                'value1': val1,
+                'value2': val2,
+                'difference': diff,
+                'test_type': test_type,
+                't_statistic': t_stat,
+                'p_value': p_value,
+                'significant': p_value < significance_level,
+                'effect_size': cohens_d,
+                'interpretation': interpret_effect_size(cohens_d)
+            }
+    
+    # McNemar's test for binary classification comparison
+    if 'predictions' in results1 and 'predictions' in results2 and 'targets' in results1:
+        mcnemar_result = perform_mcnemar_test(results1, results2)
+        comparison_results['mcnemar_test'] = mcnemar_result
+    
+    return comparison_results
+
+def calculate_cohens_d(value1: float, value2: float, n: int) -> float:
+    """Calculate Cohen's d effect size."""
+    pooled_std = np.sqrt(((n-1) * (value1**2 + value2**2)) / (2*n - 2))
+    if pooled_std == 0:
+        return 0.0
+    return (value1 - value2) / pooled_std
+
+def calculate_cliff_delta(group1: np.ndarray, group2: np.ndarray) -> float:
+    """Calculate Cliff's delta effect size."""
+    n1, n2 = len(group1), len(group2)
+    wins = 0
+    ties = 0
+    
+    for x in group1:
+        for y in group2:
+            if x > y:
+                wins += 1
+            elif x == y:
+                ties += 1
+    
+    total = n1 * n2
+    return (wins - (total - wins - ties)) / total
+
+def interpret_effect_size(cohens_d: float) -> str:
+    """Interpret Cohen's d effect size."""
+    abs_d = abs(cohens_d)
+    if abs_d < 0.2:
+        return 'negligible'
+    elif abs_d < 0.5:
+        return 'small'
+    elif abs_d < 0.8:
+        return 'medium'
+    else:
+        return 'large'
+
+def apply_multiple_testing_correction(p_values: List[float], 
+                                    method: str = 'bonferroni') -> List[float]:
+    """Apply multiple testing correction to p-values."""
+    p_values = np.array(p_values)
+    
+    if method == 'bonferroni':
+        return np.minimum(p_values * len(p_values), 1.0)
+    elif method == 'holm':
+        sorted_indices = np.argsort(p_values)
+        sorted_p_values = p_values[sorted_indices]
+        corrected_p_values = np.zeros_like(sorted_p_values)
+        
+        for i, p_val in enumerate(sorted_p_values):
+            corrected_p_values[i] = min(p_val * (len(sorted_p_values) - i), 1.0)
+        
+        # Restore original order
+        original_indices = np.argsort(sorted_indices)
+        return corrected_p_values[original_indices]
+    elif method == 'fdr':
+        from statsmodels.stats.multitest import multipletests
+        _, corrected_p_values, _, _ = multipletests(p_values, method='fdr_bh')
+        return corrected_p_values
+    else:
+        return p_values
+
+def bootstrap_auroc_confidence_interval(logits: np.ndarray, targets: np.ndarray,
+                                      n_bootstrap: int = 1000,
+                                      confidence_level: float = 0.95) -> Dict:
+    """Calculate bootstrap confidence interval for AUROC."""
+    def compute_auroc(data):
+        indices, = data
+        sample_logits = logits[indices]
+        sample_targets = targets[indices]
+        fpr, tpr, _ = roc_curve(sample_targets, sample_logits)
+        return auc(fpr, tpr)
+    
+    try:
+        bootstrap_result = bootstrap((np.arange(len(logits)),), 
+                                  compute_auroc, 
+                                  n_resamples=n_bootstrap,
+                                  confidence_level=confidence_level)
+        return {'lower': bootstrap_result.confidence_interval[0],
+                'upper': bootstrap_result.confidence_interval[1]}
+    except:
+        # Fallback to simple percentile method
+        auroc_values = []
+        for _ in range(n_bootstrap):
+            indices = np.random.choice(len(logits), size=len(logits), replace=True)
+            sample_logits = logits[indices]
+            sample_targets = targets[indices]
+            fpr, tpr, _ = roc_curve(sample_targets, sample_logits)
+            auroc_values.append(auc(fpr, tpr))
+        
+        alpha = 1 - confidence_level
+        return {'lower': np.percentile(auroc_values, alpha/2 * 100),
+                'upper': np.percentile(auroc_values, (1-alpha/2) * 100)}
+
+def bootstrap_average_precision_confidence_interval(logits: np.ndarray, targets: np.ndarray,
+                                                  n_bootstrap: int = 1000,
+                                                  confidence_level: float = 0.95) -> Dict:
+    """Calculate bootstrap confidence interval for average precision."""
+    def compute_ap(data):
+        indices, = data
+        sample_logits = logits[indices]
+        sample_targets = targets[indices]
+        precision, recall, _ = precision_recall_curve(sample_targets, sample_logits)
+        return auc(recall, precision)
+    
+    try:
+        bootstrap_result = bootstrap((np.arange(len(logits)),), 
+                                  compute_ap, 
+                                  n_resamples=n_bootstrap,
+                                  confidence_level=confidence_level)
+        return {'lower': bootstrap_result.confidence_interval[0],
+                'upper': bootstrap_result.confidence_interval[1]}
+    except:
+        # Fallback to simple percentile method
+        ap_values = []
+        for _ in range(n_bootstrap):
+            indices = np.random.choice(len(logits), size=len(logits), replace=True)
+            sample_logits = logits[indices]
+            sample_targets = targets[indices]
+            precision, recall, _ = precision_recall_curve(sample_targets, sample_logits)
+            ap_values.append(auc(recall, precision))
+        
+        alpha = 1 - confidence_level
+        return {'lower': np.percentile(ap_values, alpha/2 * 100),
+                'upper': np.percentile(ap_values, (1-alpha/2) * 100)}
+
+def calculate_dor_confidence_interval(tp: int, tn: int, fp: int, fn: int,
+                                    confidence_level: float = 0.95) -> Dict:
+    """Calculate confidence interval for diagnostic odds ratio."""
+    if tp == 0 or tn == 0 or fp == 0 or fn == 0:
+        return {'lower': np.inf, 'upper': np.inf}
+    
+    # Calculate log odds ratio and its standard error
+    log_or = np.log((tp * tn) / (fp * fn))
+    se_log_or = np.sqrt(1/tp + 1/tn + 1/fp + 1/fn)
+    
+    # Calculate confidence interval
+    z_score = stats.norm.ppf((1 + confidence_level) / 2)
+    ci_lower = np.exp(log_or - z_score * se_log_or)
+    ci_upper = np.exp(log_or + z_score * se_log_or)
+    
+    return {'lower': ci_lower, 'upper': ci_upper}
+
+def perform_mcnemar_test(results1: Dict, results2: Dict) -> Dict:
+    """Perform McNemar's test for comparing binary classification performance."""
+    if 'predictions' not in results1 or 'predictions' not in results2 or 'targets' not in results1:
+        return {'error': 'Missing required data for McNemar test'}
+    
+    pred1 = results1['predictions']
+    pred2 = results2['predictions']
+    targets = results1['targets']
+    
+    # Create contingency table
+    a = np.sum((pred1 == targets) & (pred2 == targets))  # Both correct
+    b = np.sum((pred1 != targets) & (pred2 == targets))  # Only pred2 correct
+    c = np.sum((pred1 == targets) & (pred2 != targets))  # Only pred1 correct
+    d = np.sum((pred1 != targets) & (pred2 != targets))  # Both wrong
+    
+    # Perform McNemar test
+    try:
+        statistic, p_value = stats.mcnemar([[a, b], [c, d]], exact=True)
+        test_type = 'exact_mcnemar'
+    except:
+        # Fallback to chi-square approximation
+        statistic, p_value = stats.mcnemar([[a, b], [c, d]], exact=False)
+        test_type = 'chi_square_mcnemar'
+    
+    return {
+        'test_type': test_type,
+        'statistic': statistic,
+        'p_value': p_value,
+        'contingency_table': {
+            'both_correct': a,
+            'only_pred2_correct': b,
+            'only_pred1_correct': c,
+            'both_wrong': d
+        }
+    }

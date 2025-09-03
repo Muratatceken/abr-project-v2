@@ -134,3 +134,132 @@ def predict_x0_from_v(x_t: torch.Tensor, v_pred: torch.Tensor, t: torch.Tensor,
     
     x0_pred = alpha * x_t - sigma * v_pred
     return x0_pred
+
+
+# ============================================================================
+# Progressive Training Utilities for Multi-Task Learning
+# ============================================================================
+
+def linear_weight_schedule(epoch: int, start_epoch: int, end_epoch: int, 
+                          start_weight: float, end_weight: float) -> float:
+    """
+    Create linear interpolation between start and end weights over specified epoch range.
+    
+    Args:
+        epoch: Current training epoch
+        start_epoch: Epoch to start weight ramping
+        end_epoch: Epoch to finish weight ramping
+        start_weight: Initial weight value
+        end_weight: Final weight value
+        
+    Returns:
+        Current weight value based on linear interpolation
+    """
+    if epoch < start_epoch:
+        return start_weight
+    elif epoch >= end_epoch:
+        return end_weight
+    else:
+        # Linear interpolation between start and end epochs
+        progress = (epoch - start_epoch) / (end_epoch - start_epoch)
+        return start_weight + progress * (end_weight - start_weight)
+
+
+def cosine_weight_schedule(epoch: int, start_epoch: int, end_epoch: int,
+                          start_weight: float, end_weight: float) -> float:
+    """
+    Create cosine interpolation between start and end weights over specified epoch range.
+    
+    Args:
+        epoch: Current training epoch
+        start_epoch: Epoch to start weight ramping
+        end_epoch: Epoch to finish weight ramping
+        start_weight: Initial weight value
+        end_weight: Final weight value
+        
+    Returns:
+        Current weight value based on cosine interpolation
+    """
+    if epoch < start_epoch:
+        return start_weight
+    elif epoch >= end_epoch:
+        return end_weight
+    else:
+        # Cosine interpolation for smoother transitions
+        progress = (epoch - start_epoch) / (end_epoch - start_epoch)
+        # Use cosine function for smooth interpolation
+        cos_progress = 0.5 * (1 + math.cos(math.pi * (1 - progress)))
+        return start_weight + cos_progress * (end_weight - start_weight)
+
+
+def create_param_groups(model, base_lr: float, task_lr_multipliers: dict) -> list:
+    """
+    Separate model parameters into task-specific groups for different learning rates.
+    
+    Args:
+        model: PyTorch model with named parameters
+        base_lr: Base learning rate
+        task_lr_multipliers: Dictionary of task-specific learning rate multipliers
+        
+    Returns:
+        List of parameter groups for optimizer
+    """
+    param_groups = []
+    
+    # Signal generation parameters (stem, transformer, output projection)
+    signal_params = []
+    peak_params = []
+    static_params = []
+    cross_attn_params = []
+    other_params = []
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if any(x in name for x in ['stem', 'transformer', 'out_proj', 'out_norm']):
+                signal_params.append(param)
+            elif any(x in name for x in ['attn_pool', 'peak5_head']):
+                peak_params.append(param)
+            elif any(x in name for x in ['static_recon_head']):
+                static_params.append(param)
+            elif any(x in name for x in ['static_encoder', 'cross_attention']):
+                cross_attn_params.append(param)
+            else:
+                other_params.append(param)
+    
+    # Create parameter groups with appropriate learning rates
+    if signal_params:
+        param_groups.append({
+            'params': signal_params,
+            'lr': base_lr * task_lr_multipliers.get('signal', 1.0),
+            'name': 'signal_generation'
+        })
+    
+    if peak_params:
+        param_groups.append({
+            'params': peak_params,
+            'lr': base_lr * task_lr_multipliers.get('peak_classification', 1.0),
+            'name': 'peak_classification'
+        })
+    
+    if static_params:
+        param_groups.append({
+            'params': static_params,
+            'lr': base_lr * task_lr_multipliers.get('static_reconstruction', 1.0),
+            'name': 'static_reconstruction'
+        })
+    
+    if cross_attn_params:
+        param_groups.append({
+            'params': cross_attn_params,
+            'lr': base_lr * task_lr_multipliers.get('cross_attention', 1.0),
+            'name': 'cross_attention'
+        })
+    
+    if other_params:
+        param_groups.append({
+            'params': other_params,
+            'lr': base_lr,
+            'name': 'other'
+        })
+    
+    return param_groups

@@ -1,0 +1,21 @@
+# Cross-attention ablation study
+# Tests impact of cross-attention between static params and signal features
+
+ablation:
+  use_cross_attention: true
+  cross_attention_heads: 4
+  cross_attention_dropout: 0.1
+  
+  # Disable other enhancements for isolated testing
+  joint_static_generation: false
+  use_learned_pos_emb: false
+  film_residual: false
+  use_multi_scale_fusion: false
+  use_advanced_blocks: false
+  ablation_mode: "cross_attn_only"
+
+exp_name: "abr_cross_attention"
+log_dir: "runs/ablation/cross_attention"
+
+multi_task:
+  enabled: false

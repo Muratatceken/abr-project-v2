@@ -1,0 +1,25 @@
+# Joint static parameter generation ablation study
+# Tests impact of jointly generating static parameters
+
+ablation:
+  joint_static_generation: true
+  static_recon_weight: 0.1
+  
+  # Disable other enhancements for isolated testing
+  use_cross_attention: false
+  use_learned_pos_emb: false
+  film_residual: false
+  use_multi_scale_fusion: false
+  use_advanced_blocks: false
+  ablation_mode: "joint_gen_only"
+
+exp_name: "abr_joint_generation"
+log_dir: "runs/ablation/joint_generation"
+
+# Enable multi-task for static parameter reconstruction
+multi_task:
+  enabled: true
+  loss_weights:
+    signal: 1.0
+    peak_classification: 0.5
+    static_reconstruction: 0.1

@@ -1,0 +1,22 @@
+# Baseline configuration - no advanced features
+# Inherits from ../train.yaml with ablation overrides
+
+# Override ablation settings to disable all enhancements
+ablation:
+  use_cross_attention: false
+  joint_static_generation: false
+  use_learned_pos_emb: false
+  film_residual: false
+  use_multi_scale_fusion: false
+  use_advanced_blocks: false
+  use_multi_scale_attention: false
+  use_gated_ffn: false
+  ablation_mode: "minimal"
+
+# Experiment identification
+exp_name: "abr_baseline"
+log_dir: "runs/ablation/baseline"
+
+# Multi-task disabled for baseline
+multi_task:
+  enabled: false

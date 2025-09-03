@@ -1,0 +1,174 @@
+{
+  "mse_mean": 0.05163758594376638,
+  "mse_std": 0.03807836480703427,
+  "mse_median": 0.04024121165275574,
+  "mse_min": 0.0017699538730084896,
+  "mse_max": 0.16603900492191315,
+  "l1_mean": 0.17286770622441747,
+  "l1_std": 0.07313898331310667,
+  "l1_median": 0.16264373064041138,
+  "l1_min": 0.031827788800001144,
+  "l1_max": 0.3602190613746643,
+  "corr_mean": 0.3493966223307311,
+  "corr_std": 0.47848067599826477,
+  "corr_median": 0.49294283986091614,
+  "corr_min": -0.9639414548873901,
+  "corr_max": 0.9783165454864502,
+  "snr_db_mean": -Infinity,
+  "snr_db_std": NaN,
+  "snr_db_median": -0.026674404740333557,
+  "snr_db_min": -Infinity,
+  "snr_db_max": 13.540956497192383,
+  "stft_l1_mean": 0.19719546959998477,
+  "stft_l1_std": 0.05948892928910538,
+  "stft_l1_median": 0.19649767875671387,
+  "stft_l1_min": 0.05165176838636398,
+  "stft_l1_max": 0.4008045196533203,
+  "dtw_mean": 18.403349267818083,
+  "dtw_std": 11.575098622676524,
+  "dtw_median": 15.359837477561086,
+  "dtw_min": 2.4012263529002666,
+  "dtw_max": 72.01998484553769,
+  "mode": "generation",
+  "num_samples": 7673,
+  "checkpoint_path": "checkpoints/abr_transformer/abr_vpred_base_best.pt",
+  "checkpoint_epoch": 96,
+  "model_config": {
+    "input_channels": 1,
+    "static_dim": 4,
+    "sequence_length": 200,
+    "d_model": 256,
+    "n_layers": 6,
+    "n_heads": 8,
+    "ff_mult": 4,
+    "dropout": 0.1,
+    "use_timestep_cond": true,
+    "use_static_film": true
+  },
+  "evaluation_config": {
+    "seed": 1337,
+    "device": "cuda",
+    "log_dir": "runs/abr_transformer",
+    "exp_name": "abr_eval",
+    "data": {
+      "val_csv": "data/processed/ultimate_dataset_with_clinical_thresholds.pkl",
+      "test_csv": "",
+      "sequence_length": 200,
+      "static_order": [
+        "Age",
+        "Intensity",
+        "Stimulus Rate",
+        "FMP"
+      ]
+    },
+    "model": {
+      "input_channels": 1,
+      "static_dim": 4,
+      "sequence_length": 200,
+      "d_model": 256,
+      "n_layers": 6,
+      "n_heads": 8,
+      "ff_mult": 4,
+      "dropout": 0.1,
+      "use_timestep_cond": true,
+      "use_static_film": true
+    },
+    "checkpoint": {
+      "path": "checkpoints/abr_transformer/abr_vpred_base_best.pt",
+      "use_ema": true
+    },
+    "diffusion": {
+      "num_train_steps": 1000,
+      "schedule": "cosine",
+      "sample_steps": 60,
+      "ddim_eta": 0.0
+    },
+    "modes": {
+      "reconstruction": true,
+      "generation": true
+    },
+    "loader": {
+      "batch_size": 128,
+      "num_workers": 8,
+      "pin_memory": true
+    },
+    "metrics": {
+      "use_stft": true,
+      "stft": {
+        "n_fft": 64,
+        "hop_length": 16,
+        "win_length": 64
+      },
+      "use_dtw": true,
+      "use_corr": true,
+      "use_snr": true,
+      "peaks": {
+        "enable_if_available": true,
+        "find_peaks": {
+          "height_sigma": 1.0,
+          "min_distance": 6
+        },
+        "latency_windows": {
+          "I": [
+            20,
+            50
+          ],
+          "III": [
+            70,
+            110
+          ],
+          "V": [
+            130,
+            170
+          ]
+        }
+      }
+    },
+    "report": {
+      "out_dir": "results/abr_eval",
+      "save_csv": true,
+      "csv_prefix": "eval",
+      "save_topk_examples": 12,
+      "tensorboard": {
+        "write_scalars": true,
+        "write_figures": true,
+        "write_audio": false,
+        "audio_sample_rate": 20000
+      }
+    },
+    "advanced": {
+      "num_seeds": 1,
+      "reconstruction": {
+        "timestep_strategy": "uniform",
+        "fixed_timestep": 500
+      },
+      "generation": {
+        "cfg_scale": 1.0
+      },
+      "max_samples": null
+    },
+    "viz": {
+      "waveform_plots": true,
+      "denormalize_for_plots": true,
+      "spectrogram_plots": true,
+      "spectrogram_params": {
+        "n_fft": 64,
+        "hop_length": 16,
+        "win_length": 64
+      },
+      "error_plots": true,
+      "scatter_plots": true,
+      "figsize": [
+        12,
+        8
+      ],
+      "dpi": 100,
+      "max_plots_per_figure": 8
+    },
+    "logging": {
+      "console_level": "INFO",
+      "save_config": true,
+      "save_model_summary": true
+    }
+  }
+}

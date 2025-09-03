@@ -30,6 +30,10 @@ loader:
   drop_last: true
   prefetch_factor: 2
   persistent_workers: false
+  
+  # Peak-balanced sampling for multi-task training
+  use_peak_balanced_sampler: true
+  peak_sampling_strategy: 'weighted'  # Options: 'weighted', 'oversample'
 
 # Model architecture
 model:
@@ -48,6 +52,106 @@ model:
   # Conditioning options
   use_timestep_cond: true
   use_static_film: true
+  
+  # Advanced architectural features (controlled by ablation config)
+  use_cross_attention: ${ablation.use_cross_attention}
+  joint_static_generation: ${ablation.joint_static_generation}
+  use_learned_pos_emb: ${ablation.use_learned_pos_emb}
+  film_residual: ${ablation.film_residual}
+  use_multi_scale_fusion: ${ablation.use_multi_scale_fusion}
+  use_advanced_blocks: ${ablation.use_advanced_blocks}
+  ablation_mode: ${ablation.ablation_mode}
+
+# Ablation study configuration for publication
+# Each component can be enabled/disabled independently for systematic evaluation
+ablation:
+  # Cross-attention between static params and signal features
+  # Enables bidirectional information flow between static parameters and signal features
+  # Expected impact: Better integration of clinical parameters with signal generation
+  use_cross_attention: false
+  cross_attention_heads: 4
+  cross_attention_dropout: 0.1
+  
+  # Joint generation of static parameters
+  # Enables the model to reconstruct static parameters from signal features
+  # Expected impact: Better understanding of signal-parameter relationships
+  joint_static_generation: false
+  static_recon_weight: 0.1  # Loss weight for static parameter reconstruction
+  
+  # Enhanced positional encodings
+  # Replaces identity positioning with learnable positional embeddings
+  # Expected impact: Better temporal understanding and sequence modeling
+  use_learned_pos_emb: false
+  pos_emb_dropout: 0.1
+  
+  # Residual FiLM connections
+  # Adds residual connections in FiLM layers for improved gradient flow
+  # Expected impact: Better training stability and convergence
+  film_residual: false
+  
+  # Multi-scale feature fusion
+  # Applies multi-scale temporal processing for different feature scales
+  # Expected impact: Better capture of both local and global temporal patterns
+  use_multi_scale_fusion: false
+  fusion_scales: [1, 3, 5, 7]
+  
+  # Enhanced attention mechanisms
+  # Enables advanced transformer blocks with multi-scale attention and gated FFN
+  # Expected impact: Better expressivity and temporal pattern recognition
+  use_advanced_blocks: false
+  use_multi_scale_attention: false
+  use_gated_ffn: false
+  attention_dropout: 0.1
+  
+  # Ablation study presets
+  ablation_mode: "none"  # Options: none, minimal, cross_attn_only, film_residual_only, pos_emb_only, multi_scale_only, full
+
+# Multi-task learning configuration
+multi_task:
+  # Enable multi-task training (signal + peak + static reconstruction)
+  enabled: true
+  
+  # Loss weights for different tasks
+  loss_weights:
+    signal: 1.0
+    peak_classification: 0.5
+    static_reconstruction: 0.1
+  
+  # Task-specific learning rates
+  task_lr_multipliers:
+    signal: 1.0
+    peak_classification: 0.8
+    static_reconstruction: 1.2
+  
+  # Class weighting method for peak detection
+  class_weighting_method: 'inverse_freq'
+  
+  # Validation metric for best model selection
+  validation_metric: 'combined'
+  validation_weights:
+    signal: 0.7
+    peak_classification: 0.3
+  
+  # Progressive training configuration
+  progressive_weighting:
+    enabled: true
+    schedule_type: 'linear'  # Options: 'linear', 'cosine'
+    peak_classification:
+      start_epoch: 0
+      end_epoch: 20
+      start_weight: 0.0
+      end_weight: 0.5
+    static_reconstruction:
+      start_epoch: 10
+      end_epoch: 30
+      start_weight: 0.0
+      end_weight: 0.1
+  
+  # Advanced optimization features
+  advanced_optimization:
+    per_task_lr: true
+    gradient_clipping_per_task: true
+    ema_per_task: false  # Future extension
 
 # Diffusion configuration
 diffusion:
@@ -133,8 +237,20 @@ advanced:
   # Validation options
   val_sample_cfg_scales: [1.0, 1.5, 2.0]  # Different CFG scales for validation
 
-# Logging configuration
+# Multi-task logging configuration
 logging:
+  # Classification metrics logging
+  log_classification_metrics: true
+  log_confusion_matrix: true
+  log_pr_curves: true
+  
+  # Task-specific monitoring
+  log_gradient_norms_per_task: true
+  log_parameter_norms_per_task: true
+  
+  # Advanced visualizations
+  log_peak_logits_histograms: true
+  log_precision_recall_curves: true
   # TensorBoard scalars
   log_loss_components: true
   log_learning_rate: true
@@ -163,3 +279,279 @@ performance:
 reproducibility:
   deterministic: false  # Set to true for full reproducibility (slower)
   benchmark: true      # Use cudNN benchmarking for speed
+
+# Advanced Training Features Configuration
+# These features are disabled by default for backward compatibility
+
+# Curriculum Learning Configuration
+curriculum_learning:
+  enabled: false
+  difficulty_metric: 'combined'  # Options: 'snr', 'peak_complexity', 'hearing_loss', 'combined'
+  scheduler_type: 'linear'       # Options: 'linear', 'exponential', 'step'
+  start_difficulty: 0.3          # Start with easier 30% of samples
+  end_difficulty: 1.0            # End with all samples
+  curriculum_epochs: 50          # Epochs to complete curriculum
+  anti_curriculum: false         # Option for hard-to-easy training
+  update_frequency: 1            # Update curriculum every N epochs
+  difficulty_weights:            # Weights for combined difficulty metric
+    snr: 0.4
+    peaks: 0.4
+    hearing_loss: 0.2
+
+# Focal Loss Configuration
+focal_loss:
+  enabled: false                 # Use BCE by default
+  alpha: 0.25                    # Class weighting parameter
+  gamma: 2.0                     # Focusing parameter for hard examples
+  reduction: 'mean'              # Loss reduction method
+
+# Advanced Augmentation Configuration
+advanced_augmentation:
+  enabled: true                  # Enable advanced augmentations
+  mixup_prob: 0.2               # Probability of applying mixup
+  cutmix_prob: 0.2              # Probability of applying cutmix
+  time_stretch_prob: 0.1        # Probability of time stretching
+  amplitude_scaling_range: [0.8, 1.2]  # Amplitude scaling range
+  preserve_peaks: true          # Preserve peak structure during augmentation
+  curriculum_aware: true        # Easier augmentations early in training
+  augmentation_strength: 1.0    # Overall augmentation intensity multiplier
+  
+  # ABR-specific augmentations
+  abr_specific:
+    peak_jitter_std: 0.05       # Peak timing jitter (ms)
+    baseline_drift_std: 0.01    # Baseline drift standard deviation
+    electrode_noise_std: 0.005  # Electrode noise standard deviation
+    stimulus_artifact_prob: 0.1 # Probability of stimulus artifacts
+
+# Knowledge Distillation Configuration
+knowledge_distillation:
+  enabled: false                # Disabled by default
+  teacher_checkpoint: null      # Path to teacher model checkpoint
+  temperature: 4.0              # Distillation temperature
+  alpha: 0.7                    # Balance between student loss and distillation loss
+  feature_distillation: true    # Enable feature-level distillation
+  distillation_layers: ['transformer.4', 'transformer.5']  # Layers for feature matching
+  feature_weight: 0.1           # Weight for feature matching loss
+  
+  # Multi-task distillation
+  multi_task:
+    enabled: false
+    task_weights:
+      signal: 0.7
+      peak_classification: 0.3
+    cross_task_distillation: false
+
+# Ensemble Training Configuration
+ensemble_training:
+  enabled: false                # Disabled by default
+  snapshot_ensemble: true       # Collect snapshots during training
+  snapshot_epochs: [20, 40, 60, 80, 100]  # Epochs to collect snapshots
+  ensemble_size: 5              # Maximum number of models in ensemble
+  diversity_weight: 0.1         # Weight for diversity regularization
+  
+  # Ensemble strategies
+  weighting_strategy: 'performance'  # Options: 'equal', 'performance', 'diversity'
+  uncertainty_estimation: true  # Enable uncertainty quantification
+
+# Hyperparameter Optimization Configuration
+hyperparameter_optimization:
+  enabled: false                # Disabled by default
+  backend: 'optuna'             # Optimization backend
+  n_trials: 100                 # Number of optimization trials
+  timeout: 3600                 # Timeout per trial in seconds
+  pruning: true                 # Enable early pruning of unpromising trials
+  search_space: 'default'       # Predefined search space
+  
+  # Optuna-specific settings
+  optuna:
+    sampler: 'tpe'              # Options: 'tpe', 'random', 'cmaes'
+    pruner: 'median'            # Options: 'median', 'hyperband', 'none'
+    n_startup_trials: 10
+    n_warmup_steps: 5
+    
+  # Multi-objective optimization
+  multi_objective:
+    enabled: false
+    objectives: ['val_combined_score', 'training_time']
+    directions: ['maximize', 'minimize']
+
+# Cross-Validation Configuration
+cross_validation:
+  enabled: false                # Disabled by default
+  n_folds: 5                    # Number of CV folds
+  stratified: true              # Use stratified splitting
+  patient_level: true           # Ensure no patient overlap between folds
+  parallel_training: false      # Train folds in parallel
+  
+  # CV-specific settings
+  cv_type: 'stratified_patient' # Options: 'stratified_patient', 'time_series', 'standard'
+  min_samples_per_class: 1      # Minimum samples per class per fold
+  
+  # Result aggregation
+  aggregation_method: 'mean'    # Options: 'mean', 'weighted_mean'
+  confidence_intervals: true    # Compute confidence intervals
+  statistical_tests: true      # Perform statistical significance tests
+
+# Early Stopping Configuration (Enhanced)
+early_stopping:
+  enabled: true                 # Enable early stopping
+  type: 'basic'                 # Options: 'basic', 'multi_task', 'adaptive'
+  patience: 20                  # Number of epochs to wait
+  min_delta: 0.000001          # Minimum improvement threshold
+  metric: 'val_combined_score'  # Metric to monitor
+  mode: 'min'                   # Optimization direction ('min' or 'max')
+  restore_best_weights: true    # Restore best weights on early stop
+  warmup_epochs: 10             # Epochs before early stopping can trigger
+  
+  # Multi-task early stopping
+  multi_task:
+    task_configs:
+      signal:
+        patience: 15
+        min_delta: 0.0001
+        mode: 'min'
+      peak_classification:
+        patience: 25
+        min_delta: 0.001
+        mode: 'max'
+    combination_strategy: 'weighted_average'
+    task_weights:
+      signal: 0.7
+      peak_classification: 0.3
+      
+  # Adaptive early stopping
+  adaptive:
+    patience_factor: 1.5
+    lr_patience_multiplier: 2.0
+    plateau_threshold: 5
+
+# Comprehensive Monitoring Configuration
+monitoring:
+  enabled: true                 # Enable comprehensive monitoring
+  save_dir: 'monitoring'        # Directory to save monitoring data
+  
+  # Metric tracking
+  track_gradients: true         # Monitor gradient norms and flow
+  track_activations: false      # Monitor layer activations (expensive)
+  track_resources: true         # Monitor system resources
+  smoothing_window: 10          # Window for metric smoothing
+  
+  # Resource monitoring
+  resource_monitoring:
+    enabled: true
+    update_interval: 1.0        # Update interval in seconds
+    monitor_gpu: true           # Monitor GPU usage and memory
+    
+  # Model health monitoring
+  model_health:
+    enabled: true
+    dead_neuron_threshold: 1e-6 # Threshold for dead neuron detection
+    gradient_clip_threshold: 10.0  # Threshold for gradient clipping alerts
+    
+  # Alerting system
+  alerts:
+    enabled: true
+    alert_configs:
+      - metric_name: 'gradient_norm'
+        threshold: 10.0
+        condition: 'greater'
+        consecutive_violations: 3
+      - metric_name: 'memory_percent'
+        threshold: 90.0
+        condition: 'greater'
+        consecutive_violations: 2
+      - metric_name: 'val_loss'
+        threshold: 0.001
+        condition: 'less'
+        consecutive_violations: 5
+        
+  # Dashboard configuration
+  dashboard:
+    enabled: false              # Real-time dashboard (requires web framework)
+    port: 8080                  # Dashboard port
+    update_interval: 5.0        # Dashboard update interval
+
+# Advanced Loss Configuration
+advanced_loss:
+  # Combined loss for multi-task learning
+  combined_loss:
+    enabled: false
+    adaptive_weighting: true    # Automatic loss balancing
+    uncertainty_weighting: false  # Uncertainty-based weighting
+    
+  # Loss scheduling
+  loss_scheduling:
+    enabled: false
+    schedule_type: 'linear'     # Options: 'linear', 'cosine', 'step'
+    
+# Advanced Optimizer Configuration
+advanced_optimizer:
+  # Parameter groups with different learning rates
+  parameter_groups:
+    enabled: false
+    groups:
+      backbone:
+        lr_multiplier: 1.0
+        weight_decay_multiplier: 1.0
+      head:
+        lr_multiplier: 2.0
+        weight_decay_multiplier: 0.5
+        
+  # Advanced scheduling
+  lr_scheduling:
+    scheduler: 'cosine'         # Options: 'cosine', 'linear', 'step', 'plateau'
+    warmup_epochs: 5
+    cosine_restarts: false
+    eta_min: 1e-6
+    
+  # Gradient modifications
+  gradient_modifications:
+    gradient_centralization: false
+    gradient_standardization: false
+
+# Knowledge Distillation Configuration
+knowledge_distillation:
+  enabled: false                    # Enable knowledge distillation
+  
+  # Multi-task distillation settings
+  multi_task:
+    enabled: false
+    
+    # Task type definitions (REQUIRED when using multi-task distillation)
+    # Specify 'classification' or 'regression' for each task
+    task_types:
+      signal: 'regression'          # Signal generation is regression
+      peak_classification: 'classification'  # Peak detection is classification
+      
+    # Task-specific distillation configs
+    task_configs:
+      # Signal generation (regression) - will be automatically skipped
+      signal:
+        temperature: 4.0            # Temperature for softmax (ignored for regression)
+        alpha: 0.7                  # Distillation loss weight
+        loss_fn: 'mse'              # Loss function for task
+        feature_matching: false     # Feature-level distillation
+        
+      # Peak classification (classification) - will use distillation
+      peak_classification:
+        temperature: 4.0            # Temperature for softmax
+        alpha: 0.5                  # Distillation loss weight  
+        loss_fn: 'ce'               # Cross-entropy loss
+        feature_matching: true      # Feature-level distillation
+        feature_weight: 0.1         # Feature matching weight
+        
+    # Global settings
+    global_temperature: 4.0         # Default temperature
+    cross_task_distillation: false # Experimental cross-task knowledge transfer
+    
+  # Teacher model configuration
+  teacher:
+    model_path: ''                  # Path to teacher model checkpoint
+    freeze_teacher: true            # Freeze teacher during training
+    
+  # Example usage in code:
+  # distillation = MultiTaskDistillation(
+  #   task_configs=cfg['knowledge_distillation']['multi_task']['task_configs'],
+  #   task_types=cfg['knowledge_distillation']['multi_task']['task_types'],
+  #   global_temperature=cfg['knowledge_distillation']['multi_task']['global_temperature']
+  # )

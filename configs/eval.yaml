@@ -1,21 +1,20 @@
-# ABR Transformer Evaluation Configuration
-# Professional evaluation pipeline for trained ABR Transformer models
+# Evaluation configuration for ABR Transformer
+# This file configures the evaluation pipeline for both reconstruction and generation modes
 
-# Basic experiment settings
-seed: 1337
-device: "cuda"                 # "cuda" | "cpu"
-log_dir: "runs/abr_transformer"
-exp_name: "abr_eval"
+# Dataset configuration
+dataset:
+  data_path: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"  # Path to dataset
+  batch_size: 32
+  num_workers: 4
+  pin_memory: true
+  return_peak_labels: true  # Enable peak labels for classification evaluation
 
-# Data configuration (point to the SAME data your training used)
-data:
-  val_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
-  test_csv: ""                 # optional; if empty, evaluate on val
-  sequence_length: 200
-  static_order: ["Age", "Intensity", "Stimulus Rate", "FMP"]
-
-# Model architecture (must match training)
+# Model configuration
 model:
+  checkpoint_path: "checkpoints/enhanced/best.pth"
+  device: "cuda"  # or "cpu"
+  precision: "float32"  # or "float16"
+  # Model architecture parameters
   input_channels: 1
   static_dim: 4
   sequence_length: 200
@@ -27,104 +26,103 @@ model:
   use_timestep_cond: true
   use_static_film: true
 
-# Checkpoint configuration
-checkpoint:
-  path: "checkpoints/abr_transformer/abr_vpred_base_best.pt"
-  use_ema: true                # if true, swap in EMA weights before eval
-
-# Diffusion settings (must match training)
-diffusion:
-  num_train_steps: 1000        # must match training T
-  schedule: "cosine"
-  sample_steps: 60             # DDIM steps for generation
-  ddim_eta: 0.0                # deterministic sampling
-
-# Evaluation modes
-modes:
-  reconstruction: true         # q-sample x_t and denoise -> x0_hat
-  generation: true             # sample from noise conditioned on stat -> x_gen
-
-# Data loading
-loader:
-  batch_size: 128         # Smaller batch for evaluation
-  num_workers: 8
-  pin_memory: true
+# Evaluation configuration
+evaluation:
+  mode: "generation"  # "reconstruction" or "generation"
+  num_samples: 1000  # Number of samples to evaluate
+  seed: 42  # Random seed for reproducibility
+  
+  # Generation-specific settings
+  generation:
+    num_steps: 1000  # Number of diffusion steps
+    guidance_scale: 1.0  # Classifier-free guidance scale
+    temperature: 1.0  # Sampling temperature
+    ddim_eta: 0.0  # DDIM eta parameter
+  
+  # Advanced evaluation settings
+  advanced:
+    reconstruction:
+      timestep_strategy: "uniform"  # "fixed", "uniform", "random_subset"
+      fixed_timestep: 500  # Used when timestep_strategy is "fixed"
+    generation:
+      cfg_scale: 1.0  # Classifier-free guidance scale
+    max_samples: null  # Limit evaluation to specific number of samples
 
 # Metrics configuration
 metrics:
-  use_stft: true
-  stft:
-    n_fft: 64
-    hop_length: 16
-    win_length: 64
-  use_dtw: true                # O(T^2), fine for T=200
-  use_corr: true
-  use_snr: true
+  # Signal quality metrics
+  signal:
+    mse: true
+    correlation: true
+    snr: true
+    psnr: true
+    ssim: true
+    stft_loss: true
   
-  # Peak metrics (auto-enabled if dataset has peak columns)
-  peaks:
-    enable_if_available: true
-    find_peaks:
-      height_sigma: 1.0        # threshold relative to signal std (normalized units)
-      min_distance: 6          # min samples between peaks
-    latency_windows:           # sample indices to search around classical latencies
-      I:   [20, 50]            # Wave I latency window (adjust for T=200 mapping)
-      III: [70, 110]           # Wave III latency window
-      V:   [130, 170]          # Wave V latency window
+  # Peak classification metrics
+  peak_classification:
+    enabled: true  # Enable 5th peak classification evaluation
+    threshold: 0.5  # Binary classification threshold (post-sigmoid)
+    bootstrap_ci: 1000  # Number of bootstrap resamples for confidence intervals
+    significance_tests: true  # Enable statistical significance testing
+    clinical_validation: true  # Enable clinical validation metrics
+  
+  # Statistical analysis configuration
+  statistical_analysis:
+    confidence_level: 0.95  # Confidence interval level
+    bootstrap_method: 'percentile'  # Options: 'percentile', 'bca', 'basic'
+    multiple_testing_correction: 'bonferroni'  # Multiple comparison correction
+    effect_size_metrics: ['cohens_d', 'cliff_delta']  # Effect size calculations
+  
+  # Clinical validation metrics
+  clinical_metrics:
+    sensitivity_analysis: true  # ROC analysis and optimal threshold finding
+    specificity_targets: [0.8, 0.9, 0.95]  # Sensitivity at specific specificity levels
+    prevalence_adjustment: true  # Adjust metrics based on dataset prevalence
+    diagnostic_odds_ratio: true  # Clinical diagnostic metrics
+  
+  # Comparative analysis (disabled by default)
+  comparative_analysis:
+    enabled: false  # Enable when comparing multiple runs
+    baseline_run: null  # Specify baseline comparison
+    comparison_metrics: ['accuracy', 'f1', 'auroc', 'sensitivity', 'specificity']
+    statistical_tests: ['paired_t_test', 'wilcoxon', 'mcnemar']  # For comparing paired samples
+
+# Output configuration
+output:
+  save_dir: "evaluation_results"
+  save_format: "json"  # "json" or "pickle"
+  save_samples: false  # Save individual sample results
+  save_plots: true  # Save evaluation plots
 
 # Reporting configuration
 report:
-  out_dir: "results/abr_eval"
-  save_csv: true
-  csv_prefix: "eval"
-  save_topk_examples: 12       # save & log best/worst by MSE
-  tensorboard:
-    write_scalars: true
-    write_figures: true
-    write_audio: false
-    audio_sample_rate: 20000   # 20kHz for ABR (if audio enabled)
+  save_classification_metrics: true  # Save detailed classification results
+  save_roc_curves: true  # Save ROC curve data and plots
+  save_pr_curves: true  # Save PR curve data and plots
+  save_confusion_matrices: true  # Save confusion matrix visualizations
+  publication_ready: true  # Generate high-quality publication figures
+  include_confidence_intervals: true  # Include confidence intervals in reports
+  statistical_annotations: true  # Add statistical significance annotations
+  save_topk_examples: 10  # Number of best/worst examples to save
+  save_spectrograms: false  # Enable spectrogram generation
 
-# Advanced evaluation options
-advanced:
-  # Multiple seeds for robustness (start with 1)
-  num_seeds: 1
-  
-  # Reconstruction timestep sampling
-  reconstruction:
-    timestep_strategy: "uniform"  # "uniform" | "fixed" | "random_subset"
-    fixed_timestep: 500          # if strategy="fixed"
-    
-  # Generation options
-  generation:
-    cfg_scale: 1.0              # classifier-free guidance scale
-    
-  # Subset evaluation (for quick testing)
-  max_samples: null             # null = evaluate all, or set int limit
+# Visualization configuration
+visualization:
+  spectrogram_params: {}  # Parameters for spectrogram generation
+  scatter_plots: true  # Enable scatter plot generation
+  metrics_correlation: true  # Enable metrics correlation plots
 
-# Visualization
-viz:
-  # Waveform plots
-  waveform_plots: true
-  denormalize_for_plots: true   # use physical units (µV)
-  
-  # Spectrogram plots
-  spectrogram_plots: true
-  spectrogram_params:
-    n_fft: 64
-    hop_length: 16
-    win_length: 64
-    
-  # Error analysis plots
-  error_plots: true
-  scatter_plots: true
-  
-  # Figure formatting
-  figsize: [12, 8]
-  dpi: 100
-  max_plots_per_figure: 8
+# TensorBoard logging
+tensorboard:
+  enabled: true
+  log_dir: "logs/evaluation"
+  log_metrics: true
+  log_plots: true
+  log_samples: false
 
-# Logging configuration
-logging:
-  console_level: "INFO"
-  save_config: true            # save eval config with results
-  save_model_summary: true     # save model architecture info
+# Performance configuration
+performance:
+  use_amp: false  # Use automatic mixed precision
+  benchmark: false  # Benchmark model performance
+  profile: false  # Profile model execution

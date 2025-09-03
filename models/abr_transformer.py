@@ -19,8 +19,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .blocks.transformer_block import MultiLayerTransformerBlock
-from .blocks.film import ConditionalEmbedding
+from .blocks.transformer_block import MultiLayerTransformerBlock, MultiHeadAttention, CrossAttentionTransformerBlock
+from .blocks.film import ConditionalEmbedding, TokenFiLM
+from .blocks.heads import AttentionPooling
+from .blocks.positional import LearnedPositionalEmbedding
+from .blocks.heads import MultiScaleFeatureExtractor
 
 
 class MultiScaleStem(nn.Module):
@@ -45,84 +48,7 @@ class MultiScaleStem(nn.Module):
         return self.fuse(h)
 
 
-class TokenFiLM(nn.Module):
-    """
-    FiLM conditioning for token embeddings [B, T, D].
-    Produces per-feature (D) gamma/beta from static params [B, S] and
-    broadcasts over T.
-    """
-    def __init__(
-        self, 
-        static_dim: int, 
-        d_model: int, 
-        hidden: int = 256, 
-        dropout: float = 0.1,
-        init_gamma: float = 0.0, 
-        init_beta: float = 0.0
-    ):
-        super().__init__()
-        self.static_dim = static_dim
-        self.d_model = d_model
-        
-        if static_dim > 0:
-            self.embed = nn.Sequential(
-                nn.Linear(static_dim, hidden),
-                nn.GELU(),
-                nn.LayerNorm(hidden),
-                nn.Dropout(dropout),
-                nn.Linear(hidden, hidden),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(hidden, 2 * d_model)  # gamma and beta
-            )
-        else:
-            self.embed = None
-            
-        self.layer_norm = nn.LayerNorm(d_model)
-        self.init_gamma = init_gamma
-        self.init_beta = init_beta
-        
-        self._init_weights()
-    
-    def _init_weights(self):
-        """Initialize weights for stable training."""
-        if self.embed is not None:
-            # Initialize the final layer specially
-            with torch.no_grad():
-                # Initialize gamma to init_gamma and beta to init_beta
-                final_layer = self.embed[-1]
-                nn.init.zeros_(final_layer.weight)
-                if final_layer.bias is not None:
-                    final_layer.bias[:self.d_model].fill_(self.init_gamma)  # gamma
-                    final_layer.bias[self.d_model:].fill_(self.init_beta)   # beta
 
-    def forward(self, x: torch.Tensor, static_params: Optional[torch.Tensor]) -> torch.Tensor:
-        """
-        Apply FiLM conditioning to token embeddings.
-        
-        Args:
-            x: Token embeddings [B, T, D]
-            static_params: Static parameters [B, S] or None
-            
-        Returns:
-            Modulated embeddings [B, T, D]
-        """
-        if static_params is None or self.embed is None:
-            return x
-        
-        B, T, D = x.shape
-        
-        # Generate gamma and beta from static params
-        gam_beta = self.embed(static_params)  # [B, 2D]
-        gamma, beta = gam_beta.chunk(2, dim=-1)  # [B, D], [B, D]
-        
-        # Apply layer norm first
-        x = self.layer_norm(x)
-        
-        # Apply FiLM: x * (1 + gamma) + beta
-        x = x * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
-        
-        return x
 
 
 class TimestepAdapter(nn.Module):
@@ -198,22 +124,62 @@ class ABRTransformerGenerator(nn.Module):
         dropout: float = 0.10,
         use_timestep_cond: bool = True,
         use_static_film: bool = True,
+        use_cross_attention: bool = False,
+        use_learned_pos_emb: bool = False,
+        film_residual: bool = False,
+        use_multi_scale_fusion: bool = False,
+        joint_static_generation: bool = False,
+        ablation_mode: str = 'none',
+        use_advanced_blocks: bool = False,
+        use_multi_scale_attention: bool = False,
+        use_gated_ffn: bool = False,
+        attention_dropout: float = 0.1,
+        cross_attention_heads: int = 4,
+        cross_attention_dropout: float = 0.1,
+        num_static_tokens: int = 1,
     ):
         super().__init__()
         self.sequence_length = sequence_length
         self.static_dim = static_dim
         self.use_timestep_cond = use_timestep_cond
         self.use_static_film = use_static_film
+        self.ablation_mode = ablation_mode
+        
+        # Apply ablation configuration to compute effective flags
+        effective_flags = self._compute_effective_flags(
+            use_cross_attention, use_learned_pos_emb, film_residual,
+            use_multi_scale_fusion, joint_static_generation,
+            use_advanced_blocks, use_multi_scale_attention, use_gated_ffn
+        )
+        
+        # Store effective flags
+        self.use_cross_attention = effective_flags['use_cross_attention']
+        self.use_learned_pos_emb = effective_flags['use_learned_pos_emb']
+        self.film_residual = effective_flags['film_residual']
+        self.use_multi_scale_fusion = effective_flags['use_multi_scale_fusion']
+        self.joint_static_generation = effective_flags['joint_static_generation']
+        self.use_advanced_blocks = effective_flags['use_advanced_blocks']
+        self.use_multi_scale_attention = effective_flags['use_multi_scale_attention']
+        self.use_gated_ffn = effective_flags['use_gated_ffn']
+        self.attention_dropout = attention_dropout
+        self.cross_attention_heads = cross_attention_heads
+        self.cross_attention_dropout = cross_attention_dropout
+        self.num_static_tokens = num_static_tokens
 
         # Multi-scale stem: [B, 1, T] -> [B, D, T]
         self.stem = MultiScaleStem(d_model)
 
-        # Token space & positions (using relative attention only)
-        self.pos = nn.Identity()
+        # Token space & positions (conditional positional encoding)
+        if self.use_learned_pos_emb:
+            # Use max(sequence_length, 2048) to prevent index overflow
+            pos_emb_max_len = max(sequence_length, 2048)
+            self.pos = LearnedPositionalEmbedding(d_model, max_len=pos_emb_max_len, dropout=dropout)
+        else:
+            self.pos = nn.Identity()
 
         # Optional conditioning adapters
         if use_static_film and static_dim > 0:
-            self.static_film_pre = TokenFiLM(static_dim, d_model, hidden=256, dropout=dropout)
+            self.static_film_pre = TokenFiLM(static_dim, d_model, hidden=256, dropout=dropout, use_residual=self.film_residual)
         else:
             self.static_film_pre = None
             
@@ -233,18 +199,62 @@ class ABRTransformerGenerator(nn.Module):
             pre_norm=True,
             use_relative_position=True,
             use_conv_module=True,
-            conv_kernel_size=7
+            conv_kernel_size=7,
+            use_advanced_blocks=self.use_advanced_blocks,
+            use_multi_scale_attention=self.use_multi_scale_attention,
+            use_gated_ffn=self.use_gated_ffn,
+            attention_dropout=self.attention_dropout
         )
 
         # Optional post-FiLM
         if use_static_film and static_dim > 0:
-            self.static_film_post = TokenFiLM(static_dim, d_model, hidden=256, dropout=dropout)
+            self.static_film_post = TokenFiLM(static_dim, d_model, hidden=256, dropout=dropout, use_residual=self.film_residual)
         else:
             self.static_film_post = None
+
+        # Cross-attention mechanism between static params and signal features
+        if self.use_cross_attention and static_dim > 0:
+            self.static_encoder = nn.Linear(static_dim, d_model)
+            self.cross_attention = CrossAttentionTransformerBlock(
+                d_model=d_model,
+                n_heads=n_heads,
+                dropout=dropout,
+                static_attention_heads=self.cross_attention_heads,
+                static_attention_dropout=self.cross_attention_dropout
+            )
+            # Learnable static tokens for cross-attention: provide additional context
+            # beyond encoded static parameters. These tokens can learn to represent
+            # global patterns or additional conditioning information.
+            self.static_tokens = nn.Parameter(torch.randn(1, self.num_static_tokens, d_model))
+            # Add normalization and dropout for cross-attention stability
+            self.cross_attn_norm = nn.LayerNorm(d_model)
+            self.cross_attn_dropout = nn.Dropout(dropout)
+        else:
+            self.static_encoder = None
+            self.cross_attention = None
+            self.static_tokens = None
+            self.cross_attn_norm = None
+            self.cross_attn_dropout = None
 
         # Output: per-timestep linear projection -> 1 channel
         self.out_norm = nn.LayerNorm(d_model)
         self.out_proj = nn.Linear(d_model, 1)
+
+        # Peak classification components
+        self.attn_pool = AttentionPooling(d_model, attention_dim=max(1, d_model // 2), dropout=dropout)
+        self.peak5_head = nn.Linear(d_model, 1)
+
+        # Multi-scale feature fusion
+        if self.use_multi_scale_fusion:
+            self.multi_scale_fusion = MultiScaleFeatureExtractor(d_model)
+        else:
+            self.multi_scale_fusion = None
+
+        # Joint static parameter generation
+        if self.joint_static_generation and static_dim > 0:
+            self.static_recon_head = nn.Linear(d_model, static_dim)
+        else:
+            self.static_recon_head = None
 
         self.reset_parameters()
 
@@ -261,11 +271,113 @@ class ABRTransformerGenerator(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
+    def _compute_effective_flags(self, use_cross_attention, use_learned_pos_emb, film_residual, use_multi_scale_fusion, joint_static_generation, use_advanced_blocks, use_multi_scale_attention, use_gated_ffn):
+        """Compute effective flags based on ablation mode."""
+        if self.ablation_mode == 'minimal':
+            return {
+                'use_cross_attention': False,
+                'use_learned_pos_emb': False,
+                'film_residual': False,
+                'use_multi_scale_fusion': False,
+                'joint_static_generation': False,
+                'use_advanced_blocks': False,
+                'use_multi_scale_attention': False,
+                'use_gated_ffn': False
+            }
+        elif self.ablation_mode == 'cross_attn_only':
+            return {
+                'use_cross_attention': True,
+                'use_learned_pos_emb': False,
+                'film_residual': False,
+                'use_multi_scale_fusion': False,
+                'joint_static_generation': False,
+                'use_advanced_blocks': False,
+                'use_multi_scale_attention': False,
+                'use_gated_ffn': False
+            }
+        elif self.ablation_mode == 'film_residual_only':
+            return {
+                'use_cross_attention': False,
+                'use_learned_pos_emb': False,
+                'film_residual': True,
+                'use_multi_scale_fusion': False,
+                'joint_static_generation': False,
+                'use_advanced_blocks': False,
+                'use_multi_scale_attention': False,
+                'use_gated_ffn': False
+            }
+        elif self.ablation_mode == 'pos_emb_only':
+            return {
+                'use_cross_attention': False,
+                'use_learned_pos_emb': True,
+                'film_residual': False,
+                'use_multi_scale_fusion': False,
+                'joint_static_generation': False,
+                'use_advanced_blocks': False,
+                'use_multi_scale_attention': False,
+                'use_gated_ffn': False
+            }
+        elif self.ablation_mode == 'multi_scale_only':
+            return {
+                'use_cross_attention': False,
+                'use_learned_pos_emb': False,
+                'film_residual': False,
+                'use_multi_scale_fusion': True,
+                'joint_static_generation': False,
+                'use_advanced_blocks': False,
+                'use_multi_scale_attention': False,
+                'use_gated_ffn': False
+            }
+        elif self.ablation_mode == 'joint_gen_only':
+            return {
+                'use_cross_attention': False,
+                'use_learned_pos_emb': False,
+                'film_residual': False,
+                'use_multi_scale_fusion': False,
+                'joint_static_generation': True,
+                'use_advanced_blocks': False,
+                'use_multi_scale_attention': False,
+                'use_gated_ffn': False
+            }
+        elif self.ablation_mode == 'full':
+            return {
+                'use_cross_attention': True,
+                'use_learned_pos_emb': True,
+                'film_residual': True,
+                'use_multi_scale_fusion': True,
+                'joint_static_generation': True,
+                'use_advanced_blocks': True,
+                'use_multi_scale_attention': True,
+                'use_gated_ffn': True
+            }
+        else:
+            # Use provided arguments when ablation_mode is 'none'
+            return {
+                'use_cross_attention': use_cross_attention,
+                'use_learned_pos_emb': use_learned_pos_emb,
+                'film_residual': film_residual,
+                'use_multi_scale_fusion': use_multi_scale_fusion,
+                'joint_static_generation': joint_static_generation,
+                'use_advanced_blocks': use_advanced_blocks,
+                'use_multi_scale_attention': use_multi_scale_attention,
+                'use_gated_ffn': use_gated_ffn
+            }
+
+    def _apply_ablation_config(self):
+        """Apply ablation study configuration to modify architecture.
+        
+        Note: This method is now a no-op since ablation configuration
+        is handled during __init__ via _compute_effective_flags.
+        Kept for backward compatibility.
+        """
+        pass
+
     def forward(
         self,
         x: torch.Tensor,                     # [B, 1, T]
         static_params: Optional[torch.Tensor] = None,  # [B, S]
         timesteps: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
         return_dict: bool = True
     ) -> Union[Dict[str, torch.Tensor], torch.Tensor]:
         """
@@ -278,7 +390,12 @@ class ABRTransformerGenerator(nn.Module):
             return_dict: Whether to return dict or tensor
             
         Returns:
-            Dictionary containing {"signal": [B, 1, T]} or tensor [B, 1, T]
+            Dictionary containing:
+            - "signal": [B, 1, T] - Generated ABR signal
+            - "peak_5th_exists": [B] - Binary classification logits for 5th peak detection
+            - "static_recon": [B, S] - Static parameter reconstruction (when joint_static_generation=True)
+            
+            Or tensor [B, 1, T] if return_dict=False
         """
         assert x.dim() == 3 and x.size(1) == 1, f"x must be [B, 1, T], got {x.shape}"
         B, _, T = x.shape
@@ -301,18 +418,43 @@ class ABRTransformerGenerator(nn.Module):
             h = self.t_adapter(h, timesteps)
 
         # Transformer stack
-        h = self.transformer(h)              # [B, T, D]
+        h = self.transformer(h, mask=attn_mask)              # [B, T, D]
 
         if self.static_film_post is not None:
             h = self.static_film_post(h, static_params)
 
+        # Cross-attention between static params and signal features
+        if self.use_cross_attention and self.cross_attention is not None and static_params is not None:
+            static_encoded = self.static_encoder(static_params).unsqueeze(1)  # [B, 1, D]
+            # Concatenate static tokens to K/V for richer cross-attention
+            # static_encoded: [B, 1, D], static_tokens: [B, num_static_tokens, D]
+            kv = torch.cat([static_encoded, self.static_tokens.expand(B, -1, -1)], dim=1)  # [B, 1+num_static_tokens, D]
+            # Apply normalization and dropout for stability
+            h_norm = self.cross_attn_norm(h)
+            # Use CrossAttentionTransformerBlock interface: (decoder_input, encoder_output)
+            cross_attn_output, _, _ = self.cross_attention(h_norm, kv)
+            h = h + self.cross_attn_dropout(cross_attn_output)
+
+        # Multi-scale feature fusion
+        if self.use_multi_scale_fusion and self.multi_scale_fusion is not None:
+            h = self.multi_scale_fusion(h.transpose(1, 2)).transpose(1, 2)
+
         # Project back to signal
-        h = self.out_norm(h)
-        y = self.out_proj(h)                 # [B, T, 1]
+        h_norm = self.out_norm(h)
+        y = self.out_proj(h_norm)                 # [B, T, 1]
         y = y.transpose(1, 2).contiguous()   # [B, 1, T]
 
         if return_dict:
-            return {"signal": y}
+            # Compute peak classification only when needed
+            pooled_features = self.attn_pool(h_norm, mask=None)  # Keep API compatible for now
+            peak_logits = self.peak5_head(pooled_features).squeeze(-1)
+            
+            # Joint static parameter generation
+            if self.joint_static_generation and self.static_recon_head is not None:
+                static_recon = self.static_recon_head(pooled_features)
+                return {"signal": y, "peak_5th_exists": peak_logits, "static_recon": static_recon}
+            else:
+                return {"signal": y, "peak_5th_exists": peak_logits}
         return y
 
 
@@ -325,6 +467,13 @@ def create_abr_transformer(
     n_heads: int = 8,
     ff_mult: int = 4,
     dropout: float = 0.1,
+    use_advanced_blocks: bool = False,
+    use_multi_scale_attention: bool = False,
+    use_gated_ffn: bool = False,
+    attention_dropout: float = 0.1,
+    cross_attention_heads: int = 4,
+    cross_attention_dropout: float = 0.1,
+    num_static_tokens: int = 1,
     **kwargs
 ) -> ABRTransformerGenerator:
     """
@@ -338,10 +487,18 @@ def create_abr_transformer(
         n_heads: Number of attention heads
         ff_mult: Feed-forward dimension multiplier
         dropout: Dropout rate
-        **kwargs: Additional arguments
+        **kwargs: Additional arguments for advanced features
         
     Returns:
-        ABRTransformerGenerator instance
+        ABRTransformerGenerator instance with enhanced architecture:
+        - Signal generation head for ABR signal reconstruction
+        - Peak classification head for 5th peak detection
+        - Optional cross-attention mechanism for static parameter integration
+        - Optional joint static parameter generation
+        - Optional learnable positional embeddings
+        - Optional residual FiLM connections
+        - Optional multi-scale feature fusion
+        - Comprehensive ablation study support
     """
     return ABRTransformerGenerator(
         input_channels=1,
@@ -354,5 +511,12 @@ def create_abr_transformer(
         dropout=dropout,
         use_timestep_cond=True,
         use_static_film=True,
+        use_advanced_blocks=use_advanced_blocks,
+        use_multi_scale_attention=use_multi_scale_attention,
+        use_gated_ffn=use_gated_ffn,
+        attention_dropout=attention_dropout,
+        cross_attention_heads=cross_attention_heads,
+        cross_attention_dropout=cross_attention_dropout,
+        num_static_tokens=num_static_tokens,
         **kwargs
     )

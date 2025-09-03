@@ -11,7 +11,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, Union, List
 from einops import rearrange
 
 
@@ -59,7 +59,8 @@ class MultiHeadAttention(nn.Module):
         dropout: float = 0.1,
         bias: bool = True,
         temperature: float = 1.0,
-        is_cross_attention: bool = False
+        is_cross_attention: bool = False,
+        return_attention_weights: bool = True
     ):
         super().__init__()
         assert d_model % n_heads == 0, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"
@@ -69,6 +70,7 @@ class MultiHeadAttention(nn.Module):
         self.d_head = d_model // n_heads
         self.temperature = temperature
         self.is_cross_attention = is_cross_attention
+        self.return_attention_weights = return_attention_weights
         
         # Linear projections for Q, K, V
         self.q_proj = nn.Linear(d_model, d_model, bias=bias)
@@ -96,7 +98,7 @@ class MultiHeadAttention(nn.Module):
         value: Optional[torch.Tensor] = None, 
         mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
         Forward pass through multi-head attention.
         
@@ -108,7 +110,8 @@ class MultiHeadAttention(nn.Module):
             key_padding_mask: Key padding mask [batch, seq_len_k]
             
         Returns:
-            Tuple of (output, attention_weights)
+            If return_attention_weights=True: Tuple of (output, attention_weights)
+            If return_attention_weights=False: output tensor only
         """
         # Handle self-attention vs cross-attention
         if key is None:
@@ -133,7 +136,10 @@ class MultiHeadAttention(nn.Module):
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len_q, d_model)
         output = self.out_proj(output)
         
-        return output, attn_weights
+        if self.return_attention_weights:
+            return output, attn_weights
+        else:
+            return output
     
     def _scaled_dot_product_attention(
         self,
@@ -340,7 +346,7 @@ class TransformerBlock(nn.Module):
             # Pre-layer normalization
             # Self-attention sublayer
             x_norm = self.norm1(x)
-            attn_output, _ = self.self_attention(x_norm, mask, key_padding_mask)
+            attn_output, _ = self.self_attention(x_norm, mask=mask, key_padding_mask=key_padding_mask)
             x = x + self.dropout1(attn_output)
             
             # Optional conv module
@@ -354,7 +360,7 @@ class TransformerBlock(nn.Module):
         else:
             # Post-layer normalization
             # Self-attention sublayer
-            attn_output, _ = self.self_attention(x, mask, key_padding_mask)
+            attn_output, _ = self.self_attention(x, mask=mask, key_padding_mask=key_padding_mask)
             x = self.norm1(x + self.dropout1(attn_output))
             
             # Optional conv module
@@ -613,6 +619,11 @@ class MultiLayerTransformerBlock(nn.Module):
     
     Provides deeper processing with multiple stacked Transformer layers,
     improved attention patterns, and better normalization.
+    
+    Supports advanced transformer blocks with:
+    - Multi-scale attention for different temporal patterns
+    - Gated feed-forward networks for better expressivity
+    - Enhanced attention dropout for regularization
     """
     
     def __init__(
@@ -627,7 +638,11 @@ class MultiLayerTransformerBlock(nn.Module):
         use_relative_position: bool = True,
         max_relative_position: int = 32,
         use_conv_module: bool = False,
-        conv_kernel_size: int = 7
+        conv_kernel_size: int = 7,
+        use_advanced_blocks: bool = False,
+        use_multi_scale_attention: bool = False,
+        use_gated_ffn: bool = False,
+        attention_dropout: float = 0.1
     ):
         super().__init__()
         
@@ -636,19 +651,38 @@ class MultiLayerTransformerBlock(nn.Module):
         self.pre_norm = pre_norm
         
         # Stack of transformer layers
-        self.layers = nn.ModuleList([
-            TransformerBlock(
-                d_model=d_model,
-                n_heads=n_heads,
-                d_ff=d_ff,
-                dropout=dropout,
-                activation=activation,
-                pre_norm=pre_norm,
-                use_conv_module=use_conv_module,
-                conv_kernel_size=conv_kernel_size
-            )
-            for _ in range(num_layers)
-        ])
+        if use_advanced_blocks:
+            self.layers = nn.ModuleList([
+                AdvancedTransformerBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    d_ff=d_ff,
+                    dropout=dropout,
+                    activation=activation,
+                    use_pre_norm=pre_norm,
+                    use_relative_position=use_relative_position,
+                    use_conv_module=use_conv_module,
+                    conv_kernel_size=conv_kernel_size,
+                    use_multi_scale_attention=use_multi_scale_attention,
+                    use_gated_ffn=use_gated_ffn,
+                    attention_dropout=attention_dropout
+                )
+                for _ in range(num_layers)
+            ])
+        else:
+            self.layers = nn.ModuleList([
+                TransformerBlock(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    d_ff=d_ff,
+                    dropout=dropout,
+                    activation=activation,
+                    pre_norm=pre_norm,
+                    use_conv_module=use_conv_module,
+                    conv_kernel_size=conv_kernel_size
+                )
+                for _ in range(num_layers)
+            ])
         
         # Relative positional encoding
         if use_relative_position:
@@ -1044,7 +1078,9 @@ class CrossAttentionTransformerBlock(nn.Module):
         dropout: float = 0.1,
         activation: str = 'gelu',
         use_pre_norm: bool = True,
-        use_relative_position: bool = False
+        use_relative_position: bool = False,
+        static_attention_heads: int = 4,
+        static_attention_dropout: float = 0.1
     ):
         super().__init__()
         
@@ -1068,6 +1104,14 @@ class CrossAttentionTransformerBlock(nn.Module):
             d_model=d_model,
             n_heads=n_heads,
             dropout=dropout,
+            is_cross_attention=True
+        )
+        
+        # Static parameter attention with dedicated heads
+        self.static_attention = MultiHeadAttention(
+            d_model=d_model,
+            n_heads=static_attention_heads,
+            dropout=static_attention_dropout,
             is_cross_attention=True
         )
         
@@ -1539,4 +1583,189 @@ class RelativePositionEncoding(nn.Module):
         # Get relative position embeddings
         relative_encodings = self.relative_positions[relative_indices]  # [seq_len, seq_len, d_head]
         
-        return relative_encodings 
+        return relative_encodings
+
+
+class AdvancedTransformerBlock(nn.Module):
+    """
+    Advanced transformer block with enhanced attention mechanisms.
+    
+    Extends the current TransformerBlock with:
+    - Multi-scale attention for different temporal patterns
+    - Gated feed-forward networks for better expressivity
+    - Enhanced attention dropout for regularization
+    """
+    
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int = 8,
+        d_ff: Optional[int] = None,
+        dropout: float = 0.1,
+        activation: str = 'gelu',
+        use_pre_norm: bool = True,
+        use_relative_position: bool = False,
+        use_conv_module: bool = True,
+        conv_kernel_size: int = 7,
+        use_multi_scale_attention: bool = False,
+        use_gated_ffn: bool = False,
+        attention_dropout: float = 0.1
+    ):
+        super().__init__()
+        
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.use_pre_norm = use_pre_norm
+        self.use_multi_scale_attention = use_multi_scale_attention
+        self.use_gated_ffn = use_gated_ffn
+        
+        if d_ff is None:
+            d_ff = 4 * d_model
+        
+        # Multi-scale attention mechanism
+        if use_multi_scale_attention:
+            self.attention = MultiScaleAttention(
+                d_model=d_model,
+                n_heads=n_heads,
+                dropout=attention_dropout,
+                scales=[1, 3, 5]  # Different temporal scales
+            )
+        else:
+            self.attention = MultiHeadAttention(
+                d_model=d_model,
+                n_heads=n_heads,
+                dropout=attention_dropout
+            )
+        
+        # Enhanced feed-forward network
+        if use_gated_ffn:
+            self.feed_forward = GatedFeedForward(
+                d_model=d_model,
+                d_ff=d_ff,
+                dropout=dropout,
+                activation=activation
+            )
+        else:
+            self.feed_forward = PositionwiseFeedForward(
+                d_model=d_model,
+                d_ff=d_ff,
+                dropout=dropout,
+                activation=activation
+            )
+        
+        # Conv module for locality
+        if use_conv_module:
+            self.conv_module = ConvModule(d_model, conv_kernel_size, dropout)
+        else:
+            self.conv_module = None
+        
+        # Layer normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        if use_conv_module:
+            self.norm3 = nn.LayerNorm(d_model)
+        
+        # Dropout
+        self.dropout = nn.Dropout(dropout)
+        
+        # Relative position encoding
+        if use_relative_position:
+            self.relative_position = RelativePositionEncoding(d_model, n_heads)
+        else:
+            self.relative_position = None
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Forward pass through advanced transformer block.
+        
+        Args:
+            x: Input tensor [batch, seq_len, d_model]
+            mask: Attention mask
+            
+        Returns:
+            Output tensor [batch, seq_len, d_model]
+        """
+        # Self-attention
+        if self.use_pre_norm:
+            normed_input = self.norm1(x)
+            if self.use_multi_scale_attention:
+                attn_output = self.attention(normed_input, mask=mask)
+            else:
+                attn_output, _ = self.attention(normed_input, mask=mask)
+            x = x + self.dropout(attn_output)
+        else:
+            if self.use_multi_scale_attention:
+                attn_output = self.attention(x, mask=mask)
+            else:
+                attn_output, _ = self.attention(x, mask=mask)
+            x = self.norm1(x + self.dropout(attn_output))
+        
+        # Conv module (if enabled)
+        if self.conv_module is not None:
+            if self.use_pre_norm:
+                normed_input = self.norm3(x)
+                conv_output = self.conv_module(normed_input)
+                x = x + conv_output
+            else:
+                conv_output = self.conv_module(x)
+                x = self.norm3(x + conv_output)
+        
+        # Feed-forward network
+        if self.use_pre_norm:
+            normed_input = self.norm2(x)
+            ff_output = self.feed_forward(normed_input)
+            x = x + self.dropout(ff_output)
+        else:
+            ff_output = self.feed_forward(x)
+            x = self.norm2(x + self.dropout(ff_output))
+        
+        return x
+
+
+def create_enhanced_attention_mask(
+    seq_len: int,
+    causal: bool = False,
+    local_window: Optional[int] = None,
+    cross_attention: bool = False
+) -> torch.Tensor:
+    """
+    Create enhanced attention masks for different attention patterns.
+    
+    Args:
+        seq_len: Sequence length
+        causal: Whether to use causal masking for autoregressive generation
+        local_window: Local attention window size for computational efficiency
+        cross_attention: Whether this is for cross-attention
+        
+    Returns:
+        Attention mask tensor
+    """
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
+    if causal:
+        # Causal mask for autoregressive generation
+        mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
+        mask = mask.masked_fill(mask == 1, float('-inf'))
+        return mask
+    
+    elif local_window is not None:
+        # Local attention window
+        mask = torch.ones(seq_len, seq_len, device=device)
+        for i in range(seq_len):
+            start = max(0, i - local_window // 2)
+            end = min(seq_len, i + local_window // 2 + 1)
+            mask[i, :start] = float('-inf')
+            mask[i, end:] = float('-inf')
+        return mask
+    
+    elif cross_attention:
+        # Cross-attention mask (allows full attention)
+        return torch.zeros(seq_len, seq_len, device=device)
+    
+    else:
+        # No mask (full attention)
+        return torch.zeros(seq_len, seq_len, device=device) 

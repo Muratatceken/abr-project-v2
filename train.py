@@ -35,6 +35,16 @@ from utils import (
 )
 from inference import DDIMSampler
 
+# Advanced training imports
+from utils.losses import create_loss_from_config, FocalLoss
+from data.curriculum import create_curriculum_from_config
+from data.augmentations import create_augmentation, create_augmentation_pipeline
+from training.early_stopping import create_early_stopping_from_config, EarlyStoppingCallback
+from training.ensemble import SnapshotEnsemble
+from training.distillation import DistillationTrainer, load_teacher_model
+from training.monitoring import TrainingMonitor
+from training.cross_validation import CrossValidationManager
+
 
 def setup_logging(log_level: str = "INFO"):
     """Setup console logging."""
@@ -59,17 +69,26 @@ def set_seed(seed: int):
 
 def load_config(config_path: str, overrides: Optional[str] = None) -> Dict[str, Any]:
     """
-    Load YAML config with optional dot-notation overrides.
+    Load YAML config with optional dot-notation overrides and placeholder resolution.
     
     Args:
         config_path: Path to YAML config file
         overrides: String like "optim.lr: 1e-4, trainer.max_epochs: 300"
         
     Returns:
-        Configuration dictionary
+        Configuration dictionary with resolved placeholders
     """
+    import re
+    import os
+    
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
+    
+    # Resolve placeholders
+    config = _resolve_placeholders(config)
+    
+    # Validate config for unresolved placeholders
+    _validate_config_placeholders(config)
     
     # Apply overrides
     if overrides:
@@ -94,18 +113,137 @@ def load_config(config_path: str, overrides: Optional[str] = None) -> Dict[str, 
     return config
 
 
+def _resolve_placeholders(config: Any, env_vars: Optional[Dict[str, str]] = None) -> Any:
+    """
+    Resolve ${...} placeholders in config values.
+    
+    Supports:
+    - Environment variables: ${HOME}, ${USER}
+    - Config references: ${exp_name}, ${data.train_csv}
+    - Default values: ${VAR:default_value}
+    """
+    import re
+    import os
+    
+    if env_vars is None:
+        env_vars = dict(os.environ)
+    
+    def resolve_value(value, config_root):
+        if not isinstance(value, str):
+            return value
+        
+        # Pattern to match ${...} placeholders
+        pattern = r'\$\{([^}]+)\}'
+        
+        def replace_placeholder(match):
+            placeholder = match.group(1)
+            
+            # Handle default values: VAR:default
+            if ':' in placeholder:
+                var_name, default_value = placeholder.split(':', 1)
+            else:
+                var_name = placeholder
+                default_value = None
+            
+            # Try environment variable first
+            if var_name in env_vars:
+                return env_vars[var_name]
+            
+            # Try config reference
+            try:
+                keys = var_name.split('.')
+                result = config_root
+                for key in keys:
+                    result = result[key]
+                return str(result)
+            except (KeyError, TypeError):
+                pass
+            
+            # Use default if provided
+            if default_value is not None:
+                return default_value
+            
+            # Return original placeholder if can't resolve
+            logging.warning(f"Could not resolve placeholder: ${{{placeholder}}}")
+            return match.group(0)
+        
+        return re.sub(pattern, replace_placeholder, value)
+    
+    if isinstance(config, dict):
+        return {k: _resolve_placeholders(resolve_value(v, config), env_vars) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [_resolve_placeholders(resolve_value(item, config), env_vars) for item in config]
+    else:
+        return resolve_value(config, config)
+
+
+def _validate_config_placeholders(config: Any, path: str = ""):
+    """
+    Validate that all placeholders in config have been resolved.
+    Warns about any remaining ${...} patterns.
+    """
+    import re
+    
+    def check_value(value, current_path):
+        if isinstance(value, str):
+            # Check for unresolved placeholders
+            unresolved = re.findall(r'\$\{[^}]+\}', value)
+            if unresolved:
+                for placeholder in unresolved:
+                    logging.warning(
+                        f"Unresolved placeholder '{placeholder}' at config path: {current_path}"
+                    )
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                check_value(v, f"{current_path}.{k}" if current_path else k)
+        elif isinstance(value, list):
+            for i, item in enumerate(value):
+                check_value(item, f"{current_path}[{i}]" if current_path else f"[{i}]")
+    
+    check_value(config, path)
+
+
 def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
     """
-    Create datasets and data loaders from config.
+    Create datasets and data loaders from config with advanced features.
     
     Returns:
-        Tuple of (train_loader, val_loader, dataset)
+        Tuple of (train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline)
     """
-    # Load dataset
+    # Load dataset with multi-task support
+    return_peak_labels = cfg.get('multi_task', {}).get('enabled', False)
+    use_peak_balanced_sampler = cfg.get('loader', {}).get('use_peak_balanced_sampler', False)
+    
+    # Create augmentation pipeline first
+    augmentation_pipeline = None
+    if cfg.get('advanced_augmentation', {}).get('enabled', True):
+        # Use the imported create_augmentation function
+        augmentation_pipeline = create_augmentation(
+            enable=True,
+            time_shift_samples=cfg.get('advanced_augmentation', {}).get('time_shift_samples', 2),
+            noise_std=cfg.get('advanced_augmentation', {}).get('noise_std', 0.01),
+            apply_prob=cfg.get('advanced_augmentation', {}).get('apply_prob', 0.5),
+            mixup_prob=cfg.get('advanced_augmentation', {}).get('mixup_prob', 0.2),
+            cutmix_prob=cfg.get('advanced_augmentation', {}).get('cutmix_prob', 0.2),
+            augmentation_strength=cfg.get('advanced_augmentation', {}).get('augmentation_strength', 1.0),
+            curriculum_aware=cfg.get('advanced_augmentation', {}).get('curriculum_aware', True)
+        )
+        logging.info("✓ Created advanced augmentation pipeline")
+    else:
+        # Use basic augmentation for backward compatibility
+        augmentation_pipeline = create_augmentation(
+            enable=True,
+            time_shift_samples=2,
+            noise_std=0.01,
+            apply_prob=0.5
+        )
+    
     dataset = ABRDataset(
         data_path=cfg['data']['train_csv'],  # Using same file for train/val
         normalize_signal=True,
-        normalize_static=True
+        normalize_static=True,
+        return_peak_labels=return_peak_labels,
+        transform=augmentation_pipeline
     )
     
     # Verify dataset properties match config
@@ -123,6 +261,30 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
         random_state=cfg['seed']
     )
     
+    # Create curriculum learning wrapper if enabled
+    curriculum_dataset = None
+    curriculum_sampler = None
+    if cfg.get('curriculum_learning', {}).get('enabled', False):
+        curriculum_dataset = create_curriculum_from_config(
+            cfg['curriculum_learning'], 
+            train_dataset
+        )
+        if curriculum_dataset is not None:
+            # Import and create CurriculumSampler
+            from data.curriculum import CurriculumSampler
+            
+            curriculum_sampler = CurriculumSampler(
+                difficulties=curriculum_dataset.difficulties,
+                scheduler=curriculum_dataset.scheduler,
+                num_samples=len(curriculum_dataset),
+                replacement=True
+            )
+            
+            train_dataset = curriculum_dataset
+            logging.info("✓ Created curriculum learning dataset wrapper and sampler")
+        else:
+            logging.warning("Failed to create curriculum dataset, using original dataset")
+    
     # Create data loaders
     loader_kwargs = {
         'batch_size': cfg['loader']['batch_size'],
@@ -133,9 +295,43 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
         'persistent_workers': cfg['loader'].get('persistent_workers', False) and cfg['loader']['num_workers'] > 0
     }
     
+    # Determine which sampler to use for training
+    train_sampler = None
+    
+    # Priority 1: Curriculum sampler if curriculum learning is enabled
+    if curriculum_sampler is not None:
+        train_sampler = curriculum_sampler
+        logging.info("✓ Using curriculum sampler for training")
+    # Priority 2: Peak-balanced sampling for multi-task training
+    elif cfg.get('loader', {}).get('use_peak_balanced_sampler', False) and return_peak_labels:
+        from torch.utils.data import WeightedRandomSampler
+        
+        # Calculate peak class weights
+        peak_class_weights = dataset.get_peak_class_weights()
+        logging.info(f"✓ Peak class weights: {peak_class_weights.tolist()}")
+        
+        # Create weighted sampler for training
+        # Get indices from Subset to properly align weights with training samples
+        if hasattr(train_dataset, 'indices'):  # If it's a Subset
+            idxs = train_dataset.indices
+        else:  # If it's the full dataset or CurriculumDataset
+            idxs = list(range(len(train_dataset)))
+        
+        weights = [peak_class_weights[int(dataset.peak_labels[i])] for i in idxs]
+        
+        train_sampler = WeightedRandomSampler(
+            weights=weights,
+            num_samples=len(idxs),
+            replacement=True
+        )
+        logging.info("✓ Created peak-balanced sampler for training")
+        logging.info(f"  - Training subset size: {len(idxs)}")
+        logging.info(f"  - Weight alignment: Using Subset indices for proper sample-weight mapping")
+    
     train_loader = DataLoader(
         train_dataset, 
-        shuffle=True, 
+        shuffle=(train_sampler is None), 
+        sampler=train_sampler,
         drop_last=cfg['loader']['drop_last'],
         **loader_kwargs
     )
@@ -150,7 +346,15 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
     logging.info(f"✓ Created datasets: train={len(train_dataset)}, val={len(val_dataset)}")
     logging.info(f"✓ Created loaders: batch_size={cfg['loader']['batch_size']}, workers={cfg['loader']['num_workers']}")
     
-    return train_loader, val_loader, dataset
+    # Log multi-task setup information
+    if return_peak_labels:
+        logging.info(f"✓ Multi-task training enabled with peak labels")
+        if use_peak_balanced_sampler:
+            logging.info(f"✓ Peak-balanced sampling enabled")
+        else:
+            logging.info(f"⚠️  Peak-balanced sampling disabled (use loader.use_peak_balanced_sampler: true)")
+    
+    return train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline, curriculum_sampler
 
 
 def create_model(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
@@ -167,18 +371,55 @@ def create_model(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
     logging.info(f"  - Trainable parameters: {trainable_params:,}")
     logging.info(f"  - Model size: ~{total_params * 4 / 1024**2:.1f}MB (fp32)")
     
+    # Log multi-task capabilities
+    if hasattr(model, 'peak5_head'):
+        logging.info(f"  - Peak classification head: ✓")
+    if hasattr(model, 'static_recon_head'):
+        logging.info(f"  - Static reconstruction head: ✓")
+    if hasattr(model, 'cross_attention'):
+        logging.info(f"  - Cross-attention: ✓")
+    
     return model
 
 
-def setup_training(model: nn.Module, cfg: Dict[str, Any], device: torch.device) -> tuple:
-    """Setup optimizer, scheduler, losses, and other training components."""
-    # Optimizer
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=cfg['optim']['lr'],
-        betas=cfg['optim']['betas'],
-        weight_decay=cfg['optim']['weight_decay']
-    )
+def setup_training(model: nn.Module, cfg: Dict[str, Any], device: torch.device, dataset=None) -> tuple:
+    """Setup optimizer, scheduler, losses, and other advanced training components."""
+    # Multi-task configuration
+    multi_task_enabled = cfg.get('multi_task', {}).get('enabled', False)
+    
+    # Advanced training components
+    advanced_components = {
+        'focal_loss': None,
+        'distillation_trainer': None,
+        'early_stopping': None,
+        'ensemble': None,
+        'monitoring': None
+    }
+    
+    # Optimizer with multi-task support
+    if multi_task_enabled and cfg.get('multi_task', {}).get('advanced_optimization', {}).get('per_task_lr', False):
+        # Use parameter groups for different learning rates per task
+        from utils.schedules import create_param_groups
+        task_lr_multipliers = cfg['multi_task']['task_lr_multipliers']
+        param_groups = create_param_groups(model, cfg['optim']['lr'], task_lr_multipliers)
+        
+        optimizer = optim.AdamW(
+            param_groups,
+            betas=cfg['optim']['betas'],
+            weight_decay=cfg['optim']['weight_decay']
+        )
+        
+        # Log per-task learning rates
+        for group in param_groups:
+            logging.info(f"  - {group['name']}: lr={group['lr']:.2e}")
+    else:
+        # Standard optimizer
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=cfg['optim']['lr'],
+            betas=cfg['optim']['betas'],
+            weight_decay=cfg['optim']['weight_decay']
+        )
     
     # AMP scaler
     scaler = GradScaler() if cfg['optim']['amp'] else None
@@ -189,8 +430,142 @@ def setup_training(model: nn.Module, cfg: Dict[str, Any], device: torch.device) 
     # Diffusion schedule
     noise_schedule = prepare_noise_schedule(cfg['diffusion']['num_train_steps'], device)
     
-    # Losses
+    # Multi-task losses
     stft_loss = MultiResSTFTLoss(**cfg['loss']['stft']) if cfg['loss']['stft_weight'] > 0 else None
+    
+    # Peak classification loss for multi-task training
+    peak_bce_loss = None
+    if multi_task_enabled:
+        import torch.nn.functional as F
+        
+        # Get peak class weights from dataset if available
+        peak_class_weights = None
+        if dataset is not None and hasattr(dataset, 'get_peak_class_weights'):
+            try:
+                class_weighting_method = cfg.get('multi_task', {}).get('class_weighting_method', 'inverse_freq')
+                peak_class_weights = dataset.get_peak_class_weights(class_weighting_method)
+                logging.info(f"✓ Peak classification loss with class weights: {peak_class_weights.tolist()}")
+            except Exception as e:
+                logging.warning(f"⚠️  Could not get peak class weights: {e}, using default")
+                peak_class_weights = None
+        
+        # Create loss for peak classification (BCE or Focal)
+        if cfg.get('focal_loss', {}).get('enabled', False):
+            # Use Focal Loss for handling class imbalance
+            pos_weight = None
+            if peak_class_weights is not None:
+                pos_weight = torch.tensor(peak_class_weights[1] / peak_class_weights[0], device=device)
+            
+            advanced_components['focal_loss'] = FocalLoss(
+                alpha=cfg['focal_loss'].get('alpha', 0.25),
+                gamma=cfg['focal_loss'].get('gamma', 2.0),
+                reduction=cfg['focal_loss'].get('reduction', 'mean'),
+                pos_weight=pos_weight
+            )
+            peak_bce_loss = advanced_components['focal_loss']
+            logging.info(f"✓ Using Focal Loss for peak classification (alpha={cfg['focal_loss'].get('alpha', 0.25)}, gamma={cfg['focal_loss'].get('gamma', 2.0)})")
+        else:
+            # Standard BCE loss
+            if peak_class_weights is not None:
+                pos_weight = peak_class_weights[1] / peak_class_weights[0]  # positive class weight
+                peak_bce_loss = nn.BCEWithLogitsLoss(pos_weight=torch.tensor(pos_weight, device=device))
+            else:
+                peak_bce_loss = nn.BCEWithLogitsLoss()
+            logging.info(f"✓ Using BCE Loss for peak classification")
+        
+        logging.info(f"✓ Multi-task training enabled")
+        logging.info(f"  - Peak classification loss: ✓")
+        logging.info(f"  - Loss weights: {cfg['multi_task']['loss_weights']}")
+    
+    # Progressive training schedule
+    progressive_schedule = None
+    if multi_task_enabled and cfg.get('multi_task', {}).get('progressive_weighting', {}).get('enabled', False):
+        from utils.schedules import linear_weight_schedule, cosine_weight_schedule
+        
+        progressive_config = cfg['multi_task']['progressive_weighting']
+        schedule_type = progressive_config.get('schedule_type', 'linear')
+        
+        if schedule_type == 'linear':
+            progressive_schedule = linear_weight_schedule
+        elif schedule_type == 'cosine':
+            progressive_schedule = cosine_weight_schedule
+        else:
+            logging.warning(f"⚠️  Unknown progressive schedule type: {schedule_type}")
+            progressive_schedule = linear_weight_schedule
+        
+        logging.info(f"✓ Progressive training enabled: {schedule_type}")
+    
+    # Knowledge Distillation
+    if cfg.get('knowledge_distillation', {}).get('enabled', False):
+        teacher_checkpoint = cfg['knowledge_distillation'].get('teacher_checkpoint')
+        if teacher_checkpoint:
+            try:
+                teacher_model = load_teacher_model(
+                    teacher_checkpoint, 
+                    ABRTransformerGenerator,
+                    cfg['model'],
+                    device
+                )
+                
+                from training.distillation import KnowledgeDistillation
+                distillation_method = KnowledgeDistillation(
+                    temperature=cfg['knowledge_distillation'].get('temperature', 4.0),
+                    alpha=cfg['knowledge_distillation'].get('alpha', 0.7),
+                    feature_matching=cfg['knowledge_distillation'].get('feature_distillation', True),
+                    feature_weight=cfg['knowledge_distillation'].get('feature_weight', 0.1)
+                )
+                
+                advanced_components['distillation_trainer'] = DistillationTrainer(
+                    distillation_method=distillation_method,
+                    teacher_model=teacher_model,
+                    freeze_teacher=True
+                )
+                logging.info(f"✓ Knowledge distillation enabled with teacher model")
+            except Exception as e:
+                logging.error(f"Failed to load teacher model: {e}")
+                advanced_components['distillation_trainer'] = None
+    
+    # Early Stopping
+    if cfg.get('early_stopping', {}).get('enabled', True):
+        advanced_components['early_stopping'] = create_early_stopping_from_config(cfg.get('early_stopping', {}))
+        if advanced_components['early_stopping']:
+            logging.info(f"✓ Early stopping enabled (patience={cfg.get('early_stopping', {}).get('patience', 20)})")
+    
+    # Ensemble Training (Snapshot Ensemble)
+    if cfg.get('ensemble_training', {}).get('enabled', False):
+        snapshot_epochs = cfg['ensemble_training'].get('snapshot_epochs', [])
+        if snapshot_epochs:
+            advanced_components['ensemble'] = SnapshotEnsemble(
+                base_model=model,
+                snapshot_epochs=snapshot_epochs,
+                device=device,
+                max_snapshots=cfg['ensemble_training'].get('ensemble_size', 5)
+            )
+            logging.info(f"✓ Snapshot ensemble enabled (epochs: {snapshot_epochs})")
+    
+    # Training Monitoring
+    if cfg.get('monitoring', {}).get('enabled', True):
+        monitor_save_dir = cfg.get('monitoring', {}).get('save_dir', 'monitoring')
+        advanced_components['monitoring'] = TrainingMonitor(
+            save_dir=monitor_save_dir,
+            enable_resource_monitoring=cfg.get('monitoring', {}).get('track_resources', True),
+            enable_model_health=cfg.get('monitoring', {}).get('model_health', {}).get('enabled', True),
+            enable_alerts=cfg.get('monitoring', {}).get('alerts', {}).get('enabled', True),
+            track_activations=cfg.get('monitoring', {}).get('track_activations', False),
+            dashboard_port=cfg.get('monitoring', {}).get('dashboard', {}).get('port') if cfg.get('monitoring', {}).get('dashboard', {}).get('enabled', False) else None
+        )
+        
+        # Setup alerts
+        alert_configs = cfg.get('monitoring', {}).get('alerts', {}).get('alert_configs', [])
+        for alert_config in alert_configs:
+            advanced_components['monitoring'].add_alert(
+                metric_name=alert_config['metric_name'],
+                threshold=alert_config['threshold'],
+                condition=alert_config.get('condition', 'greater'),
+                consecutive_violations=alert_config.get('consecutive_violations', 3)
+            )
+        
+        logging.info(f"✓ Comprehensive monitoring enabled")
     
     # Sampler for periodic sampling
     sampler = DDIMSampler(model, cfg['diffusion']['num_train_steps'], device)
@@ -201,7 +576,7 @@ def setup_training(model: nn.Module, cfg: Dict[str, Any], device: torch.device) 
     logging.info(f"  - EMA decay: {cfg['optim']['ema_decay']}")
     logging.info(f"  - STFT loss weight: {cfg['loss']['stft_weight']}")
     
-    return optimizer, scaler, ema, noise_schedule, stft_loss, sampler
+    return optimizer, scaler, ema, noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, sampler, advanced_components
 
 
 def train_step(
@@ -212,15 +587,37 @@ def train_step(
     ema: Any,
     noise_schedule: Dict[str, torch.Tensor],
     stft_loss: Optional[nn.Module],
+    peak_bce_loss: Optional[nn.Module],
+    progressive_schedule: Optional[callable],
     cfg: Dict[str, Any],
-    device: torch.device
+    device: torch.device,
+    epoch: int = 0,
+    advanced_components: Optional[Dict[str, Any]] = None,
+    augmentation_pipeline: Optional[Any] = None
 ) -> Dict[str, float]:
-    """Single training step."""
+    """Single training step with advanced features."""
     model.train()
+    advanced_components = advanced_components or {}
     
     # Move batch to device
     x0 = batch['x0'].to(device)  # [B, 1, T]
     stat = batch['stat'].to(device)  # [B, S]
+    
+    # Apply batch-level augmentations (mixup, cutmix)
+    if augmentation_pipeline is not None and hasattr(augmentation_pipeline, 'apply_batch_augmentations'):
+        batch_dict = {'signal': x0, 'static': stat}
+        if 'peak_exists' in batch:
+            batch_dict['target'] = batch['peak_exists'].to(device)
+            
+        augmented_batch = augmentation_pipeline.apply_batch_augmentations(batch_dict)
+        x0 = augmented_batch.get('signal', x0)
+        if 'target' in augmented_batch:
+            batch['peak_exists'] = augmented_batch['target']
+    
+    # Extract peak labels for multi-task training
+    peak_targets = None
+    if 'peak_exists' in batch:
+        peak_targets = batch['peak_exists'].to(device)  # [B]
     
     # Assert correct shapes
     B, C, T = x0.shape
@@ -242,10 +639,52 @@ def train_step(
     
     # Model forward pass
     with autocast(enabled=cfg['optim']['amp']):
-        v_pred = model(x_t, static_params=stat_input, timesteps=t)["signal"]
+        model_output = model(x_t, static_params=stat_input, timesteps=t)
+        v_pred = model_output["signal"]
+        peak_logits = model_output.get("peak_5th_exists", None)
+        static_recon = model_output.get("static_recon", None)
         
         # Main v-prediction loss
         loss_main = mse_time(v_pred, v_target)
+        
+        # Multi-task losses
+        loss_peak = torch.tensor(0.0, device=device)
+        loss_static = torch.tensor(0.0, device=device)
+        current_peak_weight = 0.0
+        current_static_weight = 0.0
+        
+        # Peak classification loss
+        if peak_bce_loss is not None and peak_targets is not None and peak_logits is not None:
+            # Apply progressive weight scheduling if enabled
+            if progressive_schedule is not None:
+                peak_config = cfg['multi_task']['progressive_weighting']['peak_classification']
+                current_peak_weight = progressive_schedule(
+                    epoch, 
+                    peak_config['start_epoch'], 
+                    peak_config['end_epoch'],
+                    peak_config['start_weight'], 
+                    peak_config['end_weight']
+                )
+            else:
+                current_peak_weight = cfg['multi_task']['loss_weights']['peak_classification']
+            
+            loss_peak = peak_bce_loss(peak_logits, peak_targets)
+        
+        # Static reconstruction loss
+        if static_recon is not None and stat_input is not None:
+            if progressive_schedule is not None:
+                static_config = cfg['multi_task']['progressive_weighting']['static_reconstruction']
+                current_static_weight = progressive_schedule(
+                    epoch,
+                    static_config['start_epoch'],
+                    static_config['end_epoch'],
+                    static_config['start_weight'],
+                    static_config['end_weight']
+                )
+            else:
+                current_static_weight = cfg['multi_task']['loss_weights']['static_reconstruction']
+            
+            loss_static = mse_time(static_recon, stat_input)
         
         # Optional STFT loss
         loss_stft = torch.tensor(0.0, device=device)
@@ -254,8 +693,39 @@ def train_step(
             x0_pred = predict_x0_from_v(x_t, v_pred, t, noise_schedule)
             loss_stft = stft_loss(x0_pred, x0)
         
-        # Total loss
-        loss_total = loss_main + cfg['loss']['stft_weight'] * loss_stft
+        # Knowledge Distillation Loss
+        loss_distillation = torch.tensor(0.0, device=device)
+        if advanced_components.get('distillation_trainer') is not None:
+            try:
+                # Create batch dict for distillation
+                distill_batch = {
+                    'signal': x_t,
+                    'static': stat_input,
+                    'timesteps': t,
+                    'target': peak_targets if peak_targets is not None else None
+                }
+                
+                distillation_losses = advanced_components['distillation_trainer'].compute_distillation_loss(
+                    model, distill_batch, epoch
+                )
+                
+                loss_distillation = distillation_losses.get('combined_loss', torch.tensor(0.0, device=device))
+            except Exception as e:
+                logging.warning(f"Distillation loss computation failed: {e}")
+        
+        # Total loss with multi-task weights - safely derive weights for backward compatibility
+        w_signal = cfg.get('multi_task', {}).get('loss_weights', {}).get('signal', 1.0)
+        w_peak = current_peak_weight if peak_bce_loss is not None and peak_targets is not None and peak_logits is not None else 0.0
+        w_static = current_static_weight if static_recon is not None and stat_input is not None else 0.0
+        w_distill = cfg.get('knowledge_distillation', {}).get('alpha', 0.7) if loss_distillation.item() > 0 else 0.0
+        
+        loss_total = (
+            w_signal * loss_main +
+            w_peak * loss_peak +
+            w_static * loss_static +
+            cfg['loss']['stft_weight'] * loss_stft +
+            w_distill * loss_distillation
+        )
     
     # Backward pass
     optimizer.zero_grad()
@@ -276,11 +746,23 @@ def train_step(
     # Update EMA
     ema.update(model)
     
-    return {
+    result = {
         'loss_total': loss_total.item(),
         'loss_main_mse_v': loss_main.item(),
-        'loss_stft': loss_stft.item()
+        'loss_stft': loss_stft.item(),
+        'loss_distillation': loss_distillation.item()
     }
+    
+    # Add multi-task loss components when available
+    if peak_bce_loss is not None and peak_targets is not None and peak_logits is not None:
+        result['loss_peak_bce'] = loss_peak.item()
+        result['peak_weight_current'] = current_peak_weight
+    
+    if static_recon is not None and stat_input is not None:
+        result['loss_static_mse'] = loss_static.item()
+        result['static_weight_current'] = current_static_weight
+    
+    return result
 
 
 def validate(
@@ -289,17 +771,28 @@ def validate(
     noise_schedule: Dict[str, torch.Tensor],
     cfg: Dict[str, Any],
     device: torch.device
-) -> float:
-    """Validation step."""
+) -> Dict[str, float]:
+    """Validation step with multi-task support."""
     model.eval()
-    total_loss = 0.0
+    total_signal_loss = 0.0
+    total_peak_loss = 0.0
     total_batches = 0
+    
+    # Multi-task validation metrics
+    multi_task_enabled = cfg.get('multi_task', {}).get('enabled', False)
+    all_peak_logits = []
+    all_peak_targets = []
     
     with torch.no_grad():
         for batch in val_loader:
             x0 = batch['x0'].to(device)
             stat = batch['stat'].to(device)
             B = x0.shape[0]
+            
+            # Extract peak labels for multi-task validation
+            peak_targets = None
+            if 'peak_exists' in batch:
+                peak_targets = batch['peak_exists'].to(device)
             
             # Random timesteps for validation
             t = torch.randint(0, cfg['diffusion']['num_train_steps'], (B,), device=device)
@@ -309,15 +802,71 @@ def validate(
             x_t, v_target = q_sample_vpred(x0, t, noise, noise_schedule)
             
             # Model prediction
-            v_pred = model(x_t, static_params=stat, timesteps=t)["signal"]
+            model_output = model(x_t, static_params=stat, timesteps=t)
+            v_pred = model_output["signal"]
+            peak_logits = model_output.get("peak_5th_exists", None)
             
-            # MSE loss
-            loss = mse_time(v_pred, v_target)
-            total_loss += loss.item()
+            # Signal generation loss
+            signal_loss = mse_time(v_pred, v_target)
+            total_signal_loss += signal_loss.item()
+            
+            # Peak classification loss and metrics
+            if multi_task_enabled and peak_targets is not None and peak_logits is not None:
+                from utils.metrics import compute_classification_metrics
+                
+                # Store for overall metrics
+                all_peak_logits.append(peak_logits.cpu())
+                all_peak_targets.append(peak_targets.cpu())
+                
+                # Compute BCE loss
+                peak_bce = nn.BCEWithLogitsLoss()(peak_logits, peak_targets)
+                total_peak_loss += peak_bce.item()
+            
             total_batches += 1
     
-    avg_loss = total_loss / max(total_batches, 1)
-    return avg_loss
+    # Calculate average losses
+    avg_signal_loss = total_signal_loss / max(total_batches, 1)
+    avg_peak_loss = total_peak_loss / max(total_batches, 1) if multi_task_enabled else 0.0
+    
+    # Compute comprehensive classification metrics
+    classification_metrics = {}
+    if multi_task_enabled and all_peak_logits and all_peak_targets:
+        from utils.metrics import compute_classification_metrics
+        
+        # Concatenate all predictions and targets
+        all_peak_logits = torch.cat(all_peak_logits, dim=0)
+        all_peak_targets = torch.cat(all_peak_targets, dim=0)
+        
+        # Compute classification metrics
+        classification_metrics = compute_classification_metrics(all_peak_logits, all_peak_targets)
+    
+    # Return metrics
+    if multi_task_enabled:
+        # Combined validation score for best model selection
+        validation_weights = cfg.get('multi_task', {}).get('validation_weights', {'signal': 0.7, 'peak_classification': 0.3})
+        combined_score = (
+            validation_weights['signal'] * avg_signal_loss +
+            validation_weights['peak_classification'] * avg_peak_loss
+        )
+        
+        # Choose validation metric based on configuration
+        metric = cfg.get('multi_task', {}).get('validation_metric', 'combined')
+        val_selection = {
+            'combined': combined_score,
+            'signal': avg_signal_loss,
+            'peak': avg_peak_loss
+        }.get(metric, combined_score)
+        
+        return {
+            'val_signal_mse': avg_signal_loss,
+            'val_peak_bce': avg_peak_loss,
+            'val_combined_score': combined_score,
+            'val_selection': val_selection,  # The metric to use for best model selection
+            **classification_metrics
+        }
+    else:
+        # Backward compatibility: return single loss
+        return {'val_signal_mse': avg_signal_loss}
 
 
 def periodic_sampling(
@@ -503,14 +1052,14 @@ def main():
     device = torch.device(cfg['device'] if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
     
-    # Create datasets and loaders
-    train_loader, val_loader, dataset = create_datasets_and_loaders(cfg)
+    # Create datasets and loaders with advanced features
+    train_loader, val_loader, dataset, curriculum_dataset, augmentation_pipeline, curriculum_sampler = create_datasets_and_loaders(cfg)
     
     # Create model
     model = create_model(cfg, device)
     
-    # Setup training components
-    optimizer, scaler, ema, noise_schedule, stft_loss, sampler = setup_training(model, cfg, device)
+    # Setup training components with advanced features
+    optimizer, scaler, ema, noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, sampler, advanced_components = setup_training(model, cfg, device, dataset)
     
     # TensorBoard
     log_dir = Path(cfg['log_dir']) / cfg['exp_name']
@@ -519,6 +1068,29 @@ def main():
     # Log config
     config_text = yaml.dump(cfg, default_flow_style=False)
     writer.add_text('config', f"```yaml\n{config_text}\n```", 0)
+    
+    # Initialize advanced training components
+    monitoring = advanced_components.get('monitoring')
+    early_stopping = advanced_components.get('early_stopping')
+    ensemble = advanced_components.get('ensemble')
+    
+    if monitoring:
+        monitoring.start_training()
+    
+    # Create early stopping callback if enabled
+    early_stopping_callback = None
+    if early_stopping:
+        # Get metric and mode from config
+        early_stopping_config = cfg.get('early_stopping', {})
+        metric_name = early_stopping_config.get('metric', 'val_loss')
+        mode = early_stopping_config.get('mode', 'min')
+        
+        early_stopping_callback = EarlyStoppingCallback(
+            early_stopper=early_stopping,
+            checkpoint_dir=cfg['trainer']['ckpt_dir'],
+            save_best_only=True,
+            metric_name=metric_name
+        )
     
     # Resume from checkpoint if specified
     start_epoch = 0
@@ -530,7 +1102,7 @@ def main():
             model, optimizer, ema, scaler, cfg['trainer']['resume']
         )
     
-    # Training loop
+    # Training loop with advanced features
     logging.info("="*60)
     logging.info("STARTING TRAINING")
     logging.info("="*60)
@@ -539,43 +1111,127 @@ def main():
         epoch_start_time = time.time()
         epoch_losses = []
         
+        # Update curriculum learning
+        if curriculum_dataset is not None:
+            curriculum_dataset.update_epoch(epoch, cfg['trainer']['max_epochs'])
+            
+            # Update curriculum sampler
+            if curriculum_sampler is not None:
+                curriculum_sampler.update_epoch(epoch)
+            
+            # Log curriculum stats
+            curriculum_stats = curriculum_dataset.get_curriculum_stats()
+            if curriculum_stats:
+                for stat_name, stat_value in curriculum_stats.items():
+                    writer.add_scalar(f'curriculum/{stat_name}', stat_value, epoch)
+                logging.info(f"Curriculum stats: {curriculum_stats}")
+            
+        # Update augmentation progress for curriculum-aware augmentation
+        if augmentation_pipeline is not None and hasattr(augmentation_pipeline, 'set_training_progress'):
+            progress = epoch / cfg['trainer']['max_epochs']
+            augmentation_pipeline.set_training_progress(progress)
+        
         # Training
         model.train()
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch:03d}")
         
         for batch_idx, batch in enumerate(train_pbar):
-            # Training step
+            # Training step with advanced features
             losses = train_step(
                 model, batch, optimizer, scaler, ema, 
-                noise_schedule, stft_loss, cfg, device
+                noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, 
+                cfg, device, epoch, advanced_components, augmentation_pipeline
             )
             
-            epoch_losses.append(losses['loss_total'])
+            epoch_losses.append(losses)
             global_step += 1
             
             # Logging
             if global_step % cfg['trainer']['log_every_steps'] == 0:
+                # Log all training losses
                 for key, value in losses.items():
                     writer.add_scalar(f'train/{key}', value, global_step)
                 
+                # Multi-task specific logging
+                if cfg.get('multi_task', {}).get('enabled', False):
+                    # Log loss ratios for analysis
+                    if 'loss_peak_bce' in losses and 'loss_main_mse_v' in losses:
+                        peak_to_signal_ratio = losses['loss_peak_bce'] / (losses['loss_main_mse_v'] + 1e-8)
+                        writer.add_scalar('train/peak_to_signal_loss_ratio', peak_to_signal_ratio, global_step)
+                    
+                    # Log current weights for progressive training
+                    if 'peak_weight_current' in losses:
+                        writer.add_scalar('train/peak_weight_current', losses['peak_weight_current'], global_step)
+                    if 'static_weight_current' in losses:
+                        writer.add_scalar('train/static_weight_current', losses['static_weight_current'], global_step)
+                
                 # Update progress bar
-                train_pbar.set_postfix({
+                postfix = {
                     'loss': f"{losses['loss_total']:.4e}",
                     'v_mse': f"{losses['loss_main_mse_v']:.4e}"
-                })
+                }
+                
+                # Add multi-task information
+                if 'loss_peak_bce' in losses:
+                    postfix['peak'] = f"{losses['loss_peak_bce']:.4e}"
+                if 'loss_static_mse' in losses:
+                    postfix['static'] = f"{losses['loss_static_mse']:.4e}"
+                
+                train_pbar.set_postfix(postfix)
         
         # Validation
         if epoch % cfg['trainer']['validate_every_epochs'] == 0:
-            val_loss = validate(model, val_loader, noise_schedule, cfg, device)
-            writer.add_scalar('val/mse_v', val_loss, epoch)
+            val_metrics = validate(model, val_loader, noise_schedule, cfg, device)
+            
+            # Handle multi-task validation metrics
+            if cfg.get('multi_task', {}).get('enabled', False):
+                # Log all validation metrics
+                for key, value in val_metrics.items():
+                    writer.add_scalar(f'val/{key}', value, epoch)
+                
+                # Use configured validation metric for best model selection
+                val_loss = val_metrics['val_selection']
+                logging.info(f"  Using validation metric: {cfg.get('multi_task', {}).get('validation_metric', 'combined')}")
+            else:
+                # Backward compatibility: use signal MSE
+                val_loss = val_metrics['val_signal_mse']
+                writer.add_scalar('val/mse_v', val_loss, epoch)
+            
+            # Update monitoring with validation metrics
+            if monitoring:
+                combined_metrics = {**val_metrics}
+                # Add training metrics from last batch
+                if epoch_losses:
+                    latest_train_losses = epoch_losses[-1]
+                    for key, value in latest_train_losses.items():
+                        combined_metrics[f'train_{key}'] = value
+                
+                monitoring.update(epoch, global_step, combined_metrics, model)
             
             # Check if best
             is_best = val_loss < best_val_loss
             if is_best:
                 best_val_loss = val_loss
+                
+            # Early stopping check
+            should_stop = False
+            if early_stopping_callback:
+                should_stop = early_stopping_callback.on_epoch_end(epoch, val_metrics, model, optimizer)
+            elif early_stopping:
+                should_stop = early_stopping(val_loss, model, epoch)
+                
+            if should_stop:
+                logging.info(f"Early stopping triggered at epoch {epoch}")
+                if early_stopping and hasattr(early_stopping, 'restore_best_model'):
+                    early_stopping.restore_best_model(model)
+                break
         else:
             val_loss = best_val_loss
             is_best = False
+            
+        # Ensemble snapshot collection
+        if ensemble and ensemble.should_take_snapshot(epoch):
+            ensemble.take_snapshot(model, epoch, {'val_loss': val_loss} if 'val_loss' in locals() else None)
         
         # Periodic sampling
         if epoch % cfg['trainer']['sample_every_epochs'] == 0:
@@ -593,15 +1249,33 @@ def main():
         
         # Epoch summary
         epoch_time = time.time() - epoch_start_time
-        avg_train_loss = np.mean(epoch_losses)
+        avg_train_loss = np.mean([losses['loss_total'] for losses in epoch_losses])
         
         writer.add_scalar('epoch/train_loss_avg', avg_train_loss, epoch)
         writer.add_scalar('epoch/time_sec', epoch_time, epoch)
         
-        logging.info(
-            f"Epoch {epoch:03d} | train {avg_train_loss:.4e} | "
-            f"val(best) {best_val_loss:.4e} | {epoch_time:.1f}s"
-        )
+        # Multi-task epoch summaries
+        if cfg.get('multi_task', {}).get('enabled', False):
+            # Log epoch averages for all metrics
+            epoch_metrics = {}
+            for key in ['loss_peak_bce', 'loss_static_mse']:
+                values = [losses.get(key, 0) for losses in epoch_losses if key in losses]
+                if values:
+                    epoch_metrics[key] = np.mean(values)
+                    writer.add_scalar(f'epoch/{key}_avg', epoch_metrics[key], epoch)
+            
+            # Log epoch summary with multi-task info
+            logging.info(
+                f"Epoch {epoch:03d} | train {avg_train_loss:.4e} | "
+                f"val(best) {best_val_loss:.4e} | {epoch_time:.1f}s"
+            )
+            if epoch_metrics:
+                logging.info(f"  Multi-task: {epoch_metrics}")
+        else:
+            logging.info(
+                f"Epoch {epoch:03d} | train {avg_train_loss:.4e} | "
+                f"val(best) {best_val_loss:.4e} | {epoch_time:.1f}s"
+            )
     
     # Final checkpoint
     save_checkpoint(
@@ -609,8 +1283,24 @@ def main():
         global_step, best_val_loss, cfg, is_best=False
     )
     
+    # Cleanup advanced training components
+    if early_stopping_callback:
+        early_stopping_callback.on_training_end(model)
+        
+    if monitoring:
+        monitoring.end_training()
+        
+    # Generate final reports
+    if monitoring:
+        try:
+            monitoring.plot_training_progress(save_path=f"{cfg['log_dir']}/{cfg['exp_name']}/training_progress.png")
+            from training.monitoring import generate_training_report
+            generate_training_report(monitoring, f"{cfg['log_dir']}/{cfg['exp_name']}/training_report.html")
+        except Exception as e:
+            logging.warning(f"Failed to generate monitoring reports: {e}")
+    
     writer.close()
-    logging.info("✅ Training completed!")
+    logging.info("✅ Training completed with advanced features!")
 
 
 if __name__ == "__main__":

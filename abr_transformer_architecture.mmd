@@ -1,0 +1,132 @@
+graph TB
+    %% Input and Conditioning
+    subgraph "Input Layer"
+        X0["Input Signal<br/>x₀ ∈ ℝᴮˣ¹ˣ²⁰⁰"]
+        STAT["Static Parameters<br/>c ∈ ℝᴮˣ⁴<br/>[Age, Intensity, StimulusRate, FMP]"]
+        T["Timestep<br/>t ∈ {0, 1, ..., 999}"]
+    end
+    
+    %% Multi-Scale Convolutional Stem
+    subgraph "Multi-Scale Convolutional Stem"
+        subgraph "Branch k=3"
+            CONV3["Conv1D(k=3)<br/>ℝᴮˣ¹ˣ²⁰⁰ → ℝᴮˣᶜˣ²⁰⁰"]
+            GN3["GroupNorm(1, c)<br/>c = d_model/3"]
+            GELU3["GELU()"]
+        end
+        
+        subgraph "Branch k=7"
+            CONV7["Conv1D(k=7)<br/>ℝᴮˣ¹ˣ²⁰⁰ → ℝᴮˣᶜˣ²⁰⁰"]
+            GN7["GroupNorm(1, c)<br/>c = d_model/3"]
+            GELU7["GELU()"]
+        end
+        
+        subgraph "Branch k=15"
+            CONV15["Conv1D(k=15)<br/>ℝᴮˣ¹ˣ²⁰⁰ → ℝᴮˣᶜˣ²⁰⁰"]
+            GN15["GroupNorm(1, c)<br/>c = d_model/3"]
+            GELU15["GELU()"]
+        end
+        
+        CONCAT["Concatenate<br/>ℝᴮˣ³ᶜˣ²⁰⁰"]
+        FUSE["Conv1D(1×1)<br/>ℝᴮˣ³ᶜˣ²⁰⁰ → ℝᴮˣᵈ_ᵐᵒᵈᵉˡˣ²⁰⁰"]
+    end
+    
+    %% Transpose and Conditioning
+    TRANSPOSE["Transpose<br/>ℝᴮˣᵈ_ᵐᵒᵈᵉˡˣ²⁰⁰ → ℝᴮˣ²⁰⁰ˣᵈ_ᵐᵒᵈᵉˡ"]
+    
+    subgraph "Pre-Transformer FiLM"
+        FILM1["TokenFiLM<br/>γ(c), β(c): ℝ⁴ → ℝᵈ_ᵐᵒᵈᵉˡ<br/>X ⊙ (1 + γ(c)) + β(c)"]
+    end
+    
+    subgraph "Timestep Adapter"
+        PE["Sinusoidal PE<br/>PE(t, i) = sin/cos(t/10000^(2i/d_embed))"]
+        MLP_T["MLP<br/>ℝᵈ_ᵉᵐᵇᵉᵈ → ℝᵈ_ᵐᵒᵈᵉˡ"]
+        ADD_T["Add<br/>H₂ + TimestepAdapter(t)"]
+    end
+    
+    %% Transformer Stack
+    subgraph "Transformer Stack (L=6 layers)"
+        subgraph "Layer 1"
+            LN1["LayerNorm<br/>ℝᴮˣ²⁰⁰ˣᵈ_ᵐᵒᵈᵉˡ"]
+            MHA1["Multi-Head Attention<br/>8 heads, d_k = 32<br/>Relative Position Bias"]
+            RES1["Residual Add"]
+            LN2_1["LayerNorm"]
+            FF1["Feed-Forward<br/>ℝᵈ_ᵐᵒᵈᵉˡ → ℝ⁴ᵈ_ᵐᵒᵈᵉˡ → ℝᵈ_ᵐᵒᵈᵉˡ"]
+            RES2_1["Residual Add"]
+            CONV1["ConvModule<br/>k=7, Depthwise + Pointwise<br/>Gating: a ⊙ σ(b)"]
+            RES3_1["Residual Add"]
+        end
+        
+        subgraph "Layer 2-6"
+            LAYERS["... (5 more identical layers)<br/>Each with: MHA + FF + ConvModule"]
+        end
+    end
+    
+    %% Post-Transformer FiLM
+    subgraph "Post-Transformer FiLM"
+        FILM2["TokenFiLM<br/>Same γ(c), β(c) functions"]
+    end
+    
+    %% Output Head
+    OUTPUT["Linear Projection<br/>ℝᴮˣ²⁰⁰ˣᵈ_ᵐᵒᵈᵉˡ → ℝᴮˣ²⁰⁰ˣ¹"]
+    RESHAPE["Transpose<br/>ℝᴮˣ²⁰⁰ˣ¹ → ℝᴮˣ¹ˣ²⁰⁰"]
+    
+    %% V-Prediction Output
+    V_OUT["Velocity Output<br/>v_θ(x_t, c, t) ∈ ℝᴮˣ¹ˣ²⁰⁰"]
+    
+    %% Mathematical Flow
+    subgraph "Mathematical Operations"
+        FORMULA1["x_t = √ᾱ_t x₀ + √(1-ᾱ_t) ε"]
+        FORMULA2["v_t = √ᾱ_t ε - √(1-ᾱ_t) x₀"]
+        FORMULA3["x̂₀ = √ᾱ_t x_t - √(1-ᾱ_t) v_θ"]
+    end
+    
+    %% Data Flow Connections
+    X0 --> CONV3
+    X0 --> CONV7
+    X0 --> CONV15
+    
+    CONV3 --> GN3 --> GELU3
+    CONV7 --> GN7 --> GELU7
+    CONV15 --> GN15 --> GELU15
+    
+    GELU3 --> CONCAT
+    GELU7 --> CONCAT
+    GELU15 --> CONCAT
+    
+    CONCAT --> FUSE --> TRANSPOSE --> FILM1
+    
+    STAT --> FILM1
+    STAT --> FILM2
+    
+    FILM1 --> ADD_T
+    T --> PE --> MLP_T --> ADD_T
+    
+    ADD_T --> LN1
+    
+    LN1 --> MHA1 --> RES1
+    RES1 --> LN2_1 --> FF1 --> RES2_1
+    RES2_1 --> CONV1 --> RES3_1
+    
+    RES3_1 --> LAYERS
+    LAYERS --> FILM2
+    
+    FILM2 --> OUTPUT --> RESHAPE --> V_OUT
+    
+    %% Mathematical connections
+    X0 -.-> FORMULA1
+    V_OUT -.-> FORMULA3
+    
+    %% Styling
+    classDef inputClass fill:#e1f5fe,stroke:#01579b,stroke-width:2px
+    classDef stemClass fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef transformerClass fill:#e8f5e8,stroke:#1b5e20,stroke-width:2px
+    classDef filmClass fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef outputClass fill:#fce4ec,stroke:#880e4f,stroke-width:2px
+    classDef mathClass fill:#f1f8e9,stroke:#33691e,stroke-width:2px
+    
+    class X0,STAT,T inputClass
+    class CONV3,GN3,GELU3,CONV7,GN7,GELU7,CONV15,GN15,GELU15,CONCAT,FUSE,TRANSPOSE stemClass
+    class LN1,MHA1,RES1,LN2_1,FF1,RES2_1,CONV1,RES3_1,LAYERS transformerClass
+    class FILM1,FILM2,PE,MLP_T,ADD_T filmClass
+    class OUTPUT,RESHAPE,V_OUT outputClass
+    class FORMULA1,FORMULA2,FORMULA3 mathClass

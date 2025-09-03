@@ -34,7 +34,8 @@ class ABRDataset(Dataset):
         data_path: str = "data/processed/ultimate_dataset.pkl",
         transform: Optional[Callable] = None,
         normalize_signal: bool = True,
-        normalize_static: bool = True
+        normalize_static: bool = True,
+        return_peak_labels: bool = False
     ):
         """
         Initialize the ABRDataset.
@@ -49,6 +50,7 @@ class ABRDataset(Dataset):
         self.transform = transform
         self.normalize_signal = normalize_signal
         self.normalize_static = normalize_static
+        self.return_peak_labels = return_peak_labels
         
         # Properties for training pipeline compatibility
         self.sequence_length = 200
@@ -137,6 +139,17 @@ class ABRDataset(Dataset):
         
         logging.info(f"Found {len(self.unique_patients)} unique patients")
         logging.info(f"Patient-level target distribution: {dict(Counter(self.patient_targets.values()))}")
+        
+        # Track peak label distribution for multi-task training
+        if self.return_peak_labels:
+            self.peak_labels = []
+            for sample in self.data:
+                peak_exists = bool(sample['v_peak_mask'][0] and sample['v_peak_mask'][1])
+                self.peak_labels.append(int(peak_exists))
+            
+            peak_counts = Counter(self.peak_labels)
+            logging.info(f"Peak label distribution: {dict(peak_counts)}")
+            logging.info(f"Peak positive ratio: {peak_counts.get(1, 0) / len(self.peak_labels):.3f}")
     
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -154,6 +167,7 @@ class ABRDataset(Dataset):
                 - x0: ABR time series [1, 200] (normalized)
                 - stat: Static parameters [4] in order [Age, Intensity, StimulusRate, FMP]
                 - meta: Metadata dict with patient_id and target
+                - peak_exists: Peak existence label [1] when return_peak_labels=True
         """
         if idx >= len(self.data):
             raise IndexError(f"Index {idx} out of range for dataset of size {len(self.data)}")
@@ -165,6 +179,10 @@ class ABRDataset(Dataset):
         static_params = sample['static_params'].astype(np.float32)
         target = int(sample['target'])
         patient_id = str(sample['patient_id'])
+        
+        # Compute peak existence label when multi-task training is enabled
+        if self.return_peak_labels:
+            peak_exists = bool(sample['v_peak_mask'][0] and sample['v_peak_mask'][1])
         
         # Strict length assertion (no resampling allowed)
         assert len(signal) == self.sequence_length, f"Signal length {len(signal)} != {self.sequence_length}. No resampling in dataset."
@@ -186,6 +204,10 @@ class ABRDataset(Dataset):
                 'sample_idx': idx
             }
         }
+        
+        # Add peak labels when multi-task training is enabled
+        if self.return_peak_labels:
+            result['peak_exists'] = torch.tensor(peak_exists, dtype=torch.float32)
         
         # Apply optional transform
         if self.transform:
@@ -251,6 +273,50 @@ class ABRDataset(Dataset):
         class_counts = Counter(self.targets)
         num_classes = len(class_counts)
         total_samples = len(self.targets)
+        
+        if method == 'inverse_freq':
+            weights = []
+            for i in range(num_classes):
+                if i in class_counts:
+                    weights.append(total_samples / class_counts[i])
+                else:
+                    weights.append(1.0)
+        elif method == 'balanced':
+            weights = []
+            for i in range(num_classes):
+                if i in class_counts:
+                    weights.append(total_samples / (num_classes * class_counts[i]))
+                else:
+                    weights.append(1.0)
+        else:
+            raise ValueError(f"Unknown weighting method: {method}")
+        
+        return torch.tensor(weights, dtype=torch.float32)
+    
+    def get_peak_class_weights(self, method: str = 'inverse_freq') -> torch.Tensor:
+        """
+        Calculate class weights for peak detection to handle class imbalance.
+        
+        Args:
+            method (str): Method to calculate weights ('inverse_freq' or 'balanced')
+            
+        Returns:
+            torch.Tensor: Class weights for [negative_class, positive_class]
+        """
+        if not self.return_peak_labels:
+            raise ValueError("Dataset must be initialized with return_peak_labels=True to compute peak class weights")
+        
+        # Extract peak labels from all samples
+        peak_labels = []
+        for idx in range(len(self.data)):
+            sample = self.data[idx]
+            peak_exists = bool(sample['v_peak_mask'][0] and sample['v_peak_mask'][1])
+            peak_labels.append(int(peak_exists))
+        
+        # Calculate class distribution
+        class_counts = Counter(peak_labels)
+        num_classes = 2  # Binary classification: 0 (no peak), 1 (peak exists)
+        total_samples = len(peak_labels)
         
         if method == 'inverse_freq':
             weights = []
@@ -475,11 +541,18 @@ def abr_collate_fn(batch):
     stat_batch = torch.stack([item['stat'] for item in batch])             # [B, 4]
     meta_batch = [item['meta'] for item in batch]                          # List of meta dicts
 
-    return {
+    result = {
         'x0': x0_batch,
         'stat': stat_batch,
         'meta': meta_batch
     }
+    
+    # Handle peak labels when present (multi-task training)
+    if 'peak_exists' in batch[0]:
+        peak_batch = torch.stack([item['peak_exists'] for item in batch])
+        result['peak_exists'] = peak_batch
+    
+    return result
 
 
 def create_optimized_dataloaders(
@@ -494,6 +567,7 @@ def create_optimized_dataloaders(
     prefetch_factor: int = 2,
     persistent_workers: bool = False,
     use_balanced_sampler: bool = False,
+    use_peak_balanced_sampler: bool = False,
     augment: bool = True,
     cfg_dropout_prob: float = 0.1,
     random_state: int = 42,
@@ -514,6 +588,7 @@ def create_optimized_dataloaders(
         prefetch_factor: Number of batches to prefetch
         persistent_workers: Keep workers alive between epochs
         use_balanced_sampler: Use weighted sampling for class balance
+        use_peak_balanced_sampler: Use weighted sampling for peak detection class balance
         augment: Enable data augmentation for training
         cfg_dropout_prob: CFG dropout probability
         random_state: Random seed
@@ -536,6 +611,7 @@ def create_optimized_dataloaders(
         prefetch_factor = config.get('prefetch_factor', prefetch_factor)
         persistent_workers = config.get('persistent_workers', persistent_workers)
         use_balanced_sampler = config.get('use_balanced_sampler', use_balanced_sampler)
+        use_peak_balanced_sampler = config.get('loader', {}).get('use_peak_balanced_sampler', use_peak_balanced_sampler)
         augment = config.get('augment', augment)
         cfg_dropout_prob = config.get('cfg_dropout_prob', cfg_dropout_prob)
         random_state = config.get('random_seed', random_state)
@@ -554,11 +630,11 @@ def create_optimized_dataloaders(
     # Create balanced sampler for training if requested
     train_sampler = None
     if use_balanced_sampler and train_dataset is not None:
-        # Get targets from training dataset
+        # Get targets from training dataset - use meta['target'] instead of sample['target']
         train_targets = []
         for idx in range(len(train_dataset)):
             sample = train_dataset[idx]
-            train_targets.append(sample['target'].item() if torch.is_tensor(sample['target']) else sample['target'])
+            train_targets.append(sample['meta']['target'].item() if torch.is_tensor(sample['meta']['target']) else sample['meta']['target'])
         
         # Calculate class weights
         class_counts = np.bincount(train_targets)
@@ -571,6 +647,35 @@ def create_optimized_dataloaders(
             replacement=True
         )
         print(f"✓ Created balanced sampler with class weights: {class_weights}")
+    
+    # Create peak-balanced sampler for multi-task training if requested
+    if use_peak_balanced_sampler and train_dataset is not None:
+        # Fix peak-balanced sampling to properly handle Subset objects
+        try:
+            # Get parent dataset and indices from Subset
+            parent = train_dataset.dataset
+            idxs = train_dataset.indices
+            
+            # Compute peak labels from parent dataset using Subset indices
+            labels = [int(bool(parent.data[i]['v_peak_mask'][0] and parent.data[i]['v_peak_mask'][1])) for i in idxs]
+            
+            # Calculate peak class weights
+            peak_class_counts = np.bincount(labels)
+            peak_class_weights = 1.0 / (peak_class_counts + 1e-8)
+            peak_sample_weights = [peak_class_weights[label] for label in labels]
+            
+            train_sampler = WeightedRandomSampler(
+                weights=peak_sample_weights,
+                num_samples=len(peak_sample_weights),
+                replacement=True
+            )
+            print(f"✓ Created peak-balanced sampler with class weights: {peak_class_weights}")
+            print(f"  Peak label distribution: {dict(zip(range(len(peak_class_counts)), peak_class_counts))}")
+            print(f"  Training subset size: {len(idxs)}")
+        except Exception as e:
+            print(f"⚠️  Peak-balanced sampling failed: {e}")
+            print("   Falling back to standard sampling")
+            train_sampler = None
     
     # Create optimized data loaders
     train_loader = None
