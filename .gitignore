@@ -8,9 +8,7 @@
 *.xlsx
 *.xls
 *.csv
-data/processed/
 data/raw/
-*.pkl
 *.pickle
 
 # Python
