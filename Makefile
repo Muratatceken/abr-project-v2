@@ -62,6 +62,10 @@ install:
 # Veri
 # ============================================================================
 
+## Veri analizi (görseller + rapor)
+analyze:
+	$(PYTHON) scripts/analyze_dataset.py --excel data/abr_dataset.xlsx --output analysis_results
+
 ## Veri ön-işleme (Excel → pkl)
 preprocess:
 	$(PYTHON) -m data.preprocessing
@@ -123,15 +127,14 @@ sample: check-data
 	@test -f $(CHECKPOINT) || (echo "HATA: $(CHECKPOINT) bulunamadı." && exit 1)
 	@mkdir -p $(OUTPUT_DIR)
 	$(PYTHON) -c "\
-import torch, json, numpy as np; \
+import torch, numpy as np; \
 from models import ABRTransformerGenerator; \
 from inference import DDIMSampler; \
-from utils import prepare_noise_schedule; \
 \
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); \
 print(f'Device: {device}'); \
 \
-ckpt = torch.load('$(CHECKPOINT)', map_location=device); \
+ckpt = torch.load('$(CHECKPOINT)', map_location=device, weights_only=False); \
 cfg = ckpt['config']; \
 model = ABRTransformerGenerator(**cfg['model']).to(device); \
 model.load_state_dict(ckpt['model_state_dict']); \
@@ -141,11 +144,11 @@ sampler = DDIMSampler(model, cfg['diffusion']['num_train_steps'], device); \
 samples = sampler.sample(batch_size=$(NUM_SAMPLES), steps=$(SAMPLE_STEPS), eta=$(ETA), cfg_scale=$(CFG_SCALE)); \
 \
 np.save('$(OUTPUT_DIR)/synthetic_abr_signals.npy', samples.cpu().numpy()); \
-print(f'✓ {$(NUM_SAMPLES)} sentetik ABR sinyali üretildi → $(OUTPUT_DIR)/synthetic_abr_signals.npy'); \
-print(f'  Shape: {samples.shape}'); \
+print(f'Shape: {samples.shape}'); \
+print(f'Saved to $(OUTPUT_DIR)/synthetic_abr_signals.npy'); \
 "
 
-## Koşullu sinyal üret (belirli klinik parametrelerle)
+## Sınıf-koşullu sinyal üret (belirli hearing loss tipi ve intensity ile)
 sample-conditioned: check-data
 	@test -f $(CHECKPOINT) || (echo "HATA: $(CHECKPOINT) bulunamadı." && exit 1)
 	@mkdir -p $(OUTPUT_DIR)
@@ -155,7 +158,7 @@ from models import ABRTransformerGenerator; \
 from inference import DDIMSampler; \
 \
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'); \
-ckpt = torch.load('$(CHECKPOINT)', map_location=device); \
+ckpt = torch.load('$(CHECKPOINT)', map_location=device, weights_only=False); \
 cfg = ckpt['config']; \
 model = ABRTransformerGenerator(**cfg['model']).to(device); \
 model.load_state_dict(ckpt['model_state_dict']); \
@@ -163,16 +166,20 @@ model.eval(); \
 \
 sampler = DDIMSampler(model, cfg['diffusion']['num_train_steps'], device); \
 \
-# Örnek conditioning: normalize edilmiş [Age, Intensity, StimRate, FMP] \
-static = torch.tensor([[ 0.0,  1.0,  0.0,  0.5],   \
-                        [ 0.0, -1.0,  0.0,  0.5],   \
-                        [ 1.0,  1.0,  0.0, -0.5],   \
-                        [-1.0,  0.0,  0.0,  0.0]], device=device); \
-\
-samples = sampler.sample_conditioned(static_params=static, steps=$(SAMPLE_STEPS), eta=$(ETA)); \
-np.save('$(OUTPUT_DIR)/synthetic_abr_conditioned.npy', samples.cpu().numpy()); \
-np.save('$(OUTPUT_DIR)/synthetic_abr_conditions.npy', static.cpu().numpy()); \
-print(f'✓ {static.shape[0]} koşullu sinyal üretildi → $(OUTPUT_DIR)/'); \
+# Generate for each class at 80 dB intensity \
+classes = ['NORMAL', 'SNIK', 'ITIK', 'TOTAL', 'NOROPATI']; \
+all_samples = []; \
+for cls_id in range(5): \
+    intensity = torch.tensor([0.8] * 4, device=device); \
+    aux = torch.zeros(4, 3, device=device); \
+    cls = torch.tensor([cls_id] * 4, device=device); \
+    s = sampler.sample_class_conditioned(cls, intensity=intensity, aux_static=aux, \
+                                         steps=$(SAMPLE_STEPS), cfg_scale=$(CFG_SCALE)); \
+    all_samples.append(s.cpu().numpy()); \
+    print(f'  {classes[cls_id]}: {s.shape}'); \
+all_samples = np.concatenate(all_samples, axis=0); \
+np.save('$(OUTPUT_DIR)/synthetic_abr_class_conditioned.npy', all_samples); \
+print(f'Saved {all_samples.shape[0]} samples to $(OUTPUT_DIR)/'); \
 "
 
 # ============================================================================

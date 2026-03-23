@@ -1,28 +1,21 @@
-# ABR Transformer Training Configuration
-# Professional training pipeline for v-prediction diffusion
+# ABR Transformer V2 — Intensity-Conditioned Diffusion Training Config
+# ═════════════════════════════════════════════════════════════════════
 
-# Basic experiment settings
 seed: 42
-device: "cuda"  # Will fallback to CPU if CUDA unavailable
+device: "cuda"
 log_dir: "runs/abr_transformer"
-exp_name: "abr_vpred_base"
+exp_name: "abr_intensity_cond_v2"
 
-# Dataset configuration
+# ── Dataset ──────────────────────────────────────────────────────────
 data:
-  # Paths to CSV files used by dataset.py (update these paths)
-  train_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"  # Using pkl for now, adapt as needed
-  val_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"    # Same file, will be split
-  
-  # Dataset properties (must match ABRTransformerGenerator)
+  train_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"
   sequence_length: 200
   static_order: ["Age", "Intensity", "Stimulus Rate", "FMP"]
-  
-  # Data splits
   train_ratio: 0.7
   val_ratio: 0.15
   test_ratio: 0.15
 
-# DataLoader configuration
+# ── DataLoader ───────────────────────────────────────────────────────
 loader:
   batch_size: 32
   num_workers: 4
@@ -30,425 +23,117 @@ loader:
   drop_last: true
   prefetch_factor: 2
   persistent_workers: false
-  
-  # Peak-balanced sampling for multi-task training
-  use_peak_balanced_sampler: true
-  peak_sampling_strategy: 'weighted'  # Options: 'weighted', 'oversample'
 
-# Model architecture
+# ── Model ────────────────────────────────────────────────────────────
 model:
-  # ABRTransformerGenerator parameters
+  sequence_length: 200
+  d_model: 192
+  n_layers: 4
+  n_heads: 6
+  ff_mult: 4
+  dropout: 0.08
+  num_classes: 5
+  intensity_emb_dim: 64
+  aux_static_dim: 3
+  # Legacy compat (passed but handled internally)
   input_channels: 1
   static_dim: 4
-  sequence_length: 200  # Must match data.sequence_length
-  
-  # Transformer architecture
-  d_model: 256
-  n_layers: 6
-  n_heads: 8
-  ff_mult: 4
-  dropout: 0.1
-  
-  # Conditioning options
-  use_timestep_cond: true
-  use_static_film: true
-  
-  # Advanced architectural features (controlled by ablation config)
-  use_cross_attention: ${ablation.use_cross_attention}
-  joint_static_generation: ${ablation.joint_static_generation}
-  use_learned_pos_emb: ${ablation.use_learned_pos_emb}
-  film_residual: ${ablation.film_residual}
-  use_multi_scale_fusion: ${ablation.use_multi_scale_fusion}
-  use_advanced_blocks: ${ablation.use_advanced_blocks}
-  ablation_mode: ${ablation.ablation_mode}
 
-# Ablation study configuration for publication
-# Each component can be enabled/disabled independently for systematic evaluation
-ablation:
-  # Cross-attention between static params and signal features
-  # Enables bidirectional information flow between static parameters and signal features
-  # Expected impact: Better integration of clinical parameters with signal generation
-  use_cross_attention: false
-  cross_attention_heads: 4
-  cross_attention_dropout: 0.1
-  
-  # Joint generation of static parameters
-  # Enables the model to reconstruct static parameters from signal features
-  # Expected impact: Better understanding of signal-parameter relationships
-  joint_static_generation: false
-  static_recon_weight: 0.1  # Loss weight for static parameter reconstruction
-  
-  # Enhanced positional encodings
-  # Replaces identity positioning with learnable positional embeddings
-  # Expected impact: Better temporal understanding and sequence modeling
-  use_learned_pos_emb: false
-  pos_emb_dropout: 0.1
-  
-  # Residual FiLM connections
-  # Adds residual connections in FiLM layers for improved gradient flow
-  # Expected impact: Better training stability and convergence
-  film_residual: false
-  
-  # Multi-scale feature fusion
-  # Applies multi-scale temporal processing for different feature scales
-  # Expected impact: Better capture of both local and global temporal patterns
-  use_multi_scale_fusion: false
-  fusion_scales: [1, 3, 5, 7]
-  
-  # Enhanced attention mechanisms
-  # Enables advanced transformer blocks with multi-scale attention and gated FFN
-  # Expected impact: Better expressivity and temporal pattern recognition
-  use_advanced_blocks: false
-  use_multi_scale_attention: false
-  use_gated_ffn: false
-  attention_dropout: 0.1
-  
-  # Ablation study presets
-  ablation_mode: "none"  # Options: none, minimal, cross_attn_only, film_residual_only, pos_emb_only, multi_scale_only, full
+# ── Conditioning ─────────────────────────────────────────────────────
+conditioning:
+  cfg_dropout_prob: 0.10          # drop intensity + aux_static
+  class_cfg_dropout_prob: 0.15    # drop class label only
+  both_cfg_dropout_prob: 0.05     # drop everything (fully unconditional)
+  intensity_normalization: "unit_range"
+  fmp_clip_percentile: 99
 
-# Multi-task learning configuration
-multi_task:
-  # Enable multi-task training (signal + peak + static reconstruction)
-  enabled: true
-  
-  # Loss weights for different tasks
-  loss_weights:
-    signal: 1.0
-    peak_classification: 0.5
-    static_reconstruction: 0.1
-  
-  # Task-specific learning rates
-  task_lr_multipliers:
-    signal: 1.0
-    peak_classification: 0.8
-    static_reconstruction: 1.2
-  
-  # Class weighting method for peak detection
-  class_weighting_method: 'inverse_freq'
-  
-  # Validation metric for best model selection
-  validation_metric: 'combined'
-  validation_weights:
-    signal: 0.7
-    peak_classification: 0.3
-  
-  # Progressive training configuration
-  progressive_weighting:
-    enabled: true
-    schedule_type: 'linear'  # Options: 'linear', 'cosine'
-    peak_classification:
-      start_epoch: 0
-      end_epoch: 20
-      start_weight: 0.0
-      end_weight: 0.5
-    static_reconstruction:
-      start_epoch: 10
-      end_epoch: 30
-      start_weight: 0.0
-      end_weight: 0.1
-  
-  # Advanced optimization features
-  advanced_optimization:
-    per_task_lr: true
-    gradient_clipping_per_task: true
-    ema_per_task: false  # Future extension
-
-# Diffusion configuration
+# ── Diffusion ────────────────────────────────────────────────────────
 diffusion:
-  # Training schedule
   num_train_steps: 1000
-  schedule: "cosine"  # Currently only cosine supported
+  schedule: "cosine"
   v_prediction: true
-  
-  # Sampling/inference
-  sample_steps: 60
-  ddim_eta: 0.0  # Deterministic sampling
-  cfg_scale: 1.0  # Classifier-free guidance scale
+  sample_steps: 50
+  ddim_eta: 0.0
+  cfg_scale: 2.0
+  class_cfg_scale: 1.5
 
-# Optimization configuration
+# ── Optimizer ────────────────────────────────────────────────────────
 optim:
-  lr: 0.0001
+  lr: 0.0002
   betas: [0.9, 0.99]
   weight_decay: 0.00001
   grad_clip: 1.0
-  
-  # Mixed precision and EMA
   amp: true
   ema_decay: 0.999
 
-# Loss configuration
+# ── Loss ─────────────────────────────────────────────────────────────
 loss:
-  # STFT loss weight (0.0 to disable)
   stft_weight: 0.15
-  
-  # STFT parameters
   stft:
     n_fft: 64
     hop_length: 16
     win_length: 64
     eps: 0.00000001
 
-# Training loop configuration
+# ── Trainer ──────────────────────────────────────────────────────────
 trainer:
-  max_epochs: 100
+  max_epochs: 200
   log_every_steps: 50
   validate_every_epochs: 1
-  
-  # Sampling and visualization
-  sample_every_epochs: 2
+  sample_every_epochs: 5
   num_val_plots: 8
   num_sample_plots: 8
-  
-  # Checkpointing
   ckpt_dir: "checkpoints/abr_transformer"
-  save_every_epochs: 5
-  keep_last_k: 5  # Keep last 5 epoch checkpoints
-  resume: ""  # Path to checkpoint to resume from (empty = start fresh)
-  
-  # Early stopping (optional)
-  early_stop_patience: 20
-  early_stop_min_delta: 0.000001
+  save_every_epochs: 10
+  keep_last_k: 5
+  resume: ""
 
-# Visualization configuration
+# ── LR Scheduler ────────────────────────────────────────────────────
+advanced:
+  cfg_dropout_prob: 0.1
+  lr_scheduler: "cosine"
+  lr_warmup_steps: 500
+
+# ── Visualization ───────────────────────────────────────────────────
 viz:
   plot_spectrogram: true
-  plot_audio: false  # Disabled for ABR signals
-  audio_sample_rate: 20000  # 20kHz (if audio enabled)
-  
-  # Plot customization
+  plot_audio: false
   max_waveform_plots: 8
   max_spectrogram_plots: 4
-  figsize: [12, 8]
 
-# Advanced training options
-advanced:
-  # Classifier-free guidance dropout during training
-  cfg_dropout_prob: 0.1
-  
-  # Gradient monitoring
-  log_grad_norm: true
-  log_param_norm: true
-  grad_norm_clip: 1.0
-  
-  # Learning rate scheduling
-  lr_scheduler: "cosine"  # Options: cosine, linear, constant
-  lr_warmup_steps: 1000
-  
-  # Validation options
-  val_sample_cfg_scales: [1.0, 1.5, 2.0]  # Different CFG scales for validation
-
-# Multi-task logging configuration
-logging:
-  # Classification metrics logging
-  log_classification_metrics: true
-  log_confusion_matrix: true
-  log_pr_curves: true
-  
-  # Task-specific monitoring
-  log_gradient_norms_per_task: true
-  log_parameter_norms_per_task: true
-  
-  # Advanced visualizations
-  log_peak_logits_histograms: true
-  log_precision_recall_curves: true
-  # TensorBoard scalars
-  log_loss_components: true
-  log_learning_rate: true
-  log_gradient_norm: true
-  log_parameter_histograms: false  # Can be expensive
-  
-  # Console logging
-  console_log_level: "INFO"
-  
-  # Checkpoint metadata
-  save_config_with_checkpoint: true
-  save_model_summary: true
-
-# Hardware and performance
-performance:
-  # Memory optimization
-  gradient_checkpointing: false
-  pin_memory: true
-  non_blocking: true
-  
-  # Multi-GPU (future extension)
-  distributed: false
-  find_unused_parameters: false
-
-# Reproducibility
-reproducibility:
-  deterministic: false  # Set to true for full reproducibility (slower)
-  benchmark: true      # Use cudNN benchmarking for speed
-
-# Advanced Training Features Configuration
-# These features are disabled by default for backward compatibility
-
-# Curriculum Learning Configuration
-curriculum_learning:
-  enabled: false
-  difficulty_metric: 'combined'  # Options: 'snr', 'peak_complexity', 'hearing_loss', 'combined'
-  scheduler_type: 'linear'       # Options: 'linear', 'exponential', 'step'
-  start_difficulty: 0.3          # Start with easier 30% of samples
-  end_difficulty: 1.0            # End with all samples
-  curriculum_epochs: 50          # Epochs to complete curriculum
-  anti_curriculum: false         # Option for hard-to-easy training
-  update_frequency: 1            # Update curriculum every N epochs
-  difficulty_weights:            # Weights for combined difficulty metric
-    snr: 0.4
-    peaks: 0.4
-    hearing_loss: 0.2
-
-# Focal Loss Configuration
-focal_loss:
-  enabled: false                 # Use BCE by default
-  alpha: 0.25                    # Class weighting parameter
-  gamma: 2.0                     # Focusing parameter for hard examples
-  reduction: 'mean'              # Loss reduction method
-
-# Advanced Augmentation Configuration
+# ── Augmentation ────────────────────────────────────────────────────
 advanced_augmentation:
-  enabled: true                  # Enable advanced augmentations
-  mixup_prob: 0.2               # Probability of applying mixup
-  cutmix_prob: 0.2              # Probability of applying cutmix
-  time_stretch_prob: 0.1        # Probability of time stretching
-  amplitude_scaling_range: [0.8, 1.2]  # Amplitude scaling range
-  preserve_peaks: true          # Preserve peak structure during augmentation
-  curriculum_aware: true        # Easier augmentations early in training
-  augmentation_strength: 1.0    # Overall augmentation intensity multiplier
-  
-  # ABR-specific augmentations
-  abr_specific:
-    peak_jitter_std: 0.05       # Peak timing jitter (ms)
-    baseline_drift_std: 0.01    # Baseline drift standard deviation
-    electrode_noise_std: 0.005  # Electrode noise standard deviation
-    stimulus_artifact_prob: 0.1 # Probability of stimulus artifacts
+  enabled: true
+  time_shift_samples: 2
+  noise_std: 0.01
+  apply_prob: 0.5
+  mixup_prob: 0.15
+  cutmix_prob: 0.15
+  augmentation_strength: 1.0
+  curriculum_aware: true
 
-# Knowledge Distillation Configuration
-knowledge_distillation:
-  enabled: false                # Disabled by default
-  teacher_checkpoint: null      # Path to teacher model checkpoint
-  temperature: 4.0              # Distillation temperature
-  alpha: 0.7                    # Balance between student loss and distillation loss
-  feature_distillation: true    # Enable feature-level distillation
-  distillation_layers: ['transformer.4', 'transformer.5']  # Layers for feature matching
-  feature_weight: 0.1           # Weight for feature matching loss
-  
-  # Multi-task distillation
-  multi_task:
-    enabled: false
-    task_weights:
-      signal: 0.7
-      peak_classification: 0.3
-    cross_task_distillation: false
-
-# Ensemble Training Configuration
-ensemble_training:
-  enabled: false                # Disabled by default
-  snapshot_ensemble: true       # Collect snapshots during training
-  snapshot_epochs: [20, 40, 60, 80, 100]  # Epochs to collect snapshots
-  ensemble_size: 5              # Maximum number of models in ensemble
-  diversity_weight: 0.1         # Weight for diversity regularization
-  
-  # Ensemble strategies
-  weighting_strategy: 'performance'  # Options: 'equal', 'performance', 'diversity'
-  uncertainty_estimation: true  # Enable uncertainty quantification
-
-# Hyperparameter Optimization Configuration
-hyperparameter_optimization:
-  enabled: false                # Disabled by default
-  backend: 'optuna'             # Optimization backend
-  n_trials: 100                 # Number of optimization trials
-  timeout: 3600                 # Timeout per trial in seconds
-  pruning: true                 # Enable early pruning of unpromising trials
-  search_space: 'default'       # Predefined search space
-  
-  # Optuna-specific settings
-  optuna:
-    sampler: 'tpe'              # Options: 'tpe', 'random', 'cmaes'
-    pruner: 'median'            # Options: 'median', 'hyperband', 'none'
-    n_startup_trials: 10
-    n_warmup_steps: 5
-    
-  # Multi-objective optimization
-  multi_objective:
-    enabled: false
-    objectives: ['val_combined_score', 'training_time']
-    directions: ['maximize', 'minimize']
-
-# Cross-Validation Configuration
-cross_validation:
-  enabled: false                # Disabled by default
-  n_folds: 5                    # Number of CV folds
-  stratified: true              # Use stratified splitting
-  patient_level: true           # Ensure no patient overlap between folds
-  parallel_training: false      # Train folds in parallel
-  
-  # CV-specific settings
-  cv_type: 'stratified_patient' # Options: 'stratified_patient', 'time_series', 'standard'
-  min_samples_per_class: 1      # Minimum samples per class per fold
-  
-  # Result aggregation
-  aggregation_method: 'mean'    # Options: 'mean', 'weighted_mean'
-  confidence_intervals: true    # Compute confidence intervals
-  statistical_tests: true      # Perform statistical significance tests
-
-# Early Stopping Configuration (Enhanced)
+# ── Early Stopping ──────────────────────────────────────────────────
 early_stopping:
-  enabled: true                 # Enable early stopping
-  type: 'basic'                 # Options: 'basic', 'multi_task', 'adaptive'
-  patience: 20                  # Number of epochs to wait
-  min_delta: 0.000001          # Minimum improvement threshold
-  metric: 'val_combined_score'  # Metric to monitor
-  mode: 'min'                   # Optimization direction ('min' or 'max')
-  restore_best_weights: true    # Restore best weights on early stop
-  warmup_epochs: 10             # Epochs before early stopping can trigger
-  
-  # Multi-task early stopping
-  multi_task:
-    task_configs:
-      signal:
-        patience: 15
-        min_delta: 0.0001
-        mode: 'min'
-      peak_classification:
-        patience: 25
-        min_delta: 0.001
-        mode: 'max'
-    combination_strategy: 'weighted_average'
-    task_weights:
-      signal: 0.7
-      peak_classification: 0.3
-      
-  # Adaptive early stopping
-  adaptive:
-    patience_factor: 1.5
-    lr_patience_multiplier: 2.0
-    plateau_threshold: 5
+  enabled: true
+  type: 'basic'
+  patience: 30
+  min_delta: 0.000001
+  metric: 'val_signal_mse'
+  mode: 'min'
+  restore_best_weights: true
+  warmup_epochs: 15
 
-# Comprehensive Monitoring Configuration
+# ── Monitoring ──────────────────────────────────────────────────────
 monitoring:
-  enabled: true                 # Enable comprehensive monitoring
-  save_dir: 'monitoring'        # Directory to save monitoring data
-  
-  # Metric tracking
-  track_gradients: true         # Monitor gradient norms and flow
-  track_activations: false      # Monitor layer activations (expensive)
-  track_resources: true         # Monitor system resources
-  smoothing_window: 10          # Window for metric smoothing
-  
-  # Resource monitoring
+  enabled: true
+  save_dir: 'monitoring'
+  track_gradients: true
+  track_activations: false
+  track_resources: true
   resource_monitoring:
     enabled: true
-    update_interval: 1.0        # Update interval in seconds
-    monitor_gpu: true           # Monitor GPU usage and memory
-    
-  # Model health monitoring
   model_health:
     enabled: true
-    dead_neuron_threshold: 1e-6 # Threshold for dead neuron detection
-    gradient_clip_threshold: 10.0  # Threshold for gradient clipping alerts
-    
-  # Alerting system
   alerts:
     enabled: true
     alert_configs:
@@ -456,84 +141,7 @@ monitoring:
         threshold: 10.0
         condition: 'greater'
         consecutive_violations: 3
-      - metric_name: 'memory_percent'
-        threshold: 90.0
-        condition: 'greater'
-        consecutive_violations: 2
-      - metric_name: 'val_loss'
-        threshold: 0.001
-        condition: 'less'
-        consecutive_violations: 5
-        
-  # Dashboard configuration
-  dashboard:
-    enabled: false              # Real-time dashboard (requires web framework)
-    port: 8080                  # Dashboard port
-    update_interval: 5.0        # Dashboard update interval
 
-# Advanced Loss Configuration
-advanced_loss:
-  # Combined loss for multi-task learning
-  combined_loss:
-    enabled: false
-    adaptive_weighting: true    # Automatic loss balancing
-    uncertainty_weighting: false  # Uncertainty-based weighting
-    
-  # Loss scheduling
-  loss_scheduling:
-    enabled: false
-    schedule_type: 'linear'     # Options: 'linear', 'cosine', 'step'
-    
-# Advanced Optimizer Configuration
-advanced_optimizer:
-  # Parameter groups with different learning rates
-  parameter_groups:
-    enabled: false
-    groups:
-      backbone:
-        lr_multiplier: 1.0
-        weight_decay_multiplier: 1.0
-      head:
-        lr_multiplier: 2.0
-        weight_decay_multiplier: 0.5
-        
-  # Advanced scheduling
-  lr_scheduling:
-    scheduler: 'cosine'         # Options: 'cosine', 'linear', 'step', 'plateau'
-    warmup_epochs: 5
-    cosine_restarts: false
-    eta_min: 1e-6
-    
-  # Gradient modifications
-  gradient_modifications:
-    gradient_centralization: false
-    gradient_standardization: false
-
-# Knowledge Distillation Configuration (extended)
-# NOTE: The primary knowledge_distillation block is defined above (line ~327).
-# This block merges with / overrides it when both are present.
-# In YAML, duplicate keys cause the last definition to win — consolidated here.
-knowledge_distillation_extended:
-  # Multi-task distillation settings
-  multi_task:
-    enabled: false
-    task_types:
-      signal: 'regression'
-      peak_classification: 'classification'
-    task_configs:
-      signal:
-        temperature: 4.0
-        alpha: 0.7
-        loss_fn: 'mse'
-        feature_matching: false
-      peak_classification:
-        temperature: 4.0
-        alpha: 0.5
-        loss_fn: 'ce'
-        feature_matching: true
-        feature_weight: 0.1
-    global_temperature: 4.0
-    cross_task_distillation: false
-  teacher:
-    model_path: ''
-    freeze_teacher: true
+# ── Logging ─────────────────────────────────────────────────────────
+logging:
+  console_log_level: "INFO"

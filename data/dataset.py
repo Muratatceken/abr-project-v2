@@ -196,20 +196,23 @@ class ABRDataset(Dataset):
             if signal_std > 1e-8:
                 signal = (signal - np.mean(signal)) / signal_std
         
-        # Convert to required format for training pipeline
+        # Decomposed conditioning for intensity-conditioned diffusion
+        # static_params order: [Age, Intensity, StimRate, FMP]
+        intensity = static_params[1] / 100.0 if not self.normalize_signal else static_params[1]
+        aux_static = np.array([static_params[0], static_params[2], static_params[3]], dtype=np.float32)
+
         result = {
-            'x0': torch.tensor(signal, dtype=torch.float32).unsqueeze(0),  # [1, T] for conv1d
-            'stat': torch.tensor(static_params, dtype=torch.float32),      # [S] static params
+            'x0': torch.tensor(signal, dtype=torch.float32).unsqueeze(0),  # [1, T]
+            'intensity': torch.tensor(intensity, dtype=torch.float32),      # scalar
+            'aux_static': torch.tensor(aux_static, dtype=torch.float32),    # [3]
+            'class_label': torch.tensor(target, dtype=torch.long),          # int
+            'stat': torch.tensor(static_params, dtype=torch.float32),       # [4] legacy compat
             'meta': {
                 'patient_id': patient_id,
                 'target': target,
                 'sample_idx': idx
             }
         }
-        
-        # Add peak labels when multi-task training is enabled
-        if self.return_peak_labels:
-            result['peak_exists'] = torch.tensor(peak_exists, dtype=torch.float32)
         
         # Apply optional transform
         if self.transform:
@@ -565,21 +568,14 @@ def load_ultimate_dataset(
 
 def abr_collate_fn(batch):
     """Collate function for training pipeline format."""
-    x0_batch = torch.stack([item['x0'] for item in batch])                 # [B, 1, 200]
-    stat_batch = torch.stack([item['stat'] for item in batch])             # [B, 4]
-    meta_batch = [item['meta'] for item in batch]                          # List of meta dicts
-
     result = {
-        'x0': x0_batch,
-        'stat': stat_batch,
-        'meta': meta_batch
+        'x0': torch.stack([item['x0'] for item in batch]),                # [B, 1, 200]
+        'intensity': torch.stack([item['intensity'] for item in batch]),   # [B]
+        'aux_static': torch.stack([item['aux_static'] for item in batch]),# [B, 3]
+        'class_label': torch.stack([item['class_label'] for item in batch]),# [B]
+        'stat': torch.stack([item['stat'] for item in batch]),             # [B, 4] legacy
+        'meta': [item['meta'] for item in batch],
     }
-    
-    # Handle peak labels when present (multi-task training)
-    if 'peak_exists' in batch[0]:
-        peak_batch = torch.stack([item['peak_exists'] for item in batch])
-        result['peak_exists'] = peak_batch
-    
     return result
 
 

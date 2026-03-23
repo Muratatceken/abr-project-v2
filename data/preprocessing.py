@@ -181,7 +181,15 @@ def load_and_preprocess_ultimate_dataset(
     
     # Extract static parameters
     static_data = df_filtered[static_columns].values.astype(float)
-    
+
+    # Clip FMP outliers to 99th percentile (max=1515 vs mean=2.4 causes instability)
+    fmp_col_idx = static_columns.index('FMP')
+    fmp_cap = np.percentile(static_data[:, fmp_col_idx], 99)
+    n_clipped = int((static_data[:, fmp_col_idx] > fmp_cap).sum())
+    static_data[:, fmp_col_idx] = np.clip(static_data[:, fmp_col_idx], 0, fmp_cap)
+    if verbose:
+        print(f"    FMP clipped to 99th percentile ({fmp_cap:.2f}): {n_clipped} samples affected")
+
     # Extract time series data
     time_series_data = df_filtered[time_series_cols].values.astype(float)
     

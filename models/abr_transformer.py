@@ -1,196 +1,224 @@
 """
-ABR Transformer Generator for T=200 ABR Signal Generation
+ABR Transformer Generator V2 — Intensity-Conditioned Diffusion
 
-A flat Transformer-based approach replacing the hierarchical U-Net+S4 design.
-This implementation focuses on simplicity and effectiveness for short ABR windows.
+Simplified, focused architecture for synthetic ABR signal generation.
+Key design choices:
+- Intensity gets a dedicated sinusoidal embedding pathway (primary ABR parameter)
+- Class-conditional generation for 5 hearing loss types
+- Lightweight backbone (~2.8M params) appropriate for T=200 signals
+- Dual classifier-free guidance (static + class)
+- V-prediction diffusion parameterization
 
-Features:
-- Single-path Transformer architecture (no U-Net hierarchy)
-- FiLM conditioning for static parameters
-- Timestep conditioning for diffusion training
-- Single signal generation head
-- T=200 sequence length optimized
+Forward:
+    x: [B, 1, T]
+    intensity: [B] or None          # 0–1 normalized intensity
+    aux_static: [B, 3] or None      # [Age, StimRate, FMP]
+    class_label: [B] (long) or None # hearing loss class 0–4
+    timesteps: [B] or None          # diffusion timestep index
+    returns {"signal": [B, 1, T]}
 """
 
 import math
-from typing import Optional, Dict, Any, Union
+from typing import Optional, Dict, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .blocks.transformer_block import MultiLayerTransformerBlock, MultiHeadAttention, CrossAttentionTransformerBlock
-from .blocks.film import ConditionalEmbedding, TokenFiLM
-from .blocks.heads import AttentionPooling
-from .blocks.positional import LearnedPositionalEmbedding
-from .blocks.heads import MultiScaleFeatureExtractor
+from .blocks.transformer_block import MultiLayerTransformerBlock
+from .blocks.film import TokenFiLM
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Building blocks
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class MultiScaleStem(nn.Module):
-    """
-    Multi-branch Conv1D stem to preserve sharp transients (k=3),
-    peak shapes (k=7), and slow trends (k=15). Fused to d_model.
-    """
+    """Multi-branch Conv1D stem: sharp transients (k=3), peaks (k=7), trends (k=15)."""
+
     def __init__(self, d_model: int):
         super().__init__()
         c = max(1, d_model // 3)
-        # Three branches; if d_model not divisible by 3, the 1x1 fuse maps back to d_model.
-        self.b3  = nn.Sequential(nn.Conv1d(1, c,  kernel_size=3,  padding=1),
+        self.b3  = nn.Sequential(nn.Conv1d(1, c, kernel_size=3,  padding=1),
                                  nn.GroupNorm(1, c), nn.GELU())
-        self.b7  = nn.Sequential(nn.Conv1d(1, c,  kernel_size=7,  padding=3),
+        self.b7  = nn.Sequential(nn.Conv1d(1, c, kernel_size=7,  padding=3),
                                  nn.GroupNorm(1, c), nn.GELU())
-        self.b15 = nn.Sequential(nn.Conv1d(1, c,  kernel_size=15, padding=7),
+        self.b15 = nn.Sequential(nn.Conv1d(1, c, kernel_size=15, padding=7),
                                  nn.GroupNorm(1, c), nn.GELU())
         self.fuse = nn.Conv1d(3 * c, d_model, kernel_size=1)
 
     def forward(self, x):  # x: [B, 1, T]
-        h = torch.cat([self.b3(x), self.b7(x), self.b15(x)], dim=1)
-        return self.fuse(h)
+        return self.fuse(torch.cat([self.b3(x), self.b7(x), self.b15(x)], dim=1))
 
 
-
+def sinusoidal_embedding(values: torch.Tensor, dim: int) -> torch.Tensor:
+    """Sinusoidal positional embedding for scalar values [B] -> [B, dim]."""
+    half = dim // 2
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(0, half, device=values.device).float() / float(half)
+    )
+    args = values.float().unsqueeze(1) * freqs.unsqueeze(0)  # [B, half]
+    emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+    if dim % 2 == 1:
+        emb = F.pad(emb, (0, 1))
+    return emb
 
 
 class TimestepAdapter(nn.Module):
-    """
-    Additive timestep embedding for diffusion, broadcast across tokens.
-    If timesteps is None, it's a no-op.
-    """
-    def __init__(self, d_model: int, hidden: int = 256):
-        super().__init__()
-        self.d_model = d_model
-        self.proj = nn.Sequential(
-            nn.Linear(d_model, hidden), 
-            nn.SiLU(),
-            nn.Linear(hidden, d_model)
-        )
+    """Additive timestep embedding for diffusion, broadcast across tokens."""
 
-    @staticmethod
-    def sinusoidal_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
-        """Create sinusoidal timestep embeddings."""
-        device = t.device
-        half = dim // 2
-        t = t.float().unsqueeze(1)  # [B, 1]
-        freqs = torch.exp(
-            -math.log(10000.0) * torch.arange(0, half, device=device).float() / float(half)
-        )  # [half]
-        args = t * freqs  # [B, half]
-        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=1)  # [B, dim or dim-1]
-        if dim % 2 == 1:
-            emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=1)
-        return emb
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.SiLU(), nn.Linear(d_model, d_model)
+        )
+        self.d_model = d_model
 
     def forward(self, x: torch.Tensor, timesteps: Optional[torch.Tensor]) -> torch.Tensor:
-        """
-        Add timestep conditioning to token embeddings.
-        
-        Args:
-            x: Token embeddings [B, T, D]
-            timesteps: Timestep indices [B] or None
-            
-        Returns:
-            Conditioned embeddings [B, T, D]
-        """
         if timesteps is None:
             return x
-        
-        B, T, D = x.shape
-        t_emb = self.sinusoidal_embedding(timesteps, D)  # [B, D]
-        t_emb = self.proj(t_emb)                         # [B, D]
-        return x + t_emb.unsqueeze(1)                    # broadcast over T
+        t_emb = sinusoidal_embedding(timesteps, self.d_model)
+        return x + self.proj(t_emb).unsqueeze(1)
 
+
+class IntensityEmbedding(nn.Module):
+    """Dedicated sinusoidal + MLP embedding for stimulus intensity (0–1 normalized)."""
+
+    def __init__(self, d_model: int, emb_dim: int = 64):
+        super().__init__()
+        self.emb_dim = emb_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(emb_dim, d_model),
+            nn.SiLU(),
+            nn.Linear(d_model, d_model),
+        )
+
+    def forward(self, intensity: torch.Tensor) -> torch.Tensor:
+        """intensity: [B] scalar in [0, 1] -> [B, d_model]"""
+        emb = sinusoidal_embedding(intensity * 1000.0, self.emb_dim)  # scale for richer frequencies
+        return self.mlp(emb)
+
+
+class AuxStaticEmbedding(nn.Module):
+    """MLP embedding for auxiliary static parameters [Age, StimRate, FMP]."""
+
+    def __init__(self, input_dim: int, d_model: int, hidden: int = 64):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden),
+            nn.SiLU(),
+            nn.LayerNorm(hidden),
+            nn.Linear(hidden, d_model),
+        )
+
+    def forward(self, aux: torch.Tensor) -> torch.Tensor:
+        """aux: [B, input_dim] -> [B, d_model]"""
+        return self.mlp(aux)
+
+
+class ClassEmbedding(nn.Module):
+    """Learnable embedding for hearing loss class labels with unconditional support."""
+
+    def __init__(self, num_classes: int, d_model: int):
+        super().__init__()
+        self.emb = nn.Embedding(num_classes, d_model)
+        self.uncond_emb = nn.Parameter(torch.zeros(d_model))
+        nn.init.normal_(self.uncond_emb, std=0.02)
+
+    def forward(self, class_label: Optional[torch.Tensor], batch_size: int = 1) -> torch.Tensor:
+        """class_label: [B] long or None -> [B, d_model]"""
+        if class_label is None:
+            return self.uncond_emb.unsqueeze(0).expand(batch_size, -1)
+        return self.emb(class_label)
+
+
+class ConditioningFiLM(nn.Module):
+    """
+    FiLM conditioning that accepts pre-embedded conditioning vectors.
+    Applies: x_norm * (1 + gamma) + beta, where gamma/beta are projected from conditioning.
+    """
+
+    def __init__(self, d_model: int, hidden: int = 256, dropout: float = 0.08):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        self.proj = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 2 * d_model),
+        )
+        # Unconditional embedding for CFG
+        self.uncond_emb = nn.Parameter(torch.zeros(d_model))
+        nn.init.normal_(self.uncond_emb, std=0.02)
+        # Small non-zero init for gradient flow
+        nn.init.normal_(self.proj[-1].weight, std=1e-3)
+        nn.init.zeros_(self.proj[-1].bias)
+
+    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor]) -> torch.Tensor:
+        """
+        x: [B, T, D], cond: [B, D] or None -> [B, T, D]
+        """
+        if cond is None:
+            cond = self.uncond_emb.unsqueeze(0).expand(x.shape[0], -1)
+        gam_beta = self.proj(cond)            # [B, 2*D]
+        gamma, beta = gam_beta.chunk(2, dim=-1)
+        x_norm = self.norm(x)
+        return x_norm * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main model
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class ABRTransformerGenerator(nn.Module):
     """
-    Flat Transformer-based ABR generator for short windows (e.g., T=200).
-    No U-Net, no S4, single output head for signal generation.
+    Intensity-conditioned ABR Transformer generator for v-prediction diffusion.
 
-    Forward:
-        x: [B, 1, T]
-        static_params: [B, S] or None
-        timesteps: [B] or None
-        returns {"signal": [B, 1, T]} (or [B, 1, T] if return_dict=False)
+    ~2.8M params. Designed for T=200 ABR signals.
     """
 
     def __init__(
         self,
-        input_channels: int = 1,
-        static_dim: int = 0,
         sequence_length: int = 200,
-        d_model: int = 256,
-        n_layers: int = 6,
-        n_heads: int = 8,
+        d_model: int = 192,
+        n_layers: int = 4,
+        n_heads: int = 6,
         ff_mult: int = 4,
-        dropout: float = 0.10,
+        dropout: float = 0.08,
+        num_classes: int = 5,
+        intensity_emb_dim: int = 64,
+        aux_static_dim: int = 3,
+        # Legacy compat — ignored but accepted so old configs don't crash
+        input_channels: int = 1,
+        static_dim: int = 4,
         use_timestep_cond: bool = True,
         use_static_film: bool = True,
-        use_cross_attention: bool = False,
-        use_learned_pos_emb: bool = False,
-        film_residual: bool = False,
-        use_multi_scale_fusion: bool = False,
-        joint_static_generation: bool = False,
-        ablation_mode: str = 'none',
-        use_advanced_blocks: bool = False,
-        use_multi_scale_attention: bool = False,
-        use_gated_ffn: bool = False,
-        attention_dropout: float = 0.1,
-        cross_attention_heads: int = 4,
-        cross_attention_dropout: float = 0.1,
-        num_static_tokens: int = 1,
-        hearing_loss_classes: int = 5,
+        **kwargs,
     ):
         super().__init__()
         self.sequence_length = sequence_length
+        self.d_model = d_model
+        self.num_classes = num_classes
+        # Legacy attributes for pipeline compat
         self.static_dim = static_dim
-        self.use_timestep_cond = use_timestep_cond
-        self.use_static_film = use_static_film
-        self.ablation_mode = ablation_mode
-        self.hearing_loss_classes = hearing_loss_classes
-        
-        # Apply ablation configuration to compute effective flags
-        effective_flags = self._compute_effective_flags(
-            use_cross_attention, use_learned_pos_emb, film_residual,
-            use_multi_scale_fusion, joint_static_generation,
-            use_advanced_blocks, use_multi_scale_attention, use_gated_ffn
-        )
-        
-        # Store effective flags
-        self.use_cross_attention = effective_flags['use_cross_attention']
-        self.use_learned_pos_emb = effective_flags['use_learned_pos_emb']
-        self.film_residual = effective_flags['film_residual']
-        self.use_multi_scale_fusion = effective_flags['use_multi_scale_fusion']
-        self.joint_static_generation = effective_flags['joint_static_generation']
-        self.use_advanced_blocks = effective_flags['use_advanced_blocks']
-        self.use_multi_scale_attention = effective_flags['use_multi_scale_attention']
-        self.use_gated_ffn = effective_flags['use_gated_ffn']
-        self.attention_dropout = attention_dropout
-        self.cross_attention_heads = cross_attention_heads
-        self.cross_attention_dropout = cross_attention_dropout
-        self.num_static_tokens = num_static_tokens
 
-        # Multi-scale stem: [B, 1, T] -> [B, D, T]
+        # ── Stem ──────────────────────────────────────────────────────────
         self.stem = MultiScaleStem(d_model)
 
-        # Token space & positions (conditional positional encoding)
-        if self.use_learned_pos_emb:
-            # Use max(sequence_length, 2048) to prevent index overflow
-            pos_emb_max_len = max(sequence_length, 2048)
-            self.pos = LearnedPositionalEmbedding(d_model, max_len=pos_emb_max_len, dropout=dropout)
-        else:
-            self.pos = nn.Identity()
+        # ── Conditioning pathways ─────────────────────────────────────────
+        self.intensity_emb = IntensityEmbedding(d_model, emb_dim=intensity_emb_dim)
+        self.aux_static_emb = AuxStaticEmbedding(aux_static_dim, d_model)
+        self.class_emb = ClassEmbedding(num_classes, d_model)
+        self.aux_scale = nn.Parameter(torch.tensor(0.5))  # learnable aux blending
 
-        # Optional conditioning adapters
-        if use_static_film and static_dim > 0:
-            self.static_film_pre = TokenFiLM(static_dim, d_model, hidden=256, dropout=dropout, use_residual=self.film_residual)
-        else:
-            self.static_film_pre = None
-            
-        if use_timestep_cond:
-            self.t_adapter = TimestepAdapter(d_model)
-        else:
-            self.t_adapter = None
+        # ── Timestep adapter ──────────────────────────────────────────────
+        self.t_adapter = TimestepAdapter(d_model)
 
-        # Core Transformer
+        # ── FiLM layers ──────────────────────────────────────────────────
+        self.film_pre = ConditioningFiLM(d_model, hidden=256, dropout=dropout)
+        self.film_post = ConditioningFiLM(d_model, hidden=256, dropout=dropout)
+
+        # ── Transformer backbone ─────────────────────────────────────────
         self.transformer = MultiLayerTransformerBlock(
             d_model=d_model,
             n_heads=n_heads,
@@ -202,341 +230,123 @@ class ABRTransformerGenerator(nn.Module):
             use_relative_position=True,
             use_conv_module=True,
             conv_kernel_size=7,
-            use_advanced_blocks=self.use_advanced_blocks,
-            use_multi_scale_attention=self.use_multi_scale_attention,
-            use_gated_ffn=self.use_gated_ffn,
-            attention_dropout=self.attention_dropout
         )
 
-        # Optional post-FiLM
-        if use_static_film and static_dim > 0:
-            self.static_film_post = TokenFiLM(static_dim, d_model, hidden=256, dropout=dropout, use_residual=self.film_residual)
-        else:
-            self.static_film_post = None
-
-        # Cross-attention mechanism between static params and signal features
-        if self.use_cross_attention and static_dim > 0:
-            self.static_encoder = nn.Linear(static_dim, d_model)
-            self.cross_attention = CrossAttentionTransformerBlock(
-                d_model=d_model,
-                n_heads=n_heads,
-                dropout=dropout,
-                static_attention_heads=self.cross_attention_heads,
-                static_attention_dropout=self.cross_attention_dropout
-            )
-            # Learnable static tokens for cross-attention: provide additional context
-            # beyond encoded static parameters. These tokens can learn to represent
-            # global patterns or additional conditioning information.
-            self.static_tokens = nn.Parameter(torch.randn(1, self.num_static_tokens, d_model))
-            # Add normalization and dropout for cross-attention stability
-            self.cross_attn_norm = nn.LayerNorm(d_model)
-            self.cross_attn_dropout = nn.Dropout(dropout)
-        else:
-            self.static_encoder = None
-            self.cross_attention = None
-            self.static_tokens = None
-            self.cross_attn_norm = None
-            self.cross_attn_dropout = None
-
-        # Output: per-timestep linear projection -> 1 channel
+        # ── Output projection ────────────────────────────────────────────
         self.out_norm = nn.LayerNorm(d_model)
         self.out_proj = nn.Linear(d_model, 1)
 
-        # Peak classification components
-        self.attn_pool = AttentionPooling(d_model, attention_dim=max(1, d_model // 2), dropout=dropout)
-        self.peak5_head = nn.Linear(d_model, 1)
-        
-        # Hearing loss classification head
-        self.hearing_loss_head = nn.Linear(d_model, hearing_loss_classes)
+        self._reset_parameters()
 
-        # Multi-scale feature fusion
-        if self.use_multi_scale_fusion:
-            self.multi_scale_fusion = MultiScaleFeatureExtractor(d_model)
-        else:
-            self.multi_scale_fusion = None
-
-        # Joint static parameter generation
-        if self.joint_static_generation and static_dim > 0:
-            self.static_recon_head = nn.Linear(d_model, static_dim)
-        else:
-            self.static_recon_head = None
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        """Initialize model parameters."""
+    def _reset_parameters(self):
         for m in self.modules():
             if isinstance(m, nn.Conv1d):
-                # Use 'relu' as nonlinearity since 'gelu' is not supported by kaiming_normal_
                 nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            if isinstance(m, nn.Linear):
+            elif isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-    def _compute_effective_flags(self, use_cross_attention, use_learned_pos_emb, film_residual, use_multi_scale_fusion, joint_static_generation, use_advanced_blocks, use_multi_scale_attention, use_gated_ffn):
-        """Compute effective flags based on ablation mode."""
-        if self.ablation_mode == 'minimal':
-            return {
-                'use_cross_attention': False,
-                'use_learned_pos_emb': False,
-                'film_residual': False,
-                'use_multi_scale_fusion': False,
-                'joint_static_generation': False,
-                'use_advanced_blocks': False,
-                'use_multi_scale_attention': False,
-                'use_gated_ffn': False
-            }
-        elif self.ablation_mode == 'cross_attn_only':
-            return {
-                'use_cross_attention': True,
-                'use_learned_pos_emb': False,
-                'film_residual': False,
-                'use_multi_scale_fusion': False,
-                'joint_static_generation': False,
-                'use_advanced_blocks': False,
-                'use_multi_scale_attention': False,
-                'use_gated_ffn': False
-            }
-        elif self.ablation_mode == 'film_residual_only':
-            return {
-                'use_cross_attention': False,
-                'use_learned_pos_emb': False,
-                'film_residual': True,
-                'use_multi_scale_fusion': False,
-                'joint_static_generation': False,
-                'use_advanced_blocks': False,
-                'use_multi_scale_attention': False,
-                'use_gated_ffn': False
-            }
-        elif self.ablation_mode == 'pos_emb_only':
-            return {
-                'use_cross_attention': False,
-                'use_learned_pos_emb': True,
-                'film_residual': False,
-                'use_multi_scale_fusion': False,
-                'joint_static_generation': False,
-                'use_advanced_blocks': False,
-                'use_multi_scale_attention': False,
-                'use_gated_ffn': False
-            }
-        elif self.ablation_mode == 'multi_scale_only':
-            return {
-                'use_cross_attention': False,
-                'use_learned_pos_emb': False,
-                'film_residual': False,
-                'use_multi_scale_fusion': True,
-                'joint_static_generation': False,
-                'use_advanced_blocks': False,
-                'use_multi_scale_attention': False,
-                'use_gated_ffn': False
-            }
-        elif self.ablation_mode == 'joint_gen_only':
-            return {
-                'use_cross_attention': False,
-                'use_learned_pos_emb': False,
-                'film_residual': False,
-                'use_multi_scale_fusion': False,
-                'joint_static_generation': True,
-                'use_advanced_blocks': False,
-                'use_multi_scale_attention': False,
-                'use_gated_ffn': False
-            }
-        elif self.ablation_mode == 'full':
-            return {
-                'use_cross_attention': True,
-                'use_learned_pos_emb': True,
-                'film_residual': True,
-                'use_multi_scale_fusion': True,
-                'joint_static_generation': True,
-                'use_advanced_blocks': True,
-                'use_multi_scale_attention': True,
-                'use_gated_ffn': True
-            }
-        else:
-            # Use provided arguments when ablation_mode is 'none'
-            return {
-                'use_cross_attention': use_cross_attention,
-                'use_learned_pos_emb': use_learned_pos_emb,
-                'film_residual': film_residual,
-                'use_multi_scale_fusion': use_multi_scale_fusion,
-                'joint_static_generation': joint_static_generation,
-                'use_advanced_blocks': use_advanced_blocks,
-                'use_multi_scale_attention': use_multi_scale_attention,
-                'use_gated_ffn': use_gated_ffn
-            }
+    # ── Conditioning helpers ──────────────────────────────────────────────
 
-    def _apply_ablation_config(self):
-        """Apply ablation study configuration to modify architecture.
-        
-        Note: This method is now a no-op since ablation configuration
-        is handled during __init__ via _compute_effective_flags.
-        Kept for backward compatibility.
+    def _embed_conditioning(
+        self,
+        intensity: Optional[torch.Tensor],
+        aux_static: Optional[torch.Tensor],
+        class_label: Optional[torch.Tensor],
+        B: int,
+    ):
+        """Compute conditioning embeddings.
+
+        Returns:
+            pre_cond: [B, D] for pre-transformer FiLM (intensity + aux)
+            post_cond: [B, D] for post-transformer FiLM (intensity + class)
+            class_emb: [B, D] for additive class injection
         """
-        pass
+        device = next(self.parameters()).device
+
+        # Intensity embedding
+        if intensity is not None:
+            i_emb = self.intensity_emb(intensity)  # [B, D]
+        else:
+            i_emb = self.intensity_emb.mlp[0].bias.new_zeros(B, self.d_model)
+
+        # Aux static embedding
+        if aux_static is not None:
+            a_emb = self.aux_static_emb(aux_static)  # [B, D]
+        else:
+            a_emb = torch.zeros_like(i_emb)
+
+        # Class embedding
+        c_emb = self.class_emb(class_label, batch_size=B)  # [B, D]
+
+        # Pre-FiLM: intensity dominant + scaled aux
+        pre_cond = i_emb + self.aux_scale * a_emb
+        # Post-FiLM: intensity + class
+        post_cond = i_emb + c_emb
+
+        return pre_cond, post_cond, c_emb
+
+    # ── Forward ───────────────────────────────────────────────────────────
 
     def forward(
         self,
-        x: torch.Tensor,                     # [B, 1, T]
-        static_params: Optional[torch.Tensor] = None,  # [B, S]
+        x: torch.Tensor,
+        intensity: Optional[torch.Tensor] = None,
+        aux_static: Optional[torch.Tensor] = None,
+        class_label: Optional[torch.Tensor] = None,
         timesteps: Optional[torch.Tensor] = None,
+        # Legacy kwargs (ignored)
+        static_params: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
-        return_dict: bool = True
-    ) -> Union[Dict[str, torch.Tensor], torch.Tensor]:
+        return_dict: bool = True,
+        **kwargs,
+    ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass through the ABR Transformer generator.
-        
         Args:
-            x: Input signal [B, 1, T]
-            static_params: Static parameters [B, S] (optional)
-            timesteps: Diffusion timesteps [B] (optional)
-            return_dict: Whether to return dict or tensor
-            
+            x: Noisy signal [B, 1, T]
+            intensity: Normalized intensity [B] in [0, 1] or None
+            aux_static: Auxiliary params [B, 3] (Age, StimRate, FMP) or None
+            class_label: Hearing loss class [B] (long, 0–4) or None
+            timesteps: Diffusion timestep [B] or None
+            static_params: LEGACY — [B, 4], auto-decomposed if intensity is None
+
         Returns:
-            Dictionary containing:
-            - "signal": [B, 1, T] - Generated ABR signal
-            - "peak_5th_exists": [B] - Binary classification logits for 5th peak detection
-            - "hearing_loss_logits": [B, hearing_loss_classes] - Hearing loss classification logits
-            - "static_recon": [B, S] - Static parameter reconstruction (when joint_static_generation=True)
-            
-            Or tensor [B, 1, T] if return_dict=False
+            {"signal": [B, 1, T]}
         """
-        assert x.dim() == 3 and x.size(1) == 1, f"x must be [B, 1, T], got {x.shape}"
-        B, _, T = x.shape
-        
-        # Enforce fixed length at input
-        assert T == self.sequence_length, (
-            f"Expected input length {self.sequence_length}, got {T}. "
-            "Pad/crop or resample outside the model with a high-quality method."
-        )
+        B, C, T = x.shape
+        assert C == 1 and T == self.sequence_length, f"Expected [B, 1, {self.sequence_length}], got {x.shape}"
 
-        # Stem to token space
-        h = self.stem(x)                     # [B, D, T]
-        h = h.transpose(1, 2)                # [B, T, D]
-        h = self.pos(h)                      # add positional encodings
+        # Legacy compatibility: decompose static_params if new-style args not provided
+        if static_params is not None and intensity is None:
+            intensity = static_params[:, 1]  # Intensity is index 1
+            aux_static = torch.cat([static_params[:, 0:1], static_params[:, 2:4]], dim=1)  # Age, StimRate, FMP
 
-        # Conditioning
-        if self.static_film_pre is not None:
-            h = self.static_film_pre(h, static_params)
-        if self.t_adapter is not None:
-            h = self.t_adapter(h, timesteps)
+        # Compute conditioning embeddings
+        pre_cond, post_cond, c_emb = self._embed_conditioning(intensity, aux_static, class_label, B)
 
-        # Transformer stack
-        h = self.transformer(h, mask=attn_mask)              # [B, T, D]
+        # Stem → token space
+        h = self.stem(x).transpose(1, 2)  # [B, T, D]
 
-        if self.static_film_post is not None:
-            h = self.static_film_post(h, static_params)
+        # Pre-transformer FiLM (intensity + aux conditioning)
+        h = self.film_pre(h, pre_cond)
 
-        # Cross-attention between static params and signal features
-        if self.use_cross_attention and self.cross_attention is not None and static_params is not None:
-            static_encoded = self.static_encoder(static_params).unsqueeze(1)  # [B, 1, D]
-            # Concatenate static tokens to K/V for richer cross-attention
-            # static_encoded: [B, 1, D], static_tokens: [B, num_static_tokens, D]
-            kv = torch.cat([static_encoded, self.static_tokens.expand(B, -1, -1)], dim=1)  # [B, 1+num_static_tokens, D]
-            # Apply normalization and dropout for stability
-            h_norm = self.cross_attn_norm(h)
-            # Use CrossAttentionTransformerBlock interface: (decoder_input, encoder_output)
-            cross_attn_output, _, _ = self.cross_attention(h_norm, kv)
-            h = h + self.cross_attn_dropout(cross_attn_output)
+        # Timestep conditioning (additive)
+        h = self.t_adapter(h, timesteps)
 
-        # Multi-scale feature fusion
-        if self.use_multi_scale_fusion and self.multi_scale_fusion is not None:
-            h = self.multi_scale_fusion(h.transpose(1, 2)).transpose(1, 2)
+        # Class conditioning (additive, broadcast over T)
+        h = h + c_emb.unsqueeze(1)
 
-        # Project back to signal
-        h_norm = self.out_norm(h)
-        y = self.out_proj(h_norm)                 # [B, T, 1]
+        # Transformer backbone
+        h = self.transformer(h)  # [B, T, D]
+
+        # Post-transformer FiLM (intensity + class conditioning)
+        h = self.film_post(h, post_cond)
+
+        # Output projection
+        y = self.out_proj(self.out_norm(h))  # [B, T, 1]
         y = y.transpose(1, 2).contiguous()   # [B, 1, T]
 
-        if return_dict:
-            # Compute peak classification and hearing loss classification using pooled features
-            pooled_features = self.attn_pool(h_norm, mask=None)  # Keep API compatible for now
-            peak_logits = self.peak5_head(pooled_features).squeeze(-1)
-            hearing_loss_logits = self.hearing_loss_head(pooled_features)
-            
-            # Joint static parameter generation
-            if self.joint_static_generation and self.static_recon_head is not None:
-                static_recon = self.static_recon_head(pooled_features)
-                return {
-                    "signal": y, 
-                    "peak_5th_exists": peak_logits, 
-                    "hearing_loss_logits": hearing_loss_logits,
-                    "static_recon": static_recon
-                }
-            else:
-                return {
-                    "signal": y, 
-                    "peak_5th_exists": peak_logits,
-                    "hearing_loss_logits": hearing_loss_logits
-                }
-        return y
-
-
-# For testing and validation
-def create_abr_transformer(
-    static_dim: int = 4,
-    sequence_length: int = 200,
-    d_model: int = 256,
-    n_layers: int = 6,
-    n_heads: int = 8,
-    ff_mult: int = 4,
-    dropout: float = 0.1,
-    use_advanced_blocks: bool = False,
-    use_multi_scale_attention: bool = False,
-    use_gated_ffn: bool = False,
-    attention_dropout: float = 0.1,
-    cross_attention_heads: int = 4,
-    cross_attention_dropout: float = 0.1,
-    num_static_tokens: int = 1,
-    hearing_loss_classes: int = 5,
-    **kwargs
-) -> ABRTransformerGenerator:
-    """
-    Factory function to create ABR Transformer with sensible defaults.
-    
-    Args:
-        static_dim: Dimension of static parameters (age, intensity, etc.)
-        sequence_length: ABR signal length (default 200)
-        d_model: Transformer model dimension
-        n_layers: Number of transformer layers
-        n_heads: Number of attention heads
-        ff_mult: Feed-forward dimension multiplier
-        dropout: Dropout rate
-        hearing_loss_classes: Number of hearing loss classes (default 5)
-        **kwargs: Additional arguments for advanced features
-        
-    Returns:
-        ABRTransformerGenerator instance with enhanced architecture:
-        - Signal generation head for ABR signal reconstruction
-        - Peak classification head for 5th peak detection
-        - Hearing loss classification head for hearing loss type prediction
-        - Optional cross-attention mechanism for static parameter integration
-        - Optional joint static parameter generation
-        - Optional learnable positional embeddings
-        - Optional residual FiLM connections
-        - Optional multi-scale feature fusion
-        - Comprehensive ablation study support
-    """
-    return ABRTransformerGenerator(
-        input_channels=1,
-        static_dim=static_dim,
-        sequence_length=sequence_length,
-        d_model=d_model,
-        n_layers=n_layers,
-        n_heads=n_heads,
-        ff_mult=ff_mult,
-        dropout=dropout,
-        use_timestep_cond=True,
-        use_static_film=True,
-        use_advanced_blocks=use_advanced_blocks,
-        use_multi_scale_attention=use_multi_scale_attention,
-        use_gated_ffn=use_gated_ffn,
-        attention_dropout=attention_dropout,
-        cross_attention_heads=cross_attention_heads,
-        cross_attention_dropout=cross_attention_dropout,
-        num_static_tokens=num_static_tokens,
-        hearing_loss_classes=hearing_loss_classes,
-        **kwargs
-    )
+        return {"signal": y}
