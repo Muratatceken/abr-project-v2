@@ -817,8 +817,18 @@ class EvaluationVisualizer:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Set plotting style
-        plt.style.use('default')  # Use default instead of seaborn-v0_8
+        # Set plotting style with fallback
+        try:
+            plt.style.use(style)
+        except OSError:
+            try:
+                if 'seaborn' in style:
+                    plt.style.use('seaborn')
+                else:
+                    plt.style.use('default')
+            except OSError:
+                plt.style.use('default')
+        
         sns.set_palette("husl")
         
         # Color schemes

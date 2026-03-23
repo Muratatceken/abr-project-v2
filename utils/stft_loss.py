@@ -94,38 +94,40 @@ class MultiResSTFTLoss(nn.Module):
             Weighted STFT loss scalar
         """
         total_loss = 0.0
-        
+        num_valid = 0
+
         for n_fft, hop_length, win_length in self.stft_params:
             # Skip if sequence too short for this configuration
             seq_len = pred.shape[-1]
             if seq_len < win_length:
                 continue
-                
+
             try:
                 # Compute magnitude spectrograms
                 pred_mag = stft_magnitude(pred, n_fft, hop_length, win_length)
                 target_mag = stft_magnitude(target, n_fft, hop_length, win_length)
-                
+
                 # L1 magnitude loss
                 mag_loss = F.l1_loss(pred_mag, target_mag)
-                
+
                 # Log-magnitude loss (adds perceptual weighting)
                 pred_log_mag = torch.log(pred_mag + self.eps)
                 target_log_mag = torch.log(target_mag + self.eps)
                 log_mag_loss = F.l1_loss(pred_log_mag, target_log_mag)
-                
+
                 # Combine losses for this resolution
                 resolution_loss = mag_loss + log_mag_loss
                 total_loss += resolution_loss
-                
+                num_valid += 1
+
             except RuntimeError:
-                # Skip this resolution if STFT fails (e.g., sequence too short)
+                # Skip this resolution if STFT fails
                 continue
-        
-        # Average across resolutions and apply weight
-        if len(self.stft_params) > 0:
-            total_loss = total_loss / len(self.stft_params)
-        
+
+        # Average across actually computed resolutions (not total configured)
+        if num_valid > 0:
+            total_loss = total_loss / num_valid
+
         return self.weight * total_loss
 
 

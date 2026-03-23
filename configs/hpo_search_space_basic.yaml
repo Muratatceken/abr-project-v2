@@ -1,0 +1,57 @@
+# Basic HPO Search Space Configuration
+# Focused on core parameters for quick optimization
+# Usage: python scripts/train_with_hpo.py --mode hpo --search_space_path configs/hpo_search_space_basic.yaml
+
+metadata:
+  name: "Basic ABR Transformer Search Space"
+  version: "1.0"
+  description: "Minimal search space focusing on core hyperparameters"
+  focus_areas: ["learning_rate", "batch_size", "model_size", "regularization"]
+  
+# Core training parameters - highest impact on performance
+training_parameters:
+  learning_rate: 
+    type: float
+    low: 1e-5
+    high: 1e-3
+    log: true
+    description: "Learning rate for optimizer"
+    optimization_hint: "high_impact"
+    
+  batch_size: 
+    type: categorical
+    choices: [16, 32, 48]
+    description: "Training batch size"
+    optimization_hint: "high_impact"
+
+# Essential model architecture parameters
+model_architecture:
+  d_model: 
+    type: categorical
+    choices: [128, 256, 384]
+    description: "Model dimension"
+    optimization_hint: "high_impact"
+    
+  dropout: 
+    type: float
+    low: 0.0
+    high: 0.2
+    step: 0.05
+    description: "Dropout rate for regularization"
+    optimization_hint: "medium_impact"
+
+# Basic optimization parameters
+optimization_parameters:
+  weight_decay: 
+    type: float
+    low: 1e-6
+    high: 1e-3
+    log: true
+    description: "L2 regularization strength"
+    optimization_hint: "medium_impact"
+
+constraints:
+  # Basic constraints for parameter relationships
+  - name: "reasonable_batch_model_combination"
+    description: "Ensure batch size is reasonable for model size"
+    type: "advisory"

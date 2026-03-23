@@ -7,7 +7,12 @@ Basic time-domain metrics plus advanced evaluation metrics for signal reconstruc
 import torch
 import torch.nn.functional as F
 import numpy as np
+import logging
 from typing import Tuple, Optional
+
+# Configure logging for SNR calculation diagnostics
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def l1_time(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -52,23 +57,111 @@ def rmse_time(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     return torch.sqrt(F.mse_loss(x_hat, x))
 
 
-def snr_db(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def validate_snr_inputs(x_hat: torch.Tensor, x: torch.Tensor) -> dict:
     """
-    Signal-to-Noise Ratio in dB.
+    Validate input signals for SNR calculation and detect degenerate cases.
     
     Args:
         x_hat: Predicted signal [B, ...]
         x: Target signal [B, ...]
-        eps: Small epsilon to avoid log(0)
         
     Returns:
-        SNR in dB
+        Dictionary with validation results and flags
     """
+    x_flat = x.view(-1)
+    x_hat_flat = x_hat.view(-1)
+    
+    validation_info = {
+        'target_all_zero': torch.all(x_flat == 0),
+        'pred_all_zero': torch.all(x_hat_flat == 0),
+        'target_constant': torch.std(x_flat) < 1e-8,
+        'pred_constant': torch.std(x_hat_flat) < 1e-8,
+        'target_variance': torch.var(x_flat).item(),
+        'pred_variance': torch.var(x_hat_flat).item(),
+        'signal_power': torch.mean(x_flat ** 2).item(),
+        'noise_power': torch.mean((x_hat_flat - x_flat) ** 2).item()
+    }
+    
+    validation_info['is_degenerate'] = (
+        validation_info['target_all_zero'] or 
+        validation_info['pred_all_zero'] or
+        validation_info['target_constant'] or
+        validation_info['signal_power'] < 1e-10
+    )
+    
+    return validation_info
+
+
+def compute_robust_snr(x_hat: torch.Tensor, x: torch.Tensor, 
+                       eps: float = 1e-6, min_snr: float = -60.0, 
+                       max_snr: float = 60.0, log_edge_cases: bool = True) -> torch.Tensor:
+    """
+    Robust Signal-to-Noise Ratio calculation with comprehensive edge case handling.
+    
+    Args:
+        x_hat: Predicted signal [B, ...]
+        x: Target signal [B, ...]
+        eps: Enhanced epsilon for numerical stability (increased from 1e-8 to 1e-6)
+        min_snr: Minimum SNR bound in dB
+        max_snr: Maximum SNR bound in dB
+        log_edge_cases: Whether to log edge case handling
+        
+    Returns:
+        SNR in dB, bounded and validated
+    """
+    # Validate inputs
+    validation_info = validate_snr_inputs(x_hat, x)
+    
+    if validation_info['is_degenerate']:
+        if log_edge_cases:
+            logger.warning(f"Degenerate SNR calculation detected: {validation_info}")
+        
+        # Handle degenerate cases
+        if validation_info['target_all_zero'] and validation_info['pred_all_zero']:
+            # Both signals are zero - perfect but meaningless match
+            return torch.tensor(0.0, device=x.device)
+        elif validation_info['target_all_zero']:
+            # Target is zero - return minimum SNR
+            return torch.tensor(min_snr, device=x.device)
+        elif validation_info['signal_power'] < 1e-10:
+            # Signal power too small - return minimum SNR
+            return torch.tensor(min_snr, device=x.device)
+    
+    # Compute signal and noise power
     signal_power = torch.mean(x ** 2)
     noise_power = torch.mean((x_hat - x) ** 2)
     
-    snr = 10 * torch.log10(signal_power / (noise_power + eps))
-    return snr
+    # Enhanced epsilon protection
+    noise_power_protected = torch.clamp(noise_power, min=eps)
+    signal_power_protected = torch.clamp(signal_power, min=eps)
+    
+    # Compute SNR with bounds checking
+    snr_ratio = signal_power_protected / noise_power_protected
+    snr_db = 10 * torch.log10(snr_ratio)
+    
+    # Apply bounds
+    snr_bounded = torch.clamp(snr_db, min=min_snr, max=max_snr)
+    
+    # Log extreme cases
+    if log_edge_cases and (snr_db < min_snr or snr_db > max_snr):
+        logger.warning(f"SNR bounded: original={snr_db.item():.2f}, bounded={snr_bounded.item():.2f}")
+    
+    return snr_bounded
+
+
+def snr_db(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """
+    Signal-to-Noise Ratio in dB with enhanced robustness.
+    
+    Args:
+        x_hat: Predicted signal [B, ...]
+        x: Target signal [B, ...]
+        eps: Enhanced epsilon to avoid log(0) (increased from 1e-8 to 1e-6)
+        
+    Returns:
+        SNR in dB, robustly calculated
+    """
+    return compute_robust_snr(x_hat, x, eps=eps, log_edge_cases=False)
 
 
 def pearson_correlation(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -288,27 +381,28 @@ def dtw_distance(x_hat: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     return torch.tensor(np.mean(distances), device=x_hat.device)
 
 
-def snr_db_batch(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def snr_db_batch(x_hat: torch.Tensor, x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """
-    Signal-to-Noise Ratio computed per batch item, then averaged.
+    Signal-to-Noise Ratio computed per batch item with robust handling, then averaged.
     
     Args:
         x_hat: Predicted signal [B, ...]
         x: Target signal [B, ...]
-        eps: Small epsilon to avoid log(0)
+        eps: Enhanced epsilon to avoid log(0) (increased from 1e-8 to 1e-6)
         
     Returns:
-        Average SNR in dB across batch
+        Average SNR in dB across batch, robustly calculated
     """
     batch_size = x_hat.shape[0]
     snrs = []
     
     for i in range(batch_size):
-        signal_power = torch.mean(x[i] ** 2)
-        noise_power = torch.mean((x_hat[i] - x[i]) ** 2)
-        
-        snr = 10 * torch.log10(signal_power / (noise_power + eps))
-        snrs.append(snr)
+        # Use robust SNR calculation for each batch item
+        sample_snr = compute_robust_snr(
+            x_hat[i:i+1], x[i:i+1], 
+            eps=eps, log_edge_cases=False
+        )
+        snrs.append(sample_snr)
     
     return torch.stack(snrs).mean()
 
@@ -360,7 +454,7 @@ def compute_per_sample_metrics(x_hat: torch.Tensor, x: torch.Tensor,
                               use_stft: bool = True, use_dtw: bool = True,
                               stft_params: Optional[dict] = None) -> list:
     """
-    Compute metrics per sample in the batch.
+    Compute metrics per sample in the batch with enhanced error handling.
     
     Args:
         x_hat: Predicted signals [B, 1, T] or [B, T]
@@ -386,19 +480,31 @@ def compute_per_sample_metrics(x_hat: torch.Tensor, x: torch.Tensor,
             'mse': mse_time(x_hat_i, x_i).item(),
             'l1': l1_time(x_hat_i, x_i).item(),
             'corr': pearson_correlation(x_hat_i, x_i).item(),
-            'snr_db': snr_db(x_hat_i, x_i).item(),
         }
+        
+        # Robust SNR calculation with error handling
+        try:
+            snr_value = compute_robust_snr(x_hat_i, x_i, log_edge_cases=True).item()
+            # Check for extreme values and log warnings
+            if snr_value <= -50 or snr_value >= 50:
+                logger.warning(f"Extreme SNR value {snr_value:.2f} dB in sample {i}")
+            sample_metrics['snr_db'] = snr_value
+        except Exception as e:
+            logger.error(f"SNR calculation failed for sample {i}: {e}")
+            sample_metrics['snr_db'] = float('nan')
         
         if use_stft:
             try:
                 sample_metrics['stft_l1'] = stft_l1(x_hat_i, x_i, **stft_params).item()
-            except:
+            except Exception as e:
+                logger.warning(f"STFT calculation failed for sample {i}: {e}")
                 sample_metrics['stft_l1'] = float('nan')
         
         if use_dtw:
             try:
                 sample_metrics['dtw'] = dtw_distance(x_hat_i, x_i).item()
-            except:
+            except Exception as e:
+                logger.warning(f"DTW calculation failed for sample {i}: {e}")
                 sample_metrics['dtw'] = float('nan')
         
         per_sample_metrics.append(sample_metrics)

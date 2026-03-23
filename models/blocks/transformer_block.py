@@ -168,18 +168,21 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(q, k.transpose(-2, -1)) / (math.sqrt(d_k) * self.temperature)
         
         # Apply attention mask
+        # Convention: mask values of -inf indicate positions to mask out,
+        # zero values indicate positions to attend to (additive mask).
         if mask is not None:
             if mask.dim() == 2:  # [seq_len, seq_len]
                 mask = mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
             elif mask.dim() == 3:  # [batch, seq_len, seq_len]
                 mask = mask.unsqueeze(1)  # [batch, 1, seq_len, seq_len]
-            
-            scores = scores.masked_fill(mask == 0, float('-inf'))
-        
-        # Apply key padding mask
+
+            # Additive mask: add -inf values directly to scores
+            scores = scores + mask
+
+        # Apply key padding mask (True = position to ignore)
         if key_padding_mask is not None:
             key_padding_mask = key_padding_mask.unsqueeze(1).unsqueeze(2)  # [batch, 1, 1, seq_len]
-            scores = scores.masked_fill(key_padding_mask == 0, float('-inf'))
+            scores = scores.masked_fill(key_padding_mask, float('-inf'))
         
         # Compute attention weights
         attn_weights = F.softmax(scores, dim=-1)
@@ -1107,14 +1110,6 @@ class CrossAttentionTransformerBlock(nn.Module):
             is_cross_attention=True
         )
         
-        # Static parameter attention with dedicated heads
-        self.static_attention = MultiHeadAttention(
-            d_model=d_model,
-            n_heads=static_attention_heads,
-            dropout=static_attention_dropout,
-            is_cross_attention=True
-        )
-        
         # Feed-forward network
         self.feed_forward = PositionwiseFeedForward(
             d_model=d_model,
@@ -1705,14 +1700,10 @@ class AdvancedTransformerBlock(nn.Module):
             x = self.norm1(x + self.dropout(attn_output))
         
         # Conv module (if enabled)
+        # Note: ConvModule already applies its own residual connection internally (return x + y),
+        # so we pass the input directly — no additional residual or norm3 needed here.
         if self.conv_module is not None:
-            if self.use_pre_norm:
-                normed_input = self.norm3(x)
-                conv_output = self.conv_module(normed_input)
-                x = x + conv_output
-            else:
-                conv_output = self.conv_module(x)
-                x = self.norm3(x + conv_output)
+            x = self.conv_module(x)
         
         # Feed-forward network
         if self.use_pre_norm:

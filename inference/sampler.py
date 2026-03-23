@@ -72,8 +72,9 @@ def ddim_sample_vpred(
                 # Standard conditional or unconditional prediction
                 v_pred = model(x_t, static_params=static_params, timesteps=t_batch)["signal"]
         
-        # Predict x_0 from v-prediction
+        # Predict x_0 from v-prediction and clamp to prevent extrapolation
         x_0_pred = predict_x0_from_v(x_t, v_pred, t_batch, sched)
+        x_0_pred = x_0_pred.clamp(-3.0, 3.0)  # Clamp to reasonable range for normalized signals
         
         if i < len(timesteps) - 1:
             # Get next timestep
@@ -125,8 +126,12 @@ def ddim_step(
     sqrt_one_minus_alpha_bar_t = torch.sqrt(1 - alpha_bar_t)
     eps_pred = (x_t - sqrt_alpha_bar_t * x_0_pred) / sqrt_one_minus_alpha_bar_t
     
-    # DDIM variance
-    sigma_t = eta * torch.sqrt((1 - alpha_bar_t_prev) / (1 - alpha_bar_t)) * torch.sqrt(1 - alpha_bar_t / alpha_bar_t_prev)
+    # DDIM variance — clamp arguments to prevent NaN from floating point issues
+    sigma_t = eta * torch.sqrt(
+        torch.clamp((1 - alpha_bar_t_prev) / (1 - alpha_bar_t), min=0.0)
+    ) * torch.sqrt(
+        torch.clamp(1 - alpha_bar_t / alpha_bar_t_prev, min=0.0)
+    )
     
     # Predicted mean
     sqrt_alpha_bar_t_prev = torch.sqrt(alpha_bar_t_prev)

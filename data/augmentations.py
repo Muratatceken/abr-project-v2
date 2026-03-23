@@ -60,10 +60,14 @@ class MixUpAugmentation:
         
         # Mix signals
         mixed_signal = lam * batch[signal_key] + (1 - lam) * batch[signal_key][indices]
-        
+
         # Mix targets
         mixed_batch = batch.copy()
         mixed_batch[signal_key] = mixed_signal
+
+        # Mix static conditioning parameters to match mixed signals
+        if 'stat' in batch:
+            mixed_batch['stat'] = lam * batch['stat'] + (1 - lam) * batch['stat'][indices]
         
         # Handle target mixing for different formats
         if 'peak_exists' in batch:
@@ -164,7 +168,12 @@ class CutMixAugmentation:
         # Mix targets proportionally
         mixed_batch = batch.copy()
         mixed_batch[signal_key] = mixed_signal
-        
+
+        # Mix static conditioning parameters proportionally to match mixed signals
+        if 'stat' in batch:
+            cut_ratio = (cut_end - cut_start) / seq_len
+            mixed_batch['stat'] = (1 - cut_ratio) * batch['stat'] + cut_ratio * batch['stat'][indices]
+
         # Handle target mixing for different formats
         if 'peak_exists' in batch:
             # ABR dataset format - mix peak_exists proportionally

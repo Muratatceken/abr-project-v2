@@ -1,0 +1,516 @@
+# ABR Transformer Hyperparameter Search Space Configuration
+# Comprehensive search space definition for HPO optimization
+#
+# Usage:
+#   python scripts/train_with_hpo.py --config configs/train_hpo_optimized.yaml --search_space_path configs/hpo_search_space.yaml --mode hpo
+#   
+# Schema: This file supports nested parameter organization with metadata sections.
+# The loader recursively extracts parameters (dicts with 'type' key) and skips documentation sections.
+#
+# File Version: 1.0
+# Compatible with: optimization/hyperparameter_optimization.py
+# Target Model: ABR Transformer with v-prediction diffusion
+
+metadata:
+  name: "ABR Transformer HPO Search Space"
+  version: "1.0"
+  description: "Comprehensive hyperparameter search space for ABR transformer optimization"
+  target_model: "ABR Transformer Generator"
+  optimization_objective: "Maximize validation combined score (signal generation + peak classification)"
+  recommended_trials: 50-100
+  estimated_time_per_trial: "20-30 minutes"
+
+# Model Architecture Parameters
+# These parameters define the core transformer architecture
+model_architecture:
+  # Transformer dimension - Core model capacity parameter
+  d_model:
+    type: 'categorical'
+    choices: [128, 256, 384, 512]
+    description: "Transformer model dimension - affects model capacity and memory usage"
+    optimization_hint: "Higher values improve capacity but increase computational cost"
+    constraints: "Must be divisible by n_heads for valid attention computation"
+    
+  # Number of transformer layers - Model depth parameter
+  n_layers:
+    type: 'int'
+    low: 4
+    high: 12
+    step: 2
+    description: "Number of transformer layers - controls model depth"
+    optimization_hint: "More layers can capture complex patterns but may overfit"
+    
+  # Number of attention heads - Attention mechanism parallelization
+  n_heads:
+    type: 'categorical'
+    choices: [4, 6, 8, 12, 16]
+    description: "Number of attention heads - must divide d_model evenly"
+    optimization_hint: "More heads allow different attention patterns but increase computation"
+    constraints: "Must divide d_model evenly (d_model % n_heads == 0)"
+    
+  # Dropout rate - Primary regularization parameter
+  dropout:
+    type: 'float'
+    low: 0.0
+    high: 0.3
+    step: 0.05
+    description: "Dropout probability for regularization"
+    optimization_hint: "Higher dropout prevents overfitting but may hurt capacity"
+    
+  # Feed-forward network multiplier - Controls FFN capacity
+  ff_mult:
+    type: 'categorical'
+    choices: [2, 4, 6, 8]
+    description: "Feed-forward network dimension multiplier (relative to d_model)"
+    optimization_hint: "Higher values increase FFN capacity and expressivity"
+
+# Training Parameters
+# Core optimization and training configuration parameters
+training_parameters:
+  # Learning rate - Most critical training hyperparameter
+  learning_rate:
+    type: 'float'
+    low: 1e-5
+    high: 1e-2
+    log: true
+    description: "Initial learning rate for optimizer"
+    optimization_hint: "Use log-uniform sampling; typically 1e-4 works well"
+    
+  # Batch size - Memory vs convergence tradeoff
+  batch_size:
+    type: 'categorical'
+    choices: [8, 16, 32, 48, 64]
+    description: "Training batch size - affects memory usage and convergence"
+    optimization_hint: "Larger batches stabilize training but require more memory"
+    
+  # Weight decay - L2 regularization parameter
+  weight_decay:
+    type: 'float'
+    low: 1e-6
+    high: 1e-2
+    log: true
+    description: "L2 regularization weight decay"
+    optimization_hint: "Prevents overfitting; typically 1e-5 to 1e-4 range"
+    
+  # Adam optimizer beta parameters
+  betas:
+    type: 'categorical'
+    choices: 
+      - [0.9, 0.99]
+      - [0.9, 0.999]  
+      - [0.95, 0.999]
+      - [0.9, 0.9999]
+    description: "Adam optimizer beta parameters [beta1, beta2]"
+    optimization_hint: "Default [0.9, 0.99] usually works well"
+    
+  # Gradient clipping - Training stability parameter
+  grad_clip:
+    type: 'float'
+    low: 0.5
+    high: 2.0
+    step: 0.1
+    description: "Gradient clipping norm threshold"
+    optimization_hint: "Prevents exploding gradients; 1.0 is typical default"
+    
+  # EMA decay - Model averaging parameter
+  ema_decay:
+    type: 'float'
+    low: 0.99
+    high: 0.9999
+    step: 0.0001
+    description: "Exponential moving average decay for model weights"
+    optimization_hint: "Higher values (0.999+) provide better averaging"
+
+# Loss Configuration Parameters
+# Parameters controlling loss functions and their relative importance
+loss_configuration:
+  # STFT loss weight - Multi-frequency domain loss
+  stft_weight:
+    type: 'float'
+    low: 0.0
+    high: 0.3
+    step: 0.02
+    description: "Weight for STFT (spectral) loss component"
+    optimization_hint: "Helps with frequency domain accuracy; 0.1-0.2 typical"
+    
+  # Focal loss parameters - For handling class imbalance
+  focal_loss_enabled:
+    type: 'categorical'
+    choices: [true, false]
+    description: "Whether to use focal loss instead of standard BCE"
+    optimization_hint: "Useful for imbalanced peak detection tasks"
+    
+  focal_alpha:
+    type: 'float'
+    low: 0.1
+    high: 0.9
+    step: 0.1
+    description: "Focal loss alpha parameter (class weighting)"
+    optimization_hint: "0.25 is common default; only used if focal_loss_enabled=true"
+    conditional: "focal_loss_enabled == true"
+    
+  focal_gamma:
+    type: 'float'
+    low: 0.5
+    high: 5.0
+    step: 0.5
+    description: "Focal loss gamma parameter (focusing parameter)"
+    optimization_hint: "2.0 is common default; higher focuses on hard examples"
+    conditional: "focal_loss_enabled == true"
+
+# Multi-task Learning Parameters
+# Parameters for balancing different learning objectives
+multi_task_learning:
+  # Peak classification task weight
+  peak_classification_weight:
+    type: 'float'
+    low: 0.1
+    high: 1.0
+    step: 0.05
+    description: "Loss weight for peak classification task"
+    optimization_hint: "Balance between signal generation and peak detection"
+    
+  # Static parameter reconstruction weight
+  static_reconstruction_weight:
+    type: 'float'
+    low: 0.05
+    high: 0.2
+    step: 0.01
+    description: "Loss weight for static parameter reconstruction"
+    optimization_hint: "Usually kept low (0.1) as auxiliary task"
+    
+  # Class weighting strategy for peak detection
+  class_weighting_method:
+    type: 'categorical'
+    choices: ['inverse_freq', 'balanced', 'none']
+    description: "Method for handling class imbalance in peak detection"
+    optimization_hint: "inverse_freq usually works best for imbalanced data"
+    
+  # Task-specific learning rate multipliers
+  peak_task_lr_multiplier:
+    type: 'float'
+    low: 0.5
+    high: 2.0
+    step: 0.1
+    description: "Learning rate multiplier for peak classification task"
+    optimization_hint: "Adjust relative learning rates between tasks"
+    
+  static_task_lr_multiplier:
+    type: 'float'
+    low: 0.8
+    high: 1.5
+    step: 0.1
+    description: "Learning rate multiplier for static reconstruction task"
+    optimization_hint: "Often slightly higher than base LR for auxiliary tasks"
+
+# Data Augmentation Parameters
+# Parameters controlling data augmentation strategies
+augmentation_parameters:
+  # Mixup augmentation probability
+  mixup_prob:
+    type: 'float'
+    low: 0.0
+    high: 0.3
+    step: 0.02
+    description: "Probability of applying mixup augmentation"
+    optimization_hint: "0.1-0.2 often optimal; higher may hurt peak detection"
+    
+  # Cutmix augmentation probability
+  cutmix_prob:
+    type: 'float'
+    low: 0.0
+    high: 0.3
+    step: 0.02
+    description: "Probability of applying cutmix augmentation"
+    optimization_hint: "Usually similar to mixup_prob; helps generalization"
+    
+  # Overall augmentation strength multiplier
+  augmentation_strength:
+    type: 'float'
+    low: 0.3
+    high: 1.0
+    step: 0.05
+    description: "Overall multiplier for augmentation intensity"
+    optimization_hint: "Lower values for stable training; higher for robustness"
+    
+  # Gaussian noise augmentation
+  noise_std:
+    type: 'float'
+    low: 1e-4
+    high: 1e-1
+    log: true
+    description: "Standard deviation for additive Gaussian noise"
+    optimization_hint: "Small values (1e-3) add robustness without distortion"
+    
+  # Time shifting augmentation
+  time_shift_samples:
+    type: 'int'
+    low: 0
+    high: 10
+    step: 1
+    description: "Maximum number of samples for time shifting augmentation"
+    optimization_hint: "Small shifts preserve temporal structure"
+    
+  # Amplitude scaling range
+  amplitude_scaling_low:
+    type: 'float'
+    low: 0.8
+    high: 0.95
+    step: 0.02
+    description: "Lower bound for amplitude scaling augmentation"
+    optimization_hint: "Should not distort signal too much"
+    
+  amplitude_scaling_high:
+    type: 'float'
+    low: 1.05
+    high: 1.3
+    step: 0.02
+    description: "Upper bound for amplitude scaling augmentation"
+    optimization_hint: "Should not distort signal too much"
+
+# Advanced Training Features
+# Parameters for advanced training techniques and scheduling
+advanced_features:
+  # Curriculum learning parameters
+  use_curriculum:
+    type: 'categorical'
+    choices: [false, true]
+    description: "Whether to use curriculum learning (easy to hard training)"
+    optimization_hint: "Can help with convergence but may slow HPO trials"
+    
+  curriculum_start_difficulty:
+    type: 'float'
+    low: 0.2
+    high: 0.8
+    step: 0.1
+    description: "Starting difficulty level for curriculum learning (fraction of dataset)"
+    optimization_hint: "0.3-0.5 typical; lower starts with easier examples"
+    conditional: "use_curriculum == true"
+    
+  curriculum_epochs:
+    type: 'int'
+    low: 10
+    high: 30
+    step: 5
+    description: "Number of epochs to complete curriculum progression"
+    optimization_hint: "Should be significant fraction of total training epochs"
+    conditional: "use_curriculum == true"
+    
+  # Early stopping parameters
+  early_stopping_patience:
+    type: 'int'
+    low: 5
+    high: 20
+    step: 2
+    description: "Number of epochs to wait before early stopping"
+    optimization_hint: "Balance between training time and finding optima"
+    
+  early_stopping_min_delta:
+    type: 'float'
+    low: 1e-5
+    high: 1e-2
+    log: true
+    description: "Minimum improvement threshold for early stopping"
+    optimization_hint: "Smaller values allow more training; larger stop sooner"
+    
+  # Learning rate scheduling
+  lr_scheduler:
+    type: 'categorical'
+    choices: ['cosine', 'linear', 'step', 'plateau']
+    description: "Learning rate scheduling strategy"
+    optimization_hint: "Cosine often works well for transformers"
+    
+  lr_warmup_steps:
+    type: 'int'
+    low: 100
+    high: 1500
+    step: 100
+    description: "Number of warmup steps for learning rate scheduling"
+    optimization_hint: "10-20% of total steps typical for warmup"
+    
+  # Advanced optimizer features
+  use_gradient_centralization:
+    type: 'categorical'
+    choices: [false, true]
+    description: "Whether to use gradient centralization technique"
+    optimization_hint: "Can improve convergence but adds overhead"
+    
+  use_gradient_standardization:
+    type: 'categorical'
+    choices: [false, true]  
+    description: "Whether to use gradient standardization technique"
+    optimization_hint: "Experimental technique for training stability"
+
+# Diffusion-Specific Parameters
+# Parameters specific to diffusion model training
+diffusion_parameters:
+  # Number of diffusion training steps
+  num_train_steps:
+    type: 'categorical'
+    choices: [500, 750, 1000, 1250, 1500]
+    description: "Number of diffusion training steps (noise schedule length)"
+    optimization_hint: "More steps give finer control but slower sampling"
+    
+  # Sampling steps for validation
+  sample_steps:
+    type: 'categorical'
+    choices: [20, 30, 50, 75, 100]
+    description: "Number of steps for DDIM sampling during validation"
+    optimization_hint: "Fewer steps for faster validation; more for quality"
+    
+  # Classifier-free guidance scale
+  cfg_scale:
+    type: 'float'
+    low: 1.0
+    high: 3.0
+    step: 0.2
+    description: "Classifier-free guidance scale for conditional generation"
+    optimization_hint: "Higher values increase conditioning strength"
+    
+  # CFG dropout probability during training
+  cfg_dropout_prob:
+    type: 'float'
+    low: 0.05
+    high: 0.3
+    step: 0.02
+    description: "Probability of dropping conditioning during training (for CFG)"
+    optimization_hint: "Enables classifier-free guidance; 0.1 typical"
+
+# Cross-Validation and Evaluation Parameters
+# Parameters for model evaluation and validation
+evaluation_parameters:
+  # Cross-validation folds
+  cv_folds:
+    type: 'categorical'
+    choices: [3, 5, 7]
+    description: "Number of cross-validation folds for robust evaluation"
+    optimization_hint: "5 folds balance between robustness and computation time"
+    
+  # Validation metric for model selection
+  validation_metric:
+    type: 'categorical'
+    choices: ['combined', 'signal_loss', 'peak_f1', 'peak_auc']
+    description: "Primary metric for model selection and early stopping"
+    optimization_hint: "combined metric balances multiple objectives"
+    
+  # Validation frequency
+  validate_every_epochs:
+    type: 'categorical'
+    choices: [1, 2, 3]
+    description: "Frequency of validation evaluation (every N epochs)"
+    optimization_hint: "Every epoch for short training; every 2-3 for longer"
+
+# Memory and Performance Parameters  
+# Parameters affecting memory usage and computational efficiency
+performance_parameters:
+  # Gradient checkpointing for memory efficiency
+  gradient_checkpointing:
+    type: 'categorical'
+    choices: [false, true]
+    description: "Use gradient checkpointing to reduce memory usage"
+    optimization_hint: "Saves memory but increases computation time"
+    
+  # Mixed precision training
+  use_amp:
+    type: 'categorical'
+    choices: [true, false]
+    description: "Use automatic mixed precision training"
+    optimization_hint: "Speeds training and saves memory with minimal quality loss"
+    
+  # DataLoader workers
+  num_workers:
+    type: 'categorical'
+    choices: [2, 4, 6, 8]
+    description: "Number of DataLoader worker processes"
+    optimization_hint: "Balance between speed and memory; 4 often optimal"
+    
+  # Pin memory for faster GPU transfer
+  pin_memory:
+    type: 'categorical'
+    choices: [true, false]
+    description: "Pin memory for faster CPU-GPU data transfer"
+    optimization_hint: "Usually beneficial when using GPU"
+
+# Search Space Constraints and Dependencies
+# Define parameter constraints and conditional dependencies
+constraints:
+  # Attention head constraints
+  attention_constraints:
+    - condition: "model_architecture.d_model % model_architecture.n_heads == 0"
+      description: "d_model must be divisible by n_heads for valid attention"
+      
+  # Conditional parameters
+  conditional_parameters:
+    focal_loss:
+      - parameter: "loss_configuration.focal_alpha"
+        condition: "loss_configuration.focal_loss_enabled == true"
+      - parameter: "loss_configuration.focal_gamma" 
+        condition: "loss_configuration.focal_loss_enabled == true"
+        
+    curriculum_learning:
+      - parameter: "advanced_features.curriculum_start_difficulty"
+        condition: "advanced_features.use_curriculum == true"
+      - parameter: "advanced_features.curriculum_epochs"
+        condition: "advanced_features.use_curriculum == true"
+
+# Optimization Recommendations
+# Guidance for effective hyperparameter optimization
+optimization_recommendations:
+  # Priority parameters (most impact on performance)
+  high_priority:
+    - "training_parameters.learning_rate"
+    - "model_architecture.d_model" 
+    - "model_architecture.n_layers"
+    - "training_parameters.batch_size"
+    - "multi_task_learning.peak_classification_weight"
+    
+  # Medium priority parameters
+  medium_priority:
+    - "model_architecture.dropout"
+    - "training_parameters.weight_decay"
+    - "loss_configuration.stft_weight"
+    - "augmentation_parameters.mixup_prob"
+    - "advanced_features.early_stopping_patience"
+    
+  # Low priority parameters (fine-tuning)
+  low_priority:
+    - "training_parameters.ema_decay"
+    - "training_parameters.grad_clip"
+    - "augmentation_parameters.noise_std"
+    - "diffusion_parameters.cfg_dropout_prob"
+    - "performance_parameters.num_workers"
+    
+  # Suggested optimization order
+  optimization_phases:
+    phase_1:
+      description: "Core architecture and training"
+      parameters: ["learning_rate", "d_model", "n_layers", "batch_size"]
+      recommended_trials: 20
+      
+    phase_2:
+      description: "Loss balancing and regularization" 
+      parameters: ["peak_classification_weight", "dropout", "weight_decay", "stft_weight"]
+      recommended_trials: 15
+      
+    phase_3:
+      description: "Augmentation and advanced features"
+      parameters: ["mixup_prob", "augmentation_strength", "early_stopping_patience"]
+      recommended_trials: 15
+
+# Usage Examples
+usage_examples:
+  basic_hpo:
+    description: "Basic HPO focusing on core parameters"
+    command: "python scripts/train_with_hpo.py --config configs/train_hpo_optimized.yaml --n_trials 30"
+    focus_parameters: ["learning_rate", "d_model", "batch_size", "dropout"]
+    
+  full_hpo:
+    description: "Comprehensive HPO using all parameters"
+    command: "python scripts/train_with_hpo.py --config configs/train_hpo_optimized.yaml --n_trials 100"
+    estimated_time: "30-50 hours depending on hardware"
+    
+  multi_objective:
+    description: "Multi-objective optimization (accuracy vs speed)"
+    objectives: ["val_combined_score", "training_time"]
+    directions: ["maximize", "minimize"]
+    recommended_trials: 75

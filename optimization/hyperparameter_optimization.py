@@ -172,13 +172,23 @@ class HyperparameterSpace:
         return params
         
     def load_from_config(self, config_path: str):
-        """Load search space from YAML configuration."""
+        """Load search space from YAML configuration with support for nested structures."""
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-            
-        for param_name, param_config in config.items():
+        
+        # Extract parameters recursively from nested config
+        parameters = self._extract_parameters_recursive(config)
+        
+        # Handle parameter dependencies and constraints
+        self._process_parameter_constraints(parameters)
+        
+        for param_name, param_config in parameters.items():
             param_type = param_config.get('type', 'float')
             
+            # Skip conditional parameters - they'll be handled dynamically
+            if param_config.get('conditional'):
+                continue
+                
             if param_type == 'categorical':
                 self.add_categorical(param_name, param_config['choices'])
             elif param_type == 'float':
@@ -197,6 +207,166 @@ class HyperparameterSpace:
                     step=param_config.get('step', 1),
                     log=param_config.get('log', False)
                 )
+    
+    def _process_parameter_constraints(self, parameters: dict):
+        """Process parameter constraints and dependencies."""
+        # Handle d_model/n_heads divisibility constraint
+        if 'd_model' in parameters and 'n_heads' in parameters:
+            # Filter n_heads choices based on d_model choices
+            d_model_choices = parameters['d_model'].get('choices', [])
+            n_heads_choices = parameters['n_heads'].get('choices', [])
+            
+            # Find valid n_heads for all d_model values
+            valid_n_heads = []
+            for n_heads in n_heads_choices:
+                if all(d_model % n_heads == 0 for d_model in d_model_choices):
+                    valid_n_heads.append(n_heads)
+            
+            if valid_n_heads:
+                parameters['n_heads']['choices'] = valid_n_heads
+                logger.info(f"Applied d_model/n_heads constraint: valid n_heads = {valid_n_heads}")
+    
+    def add_conditional_parameter(self, name: str, param_type: str, condition_func, **kwargs):
+        """Add a conditional parameter that depends on other parameters."""
+        self.conditional_spaces[name] = {
+            'type': param_type,
+            'condition': condition_func,
+            'kwargs': kwargs
+        }
+        
+    def suggest_parameters(self, trial):
+        """Suggest parameters with constraint handling."""
+        suggested_params = {}
+        
+        # First, suggest base parameters
+        for name, definition in self.space_definitions.items():
+            param_type = definition['type']
+            
+            if param_type == 'categorical':
+                suggested_params[name] = trial.suggest_categorical(name, definition['choices'])
+            elif param_type == 'float':
+                if definition.get('log', False):
+                    suggested_params[name] = trial.suggest_float(
+                        name, definition['low'], definition['high'], log=True
+                    )
+                else:
+                    suggested_params[name] = trial.suggest_float(
+                        name, definition['low'], definition['high'], 
+                        step=definition.get('step')
+                    )
+            elif param_type == 'int':
+                if definition.get('log', False):
+                    suggested_params[name] = trial.suggest_int(
+                        name, definition['low'], definition['high'], log=True
+                    )
+                else:
+                    suggested_params[name] = trial.suggest_int(
+                        name, definition['low'], definition['high'], 
+                        step=definition.get('step', 1)
+                    )
+        
+        # Handle conditional parameters
+        self._suggest_conditional_parameters(trial, suggested_params)
+        
+        # Apply dynamic constraints
+        self._apply_dynamic_constraints(trial, suggested_params)
+        
+        return suggested_params
+        
+    def _suggest_conditional_parameters(self, trial, suggested_params: dict):
+        """Suggest conditional parameters based on already suggested values."""
+        for name, definition in self.conditional_spaces.items():
+            condition = definition['condition']
+            if condition(suggested_params):
+                param_type = definition['type']
+                kwargs = definition['kwargs']
+                
+                if param_type == 'categorical':
+                    suggested_params[name] = trial.suggest_categorical(name, kwargs['choices'])
+                elif param_type == 'float':
+                    suggested_params[name] = trial.suggest_float(
+                        name, kwargs['low'], kwargs['high'], 
+                        log=kwargs.get('log', False), step=kwargs.get('step')
+                    )
+                elif param_type == 'int':
+                    suggested_params[name] = trial.suggest_int(
+                        name, kwargs['low'], kwargs['high'],
+                        step=kwargs.get('step', 1), log=kwargs.get('log', False)
+                    )
+    
+    def _apply_dynamic_constraints(self, trial, suggested_params: dict):
+        """Apply dynamic constraints like d_model/n_heads divisibility."""
+        # Handle d_model/n_heads constraint dynamically
+        if 'd_model' in suggested_params and 'n_heads' in suggested_params:
+            d_model = suggested_params['d_model']
+            n_heads = suggested_params['n_heads']
+            
+            # If constraint is violated, suggest a valid n_heads
+            if d_model % n_heads != 0:
+                # Find valid divisors of d_model
+                valid_heads = [h for h in [4, 6, 8, 12, 16] if d_model % h == 0]
+                if valid_heads:
+                    suggested_params['n_heads'] = trial.suggest_categorical(
+                        f'n_heads_constrained_{d_model}', valid_heads
+                    )
+    
+    def _extract_parameters_recursive(self, config: dict, parent_key: str = '') -> dict:
+        """
+        Recursively extract parameter definitions from nested config structure.
+        
+        Args:
+            config: Configuration dictionary (potentially nested)
+            parent_key: Parent key for nested parameters
+            
+        Returns:
+            Flat dictionary of parameter name -> parameter config
+        """
+        parameters = {}
+        
+        # Skip known non-parameter sections  
+        skip_sections = {
+            'metadata', 'constraints', 'optimization_recommendations', 
+            'usage_examples', 'conditional_parameters'
+        }
+        
+        for key, value in config.items():
+            if key in skip_sections:
+                continue
+                
+            if isinstance(value, dict):
+                # Check if this dict is a parameter definition (has 'type' key)
+                if 'type' in value:
+                    # This is a parameter definition
+                    param_name = f"{parent_key}.{key}" if parent_key else key
+                    
+                    # Clean parameter config - remove unsupported fields
+                    clean_param_config = {
+                        'type': value['type']
+                    }
+                    
+                    # Copy supported fields
+                    if 'choices' in value:
+                        clean_param_config['choices'] = value['choices']
+                    if 'low' in value:
+                        clean_param_config['low'] = value['low']
+                    if 'high' in value:
+                        clean_param_config['high'] = value['high']
+                    if 'step' in value:
+                        clean_param_config['step'] = value['step']
+                    if 'log' in value:
+                        clean_param_config['log'] = value['log']
+                    
+                    # Store conditional logic for later processing
+                    if 'conditional' in value:
+                        clean_param_config['conditional'] = value['conditional']
+                        
+                    parameters[key] = clean_param_config
+                else:
+                    # This is a nested section, recurse into it
+                    nested_params = self._extract_parameters_recursive(value, key)
+                    parameters.update(nested_params)
+        
+        return parameters
                 
     def create_default_abr_space(self):
         """Create default search space for ABR transformer."""
@@ -205,7 +375,7 @@ class HyperparameterSpace:
         self.add_int('d_model', 128, 512, step=64)
         self.add_int('n_heads', 4, 16, step=2)
         self.add_int('n_layers', 4, 12, step=2)
-        self.add_int('d_ff', 256, 2048, step=256)
+        self.add_int('ff_mult', 2, 8, step=2)  # Changed to ff_mult to match config
         self.add_float('dropout', 0.0, 0.5, step=0.1)
         
         # Training parameters
@@ -341,36 +511,97 @@ class HPOObjective:
             'd_model': ['model', 'd_model'],
             'n_heads': ['model', 'n_heads'],
             'n_layers': ['model', 'n_layers'],
-            'd_ff': ['model', 'd_ff'],
+            'ff_mult': ['model', 'ff_mult'],  # Updated to match config structure
             'dropout': ['model', 'dropout'],
             
-            # Training parameters
-            'learning_rate': ['trainer', 'learning_rate'],
-            'batch_size': ['trainer', 'batch_size'],
-            'weight_decay': ['trainer', 'weight_decay'],
-            'optimizer': ['trainer', 'optimizer'],
+            # Training parameters - Updated to match actual config paths
+            'learning_rate': ['optim', 'lr'],
+            'batch_size': ['loader', 'batch_size'],
+            'weight_decay': ['optim', 'weight_decay'],
+            'betas': ['optim', 'betas'],
+            'grad_clip': ['optim', 'grad_clip'],
+            'ema_decay': ['optim', 'ema_decay'],
+            'use_amp': ['optim', 'amp'],
             
-            # Loss parameters
+            # DataLoader parameters
+            'num_workers': ['loader', 'num_workers'],
+            'pin_memory': ['loader', 'pin_memory'],
+            
+            # Loss parameters - Updated to match config structure
+            'stft_weight': ['loss', 'stft_weight'],
             'use_focal_loss': ['focal_loss', 'enabled'],
             'focal_alpha': ['focal_loss', 'alpha'],
             'focal_gamma': ['focal_loss', 'gamma'],
             
-            # Augmentation parameters
-            'noise_std': ['augmentation', 'noise_std'],
-            'time_shift_samples': ['augmentation', 'time_shift_samples'],
-            'mixup_prob': ['augmentation', 'mixup_prob'],
-            'cutmix_prob': ['augmentation', 'cutmix_prob'],
+            # Multi-task parameters
+            'peak_classification_weight': ['multi_task', 'loss_weights', 'peak_classification'],
+            'static_reconstruction_weight': ['multi_task', 'loss_weights', 'static_reconstruction'],
+            'class_weighting_method': ['multi_task', 'class_weighting_method'],
+            'peak_task_lr_multiplier': ['multi_task', 'task_lr_multipliers', 'peak_classification'],
+            'static_task_lr_multiplier': ['multi_task', 'task_lr_multipliers', 'static_reconstruction'],
+            
+            # Augmentation parameters - CANONICAL PATH (removed duplicates)
+            'mixup_prob': ['advanced_augmentation', 'mixup_prob'],
+            'cutmix_prob': ['advanced_augmentation', 'cutmix_prob'],
+            'augmentation_strength': ['advanced_augmentation', 'augmentation_strength'],
+            'noise_std': ['advanced_augmentation', 'abr_specific', 'electrode_noise_std'],
+            'time_shift_samples': ['advanced_augmentation', 'time_stretch_prob'],  # Map to existing param
+            'amplitude_scaling_low': ['advanced_augmentation', 'amplitude_scaling_range'],  # Will need special handling for range
+            'amplitude_scaling_high': ['advanced_augmentation', 'amplitude_scaling_range'],  # Will need special handling for range
+            
+            # Advanced training features
+            'use_curriculum': ['curriculum_learning', 'enabled'],
+            'curriculum_start_difficulty': ['curriculum_learning', 'start_difficulty'],
+            'curriculum_epochs': ['curriculum_learning', 'curriculum_epochs'],
+            'early_stopping_patience': ['early_stopping', 'patience'],
+            'early_stopping_min_delta': ['early_stopping', 'min_delta'],
+            'lr_scheduler': ['advanced', 'lr_scheduler'],
+            'lr_warmup_steps': ['advanced', 'lr_warmup_steps'],
+            'use_gradient_centralization': ['advanced_optimizer', 'gradient_modifications', 'gradient_centralization'],
+            'use_gradient_standardization': ['advanced_optimizer', 'gradient_modifications', 'gradient_standardization'],
+            
+            # Diffusion parameters
+            'num_train_steps': ['diffusion', 'num_train_steps'],
+            'sample_steps': ['diffusion', 'sample_steps'],
+            'cfg_scale': ['diffusion', 'cfg_scale'],
+            'cfg_dropout_prob': ['advanced', 'cfg_dropout_prob'],
+            
+            # Performance parameters
+            'gradient_checkpointing': ['performance', 'gradient_checkpointing'],
+            
+            # Evaluation parameters
+            'cv_folds': ['cross_validation', 'n_folds'],
+            'validation_metric': ['multi_task', 'validation_metric'],
+            'validate_every_epochs': ['trainer', 'validate_every_epochs'],
         }
         
         for param_name, value in params.items():
             if param_name in param_mapping:
                 path = param_mapping[param_name]
-                self._set_nested_config(config, path, value)
+                
+                # Handle special cases that require custom logic
+                if param_name in ['amplitude_scaling_low', 'amplitude_scaling_high']:
+                    self._handle_amplitude_scaling(config, param_name, value, params)
+                else:
+                    self._set_nested_config(config, path, value)
             else:
                 # Direct parameter
                 config[param_name] = value
                 
         return config
+        
+    def _handle_amplitude_scaling(self, config: dict, param_name: str, value: float, all_params: dict):
+        """Handle amplitude scaling range parameters specially."""
+        # Get both low and high values if available
+        low_val = all_params.get('amplitude_scaling_low', 0.9)
+        high_val = all_params.get('amplitude_scaling_high', 1.1)
+        
+        # Set the range in config
+        self._set_nested_config(
+            config, 
+            ['advanced_augmentation', 'amplitude_scaling_range'], 
+            [low_val, high_val]
+        )
         
     def _set_nested_config(self, config: Dict[str, Any], path: List[str], value: Any):
         """Set nested configuration value."""

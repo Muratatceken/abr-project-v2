@@ -21,12 +21,53 @@ from sklearn.preprocessing import StandardScaler, LabelEncoder
 from typing import List, Dict, Any, Tuple, Optional
 import warnings
 import os
+import logging
 
 warnings.filterwarnings('ignore')
+
+# Configure logging for preprocessing diagnostics
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def validate_signal_quality(signal: np.ndarray, signal_id: str = "unknown") -> dict:
+    """
+    Validate signal quality and detect degenerate cases that could cause SNR calculation issues.
+    
+    Args:
+        signal: Input signal array
+        signal_id: Identifier for logging purposes
+        
+    Returns:
+        Dictionary with quality metrics and validation flags
+    """
+    quality_info = {
+        'signal_id': signal_id,
+        'is_all_zero': np.all(signal == 0),
+        'is_constant': np.std(signal) < 1e-8,
+        'variance': np.var(signal),
+        'dynamic_range': np.max(signal) - np.min(signal),
+        'has_nan': np.any(np.isnan(signal)),
+        'has_inf': np.any(np.isinf(signal)),
+        'mean': np.mean(signal),
+        'std': np.std(signal)
+    }
+    
+    # Flag degenerate cases
+    quality_info['is_degenerate'] = (
+        quality_info['is_all_zero'] or 
+        quality_info['is_constant'] or
+        quality_info['variance'] < 1e-10 or
+        quality_info['has_nan'] or
+        quality_info['has_inf']
+    )
+    
+    return quality_info
+
 
 def clean_numerical_data(data: np.ndarray, data_type: str) -> Tuple[np.ndarray, int]:
     """
     Clean numerical data by replacing NaN/Inf values with appropriate substitutes.
+    Enhanced with signal quality validation.
     
     Args:
         data: Input data array
@@ -48,6 +89,12 @@ def clean_numerical_data(data: np.ndarray, data_type: str) -> Tuple[np.ndarray, 
     if np.any(inf_mask):
         data[inf_mask] = 0.0
         fixes += np.sum(inf_mask)
+    
+    # Validate signal quality after cleaning for signal data
+    if data_type == "signal":
+        quality_info = validate_signal_quality(data, f"{data_type}_sample")
+        if quality_info['is_degenerate']:
+            logger.warning(f"Degenerate signal detected after cleaning: {quality_info}")
     
     return data, fixes
 
@@ -172,23 +219,82 @@ def load_and_preprocess_ultimate_dataset(
     if verbose:
         print(f"    Fixed {static_fixes} issues in static parameters")
         print(f"    Fixed {ts_fixes} issues in time series data")
+        
+    # Additional signal quality statistics
+    degenerate_signal_count = 0
+    for i in range(time_series_clean.shape[0]):
+        quality_info = validate_signal_quality(time_series_clean[i], f"sample_{i}")
+        if quality_info['is_degenerate']:
+            degenerate_signal_count += 1
+    
+    if verbose and degenerate_signal_count > 0:
+        logger.warning(f"Found {degenerate_signal_count}/{time_series_clean.shape[0]} signals with quality issues")
     
     # Normalize static parameters and time series
     if verbose:
-        print("📏 Normalizing data...")
+        print("📏 Normalizing data with enhanced validation...")
     
     static_data_normalized = scaler.fit_transform(static_data_clean)
     
-    # Z-score normalize time series (per sample)
+    # Enhanced Z-score normalization with comprehensive validation
     time_series_normalized = []
+    normalization_stats = {
+        'low_variance_count': 0,
+        'fallback_normalization_count': 0,
+        'successful_normalization_count': 0
+    }
+    
     for i in range(time_series_clean.shape[0]):
         ts = time_series_clean[i]
-        if np.std(ts) > 1e-8:  # Avoid division by zero
-            ts_norm = (ts - np.mean(ts)) / np.std(ts)
+        
+        # Validate signal quality before normalization
+        quality_info = validate_signal_quality(ts, f"sample_{i}")
+        
+        # Enhanced normalization logic with multiple fallback strategies
+        ts_std = np.std(ts)
+        ts_mean = np.mean(ts)
+        
+        if ts_std > 1e-6:  # Increased threshold from 1e-8 to 1e-6 for better stability
+            # Standard Z-score normalization
+            ts_norm = (ts - ts_mean) / ts_std
+            normalization_stats['successful_normalization_count'] += 1
+        elif ts_std > 1e-10:  # Very low but non-zero variance
+            # Use min-max scaling as fallback
+            ts_min, ts_max = np.min(ts), np.max(ts)
+            if ts_max - ts_min > 1e-10:
+                ts_norm = (ts - ts_min) / (ts_max - ts_min) - 0.5  # Center around 0
+                normalization_stats['fallback_normalization_count'] += 1
+                logger.warning(f"Sample {i}: Used min-max normalization due to low variance ({ts_std:.2e})")
+            else:
+                # Signal is effectively constant
+                ts_norm = np.zeros_like(ts)
+                normalization_stats['low_variance_count'] += 1
+                logger.warning(f"Sample {i}: Signal is constant, using zeros")
         else:
-            ts_norm = ts
+            # Signal has zero or near-zero variance
+            ts_norm = np.zeros_like(ts)
+            normalization_stats['low_variance_count'] += 1
+            logger.warning(f"Sample {i}: Zero variance signal ({ts_std:.2e}), using zeros")
+        
+        # Final validation after normalization
+        if np.any(np.isnan(ts_norm)) or np.any(np.isinf(ts_norm)):
+            logger.error(f"Sample {i}: Normalization produced NaN/Inf values, using zeros")
+            ts_norm = np.zeros_like(ts)
+        
         time_series_normalized.append(ts_norm)
+    
     time_series_normalized = np.array(time_series_normalized)
+
+    # Compute and store global normalization statistics for denormalization
+    global_signal_mean = float(np.mean(time_series_clean))
+    global_signal_std = float(np.std(time_series_clean))
+
+    # Log normalization statistics
+    if verbose:
+        logger.info(f"Normalization statistics: {normalization_stats}")
+        logger.info(f"    Successful Z-score: {normalization_stats['successful_normalization_count']}/{time_series_clean.shape[0]}")
+        logger.info(f"    Fallback min-max: {normalization_stats['fallback_normalization_count']}/{time_series_clean.shape[0]}")
+        logger.info(f"    Zero variance: {normalization_stats['low_variance_count']}/{time_series_clean.shape[0]}")
     
     # Encode target labels
     target_encoded = label_encoder.fit_transform(target_data)
@@ -287,8 +393,12 @@ def preprocess_and_save_ultimate(
         'data': processed_data,
         'scaler': scaler,
         'label_encoder': label_encoder,
+        'signal_stats': {
+            'global_mean': global_signal_mean,
+            'global_std': global_signal_std,
+        },
         'metadata': {
-            'version': 'ultimate_v1',
+            'version': 'ultimate_v2',
             'description': 'Ultimate ABR dataset with simplified structure',
             'filtering_criteria': {
                 'stimulus_polarity': 'Alternate',
@@ -302,7 +412,7 @@ def preprocess_and_save_ultimate(
                 'Alternate polarity filtering',
                 'Sweeps rejected < 100 filtering',
                 'Static parameter normalization (StandardScaler)',
-                'Time series Z-score normalization',
+                'Time series per-sample Z-score normalization',
                 'V peak masking for missing values',
                 'Target label encoding'
             ]

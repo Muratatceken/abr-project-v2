@@ -366,7 +366,10 @@ class CombinedLoss(nn.Module):
                     weights[task_name] = self.task_weights.get(task_name, 1.0)
             else:
                 weights[task_name] = self.task_weights.get(task_name, 1.0)
-                
+
+        # Persist adapted weights for cumulative adaptation across steps
+        self.task_weights.update(weights)
+
         return weights
 
 

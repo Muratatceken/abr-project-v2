@@ -34,7 +34,7 @@ from utils import (
     close_figure
 )
 from inference import DDIMSampler
-from evaluation.analysis import roc_analysis, precision_recall_analysis, bootstrap_classification_metrics, statistical_significance_tests, clinical_validation_analysis
+from evaluation.analysis import roc_analysis, precision_recall_analysis, bootstrap_classification_metrics, statistical_significance_tests, clinical_validation_analysis, constrained_threshold_optimization, threshold_sensitivity_analysis, multi_objective_threshold_optimization
 
 
 def setup_logging(log_level: str = "INFO"):
@@ -76,6 +76,58 @@ def load_config(config_path: str, overrides: Optional[str] = None) -> Dict[str, 
             d[keys[-1]] = value
     
     return config
+
+
+def load_threshold_optimization_config() -> Dict[str, Any]:
+    """
+    Load threshold optimization configuration.
+    
+    Returns:
+        Dictionary with threshold optimization configuration
+    """
+    config_path = Path("configs/threshold_optimization.yaml")
+    
+    # Check if threshold optimization config exists
+    if not config_path.exists():
+        logging.warning(f"Threshold optimization config not found at {config_path}")
+        # Return default configuration
+        return {
+            'optimization': {
+                'strategies': {
+                    'f1_optimal': True,
+                    'youden_j': True,
+                    'constrained': True,
+                    'multi_objective': True
+                },
+                'default_strategy': 'f1_optimal'
+            },
+            'constraints': {
+                'min_recall': 0.80,
+                'min_precision': 0.90,
+                'min_specificity': None
+            },
+            'output': {
+                'generate_reports': True,
+                'create_plots': True,
+                'include_results': {
+                    'threshold_analysis': True,
+                    'constraint_validation': True
+                }
+            },
+            'integration': {
+                'enable_in_evaluation': True,
+                'save_optimization_results': True
+            }
+        }
+    
+    try:
+        with open(config_path, 'r') as f:
+            threshold_config = yaml.safe_load(f)
+        logging.info(f"✓ Loaded threshold optimization config from {config_path}")
+        return threshold_config
+    except Exception as e:
+        logging.error(f"Failed to load threshold optimization config: {e}")
+        return {}
 
 
 def check_peak_labels_available(dataset: ABRDataset) -> bool:
@@ -393,25 +445,90 @@ def evaluate_reconstruction(
             x0_denorm = dataset.denormalize_signal(x0)
             x0_recon_denorm = dataset.denormalize_signal(x0_recon)
             
-            # Compute per-sample metrics
-            per_sample_metrics = compute_per_sample_metrics(
-                x0_recon_denorm, x0_denorm, use_stft, use_dtw, stft_params
-            )
+            # Validate denormalized signals before metrics computation
+            try:
+                # Check for invalid values in denormalized signals
+                if torch.any(torch.isnan(x0_denorm)) or torch.any(torch.isinf(x0_denorm)):
+                    logging.warning(f"Reconstruction batch {batch_idx}: Invalid values in target signal after denormalization")
+                    x0_denorm = torch.nan_to_num(x0_denorm, nan=0.0, posinf=0.0, neginf=0.0)
+                    
+                if torch.any(torch.isnan(x0_recon_denorm)) or torch.any(torch.isinf(x0_recon_denorm)):
+                    logging.warning(f"Reconstruction batch {batch_idx}: Invalid values in reconstructed signal after denormalization")
+                    x0_recon_denorm = torch.nan_to_num(x0_recon_denorm, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Validate signal properties for SNR computation
+                for i in range(B):
+                    target_var = torch.var(x0_denorm[i])
+                    pred_var = torch.var(x0_recon_denorm[i])
+                    if target_var < 1e-10:
+                        logging.warning(f"Reconstruction sample {batch_idx}:{i}: Target signal has very low variance ({target_var:.2e})")
+                    if pred_var < 1e-10:
+                        logging.warning(f"Reconstruction sample {batch_idx}:{i}: Predicted signal has very low variance ({pred_var:.2e})")
+                        
+            except Exception as e:
+                logging.error(f"Reconstruction batch {batch_idx}: Signal validation failed: {e}")
             
-            # Add metadata to metrics
+            # Compute per-sample metrics with enhanced error handling
+            try:
+                per_sample_metrics = compute_per_sample_metrics(
+                    x0_recon_denorm, x0_denorm, use_stft, use_dtw, stft_params
+                )
+                
+                # Validate computed metrics
+                for i, metrics in enumerate(per_sample_metrics):
+                    snr_value = metrics.get('snr_db', float('nan'))
+                    if np.isnan(snr_value) or np.isinf(snr_value):
+                        logging.warning(f"Reconstruction sample {batch_idx}:{i}: Invalid SNR value ({snr_value})")
+                    elif snr_value < -50 or snr_value > 50:
+                        logging.warning(f"Reconstruction sample {batch_idx}:{i}: Extreme SNR value ({snr_value:.2f} dB)")
+                        
+            except Exception as e:
+                logging.error(f"Reconstruction batch {batch_idx}: Metrics computation failed: {e}")
+                # Create fallback metrics
+                per_sample_metrics = []
+                for i in range(B):
+                    fallback_metrics = {
+                        'mse': float('nan'),
+                        'l1': float('nan'),
+                        'corr': float('nan'),
+                        'snr_db': float('nan')
+                    }
+                    if use_stft:
+                        fallback_metrics['stft_l1'] = float('nan')
+                    if use_dtw:
+                        fallback_metrics['dtw'] = float('nan')
+                    per_sample_metrics.append(fallback_metrics)
+            
+            # Add metadata to metrics with additional diagnostic information
             for i, sample_metrics in enumerate(per_sample_metrics):
                 sample_metrics.update({
                     'mode': 'reconstruction',
                     'sample_id': meta[i].get('sample_idx', batch_idx * cfg['dataset']['batch_size'] + i),
-                    'timestep': t[i].item()
+                    'timestep': t[i].item(),
+                    'batch_idx': batch_idx
                 })
                 # Add static parameters
-                for j, param_name in enumerate(dataset.static_names):
-                    sample_metrics[f'static_{param_name}'] = stat[i, j].item()
+                try:
+                    for j, param_name in enumerate(dataset.static_names):
+                        sample_metrics[f'static_{param_name}'] = stat[i, j].item()
+                except Exception as e:
+                    logging.warning(f"Reconstruction sample {batch_idx}:{i}: Failed to add static parameters: {e}")
             
             all_metrics.extend(per_sample_metrics)
             all_ref_signals.append(x0_denorm.cpu())
             all_gen_signals.append(x0_recon_denorm.cpu())
+    
+    # Summary statistics on SNR calculation issues
+    invalid_snr_count = sum(1 for metrics in all_metrics 
+                          if np.isnan(metrics.get('snr_db', 0)) or np.isinf(metrics.get('snr_db', 0)))
+    extreme_snr_count = sum(1 for metrics in all_metrics 
+                          if not (np.isnan(metrics.get('snr_db', 0)) or np.isinf(metrics.get('snr_db', 0))) 
+                          and (metrics.get('snr_db', 0) < -50 or metrics.get('snr_db', 0) > 50))
+    
+    if invalid_snr_count > 0:
+        logging.warning(f"Reconstruction: {invalid_snr_count}/{len(all_metrics)} samples had invalid SNR values")
+    if extreme_snr_count > 0:
+        logging.warning(f"Reconstruction: {extreme_snr_count}/{len(all_metrics)} samples had extreme SNR values")
     
     logging.info(f"✓ Reconstruction evaluation completed: {len(all_metrics)} samples")
     
@@ -490,25 +607,90 @@ def evaluate_generation(
             x0_denorm = dataset.denormalize_signal(x0)
             x_gen_denorm = dataset.denormalize_signal(x_gen)
             
-            # Compute per-sample metrics (comparing generated to reference)
-            per_sample_metrics = compute_per_sample_metrics(
-                x_gen_denorm, x0_denorm, use_stft, use_dtw, stft_params
-            )
+            # Validate denormalized signals before metrics computation
+            try:
+                # Check for invalid values in denormalized signals
+                if torch.any(torch.isnan(x0_denorm)) or torch.any(torch.isinf(x0_denorm)):
+                    logging.warning(f"Generation batch {batch_idx}: Invalid values in target signal after denormalization")
+                    x0_denorm = torch.nan_to_num(x0_denorm, nan=0.0, posinf=0.0, neginf=0.0)
+                    
+                if torch.any(torch.isnan(x_gen_denorm)) or torch.any(torch.isinf(x_gen_denorm)):
+                    logging.warning(f"Generation batch {batch_idx}: Invalid values in generated signal after denormalization")
+                    x_gen_denorm = torch.nan_to_num(x_gen_denorm, nan=0.0, posinf=0.0, neginf=0.0)
+                
+                # Validate signal properties for SNR computation
+                for i in range(B):
+                    target_var = torch.var(x0_denorm[i])
+                    gen_var = torch.var(x_gen_denorm[i])
+                    if target_var < 1e-10:
+                        logging.warning(f"Generation sample {batch_idx}:{i}: Target signal has very low variance ({target_var:.2e})")
+                    if gen_var < 1e-10:
+                        logging.warning(f"Generation sample {batch_idx}:{i}: Generated signal has very low variance ({gen_var:.2e})")
+                        
+            except Exception as e:
+                logging.error(f"Generation batch {batch_idx}: Signal validation failed: {e}")
             
-            # Add metadata to metrics
+            # Compute per-sample metrics with enhanced error handling (comparing generated to reference)
+            try:
+                per_sample_metrics = compute_per_sample_metrics(
+                    x_gen_denorm, x0_denorm, use_stft, use_dtw, stft_params
+                )
+                
+                # Validate computed metrics
+                for i, metrics in enumerate(per_sample_metrics):
+                    snr_value = metrics.get('snr_db', float('nan'))
+                    if np.isnan(snr_value) or np.isinf(snr_value):
+                        logging.warning(f"Generation sample {batch_idx}:{i}: Invalid SNR value ({snr_value})")
+                    elif snr_value < -50 or snr_value > 50:
+                        logging.warning(f"Generation sample {batch_idx}:{i}: Extreme SNR value ({snr_value:.2f} dB)")
+                        
+            except Exception as e:
+                logging.error(f"Generation batch {batch_idx}: Metrics computation failed: {e}")
+                # Create fallback metrics
+                per_sample_metrics = []
+                for i in range(B):
+                    fallback_metrics = {
+                        'mse': float('nan'),
+                        'l1': float('nan'),
+                        'corr': float('nan'),
+                        'snr_db': float('nan')
+                    }
+                    if use_stft:
+                        fallback_metrics['stft_l1'] = float('nan')
+                    if use_dtw:
+                        fallback_metrics['dtw'] = float('nan')
+                    per_sample_metrics.append(fallback_metrics)
+            
+            # Add metadata to metrics with additional diagnostic information
             for i, sample_metrics in enumerate(per_sample_metrics):
                 sample_metrics.update({
                     'mode': 'generation',
                     'sample_id': meta[i].get('sample_idx', batch_idx * cfg['dataset']['batch_size'] + i),
-                    'cfg_scale': cfg_scale
+                    'cfg_scale': cfg_scale,
+                    'batch_idx': batch_idx
                 })
                 # Add static parameters
-                for j, param_name in enumerate(dataset.static_names):
-                    sample_metrics[f'static_{param_name}'] = stat[i, j].item()
+                try:
+                    for j, param_name in enumerate(dataset.static_names):
+                        sample_metrics[f'static_{param_name}'] = stat[i, j].item()
+                except Exception as e:
+                    logging.warning(f"Generation sample {batch_idx}:{i}: Failed to add static parameters: {e}")
             
             all_metrics.extend(per_sample_metrics)
             all_ref_signals.append(x0_denorm.cpu())
             all_gen_signals.append(x_gen_denorm.cpu())
+    
+    # Summary statistics on SNR calculation issues
+    invalid_snr_count = sum(1 for metrics in all_metrics 
+                          if np.isnan(metrics.get('snr_db', 0)) or np.isinf(metrics.get('snr_db', 0)))
+    extreme_snr_count = sum(1 for metrics in all_metrics 
+                          if not (np.isnan(metrics.get('snr_db', 0)) or np.isinf(metrics.get('snr_db', 0))) 
+                          and (metrics.get('snr_db', 0) < -50 or metrics.get('snr_db', 0) > 50))
+    
+    if invalid_snr_count > 0:
+        logging.warning(f"Generation: {invalid_snr_count}/{len(all_metrics)} samples had invalid SNR values")
+    if extreme_snr_count > 0:
+        logging.warning(f"Generation: {extreme_snr_count}/{len(all_metrics)} samples had extreme SNR values")
     
     logging.info(f"✓ Generation evaluation completed: {len(all_metrics)} samples")
     
@@ -563,7 +745,6 @@ def create_classification_visualizations(
         # Get ROC and PR data from previous analysis
         roc_results = roc_analysis(
             logits, targets,
-            threshold=cfg['metrics']['peak_classification']['threshold'],
             specificity_targets=cfg['metrics']['clinical_metrics']['specificity_targets']
         )
         pr_results = precision_recall_analysis(logits, targets)
@@ -734,10 +915,20 @@ def create_visualizations(
             writer.add_figure(f'eval/{mode}/metrics_correlation', fig_scatter, epoch)
             close_figure(fig_scatter)
         
-        # Metrics summary plot
-        fig_summary = metrics_summary_plot(metrics, mode)
-        writer.add_figure(f'eval/{mode}/metrics_summary', fig_summary, epoch)
-        close_figure(fig_summary)
+        # Metrics summary plot - convert list of metrics to summary dict
+        if metrics:
+            # Calculate mean and std for each metric
+            metric_keys = ['mse', 'l1', 'corr', 'snr_db', 'stft_l1']
+            metrics_summary = {}
+            for key in metric_keys:
+                values = [m.get(key, 0) for m in metrics if key in m]
+                if values:
+                    metrics_summary[key] = (np.mean(values), np.std(values))
+            
+            if metrics_summary:
+                fig_summary = metrics_summary_plot(metrics_summary, mode)
+                writer.add_figure(f'eval/{mode}/metrics_summary', fig_summary, epoch)
+                close_figure(fig_summary)
         
     except Exception as e:
         logging.warning(f"Error creating visualizations: {e}")
@@ -879,7 +1070,7 @@ def save_peak_classification_results(
     output_dir: Path
 ) -> Dict[str, Any]:
     """
-    Save peak classification results and compute metrics.
+    Save peak classification results and compute metrics with threshold optimization.
     """
     if not cfg['metrics']['peak_classification']['enabled']:
         return {}
@@ -903,8 +1094,10 @@ def save_peak_classification_results(
             'targets_unique': unique_targets.tolist()
         }
     
-    # Check for perfect predictions (all predictions same)
-    predictions = (logits > cfg['metrics']['peak_classification']['threshold']).astype(int)
+    # Apply sigmoid to convert logits to probabilities before thresholding
+    from scipy.special import expit
+    probabilities = expit(logits)
+    predictions = (probabilities > cfg['metrics']['peak_classification']['threshold']).astype(int)
     unique_predictions = np.unique(predictions)
     if len(unique_predictions) == 1:
         logging.warning(f"All predictions are the same ({unique_predictions[0]}). This may indicate model issues.")
@@ -916,6 +1109,10 @@ def save_peak_classification_results(
             logging.warning(f"Small class size detected: {min_class_count}. Bootstrap results may be unreliable.")
     
     try:
+        # Load threshold optimization configuration
+        threshold_config = load_threshold_optimization_config()
+        enable_threshold_optimization = threshold_config.get('integration', {}).get('enable_in_evaluation', True)
+        
         # Compute bootstrap classification metrics
         bootstrap_results = bootstrap_classification_metrics(
             logits, targets,
@@ -923,28 +1120,64 @@ def save_peak_classification_results(
             confidence_level=cfg['metrics']['statistical_analysis']['confidence_level']
         )
         
-        # Compute ROC analysis with specificity targets
+        # Compute ROC analysis with optional threshold optimization
+        constraint_params = None
+        if enable_threshold_optimization:
+            constraint_params = threshold_config.get('constraints', {})
+            constraint_params = {k: v for k, v in constraint_params.items() if v is not None}
+        
         roc_results = roc_analysis(
             logits, targets,
-            specificity_targets=cfg['metrics']['clinical_metrics']['specificity_targets']
+            specificity_targets=cfg['metrics']['clinical_metrics']['specificity_targets'],
+            enable_constrained_optimization=enable_threshold_optimization,
+            constraint_params=constraint_params
         )
         
-        # Compute precision-recall analysis
-        pr_results = precision_recall_analysis(logits, targets)
+        # Compute precision-recall analysis with optimization
+        pr_results = precision_recall_analysis(
+            logits, targets,
+            enable_constrained_optimization=enable_threshold_optimization,
+            constraint_params=constraint_params
+        )
         
         # Compute statistical significance tests
         prevalence = targets.mean()
         significance_results = statistical_significance_tests(
             logits, targets, 
             prevalence=prevalence,
-            correction=cfg['metrics']['statistical_analysis']['multiple_testing_correction']
+            multiple_testing_correction=cfg['metrics']['statistical_analysis']['multiple_testing_correction']
         )
         
         # Compute clinical validation metrics
         clinical_results = clinical_validation_analysis(
             logits, targets,
-            prevalence_adjustment=cfg['metrics']['clinical_metrics']['prevalence_adjustment']
+            prevalence=prevalence
         )
+        
+        # Additional threshold optimization analyses if enabled
+        threshold_optimization_results = {}
+        if enable_threshold_optimization and threshold_config.get('output', {}).get('include_results', {}).get('threshold_analysis', True):
+            logging.info("Running advanced threshold optimization analyses...")
+            
+            try:
+                # Threshold sensitivity analysis
+                if threshold_config.get('output', {}).get('include_results', {}).get('stability_analysis', True):
+                    sensitivity_analysis = threshold_sensitivity_analysis(logits, targets, num_points=100)
+                    threshold_optimization_results['sensitivity_analysis'] = sensitivity_analysis
+                
+                # Multi-objective optimization
+                if threshold_config.get('optimization', {}).get('strategies', {}).get('multi_objective', True):
+                    multi_obj_results = multi_objective_threshold_optimization(
+                        logits, targets, 
+                        objectives=['precision', 'recall', 'specificity']
+                    )
+                    threshold_optimization_results['multi_objective'] = multi_obj_results
+                
+                logging.info("✓ Completed advanced threshold optimization analyses")
+                
+            except Exception as e:
+                logging.warning(f"Advanced threshold optimization failed: {e}")
+                threshold_optimization_results['error'] = str(e)
         
         # Combine results
         results = {
@@ -956,7 +1189,17 @@ def save_peak_classification_results(
             'prevalence': float(prevalence)
         }
         
-        # Save results
+        # Add threshold optimization results if available
+        if threshold_optimization_results:
+            results['threshold_optimization'] = threshold_optimization_results
+            
+            # Add configuration used
+            results['threshold_optimization_config'] = {
+                'constraints': constraint_params,
+                'strategies_enabled': threshold_config.get('optimization', {}).get('strategies', {})
+            }
+        
+        # Save results with enhanced threshold optimization data
         results_file = output_dir / f"{mode}_peak_classification.{cfg['output']['save_format']}"
         if cfg['output']['save_format'] == 'json':
             with open(results_file, 'w') as f:
@@ -966,9 +1209,8 @@ def save_peak_classification_results(
                 import pickle
                 pickle.dump(results, f)
         
-        # Save to CSV for easy analysis
-        csv_file = output_dir / f"{mode}_peak_classification_metrics.csv"
-        metrics_df = pd.DataFrame([{
+        # Enhanced CSV export with threshold optimization metrics
+        csv_data = [{
             'metric': 'accuracy',
             'value': bootstrap_results['accuracy']['mean'],
             'ci_lower': bootstrap_results['accuracy']['ci_lower'],
@@ -995,18 +1237,147 @@ def save_peak_classification_results(
         }, {
             'metric': 'auroc',
             'value': roc_results['auroc'],
-            'ci_lower': roc_results.get('auroc_ci', [None, None])[0],
-            'ci_upper': roc_results.get('auroc_ci', [None, None])[1],
+            'ci_lower': roc_results.get('auroc_ci', {}).get('lower'),
+            'ci_upper': roc_results.get('auroc_ci', {}).get('upper'),
             'mode': mode
-        }])
+        }]
+        
+        # Add optimal threshold information
+        if 'constrained_optimization' in roc_results and roc_results['constrained_optimization'].get('success'):
+            constrained_opt = roc_results['constrained_optimization']
+            csv_data.append({
+                'metric': 'optimal_threshold_constrained',
+                'value': constrained_opt['optimal_threshold'],
+                'ci_lower': None,
+                'ci_upper': None,
+                'mode': mode
+            })
+        
+        csv_file = output_dir / f"{mode}_peak_classification_metrics.csv"
+        metrics_df = pd.DataFrame(csv_data)
         metrics_df.to_csv(csv_file, index=False)
+        
+        # Save threshold optimization report if enabled
+        if enable_threshold_optimization and threshold_config.get('output', {}).get('generate_reports', True):
+            optimization_summary = generate_threshold_optimization_summary(results, threshold_config)
+            summary_file = output_dir / f"{mode}_threshold_optimization_summary.txt"
+            with open(summary_file, 'w') as f:
+                f.write(optimization_summary)
+            logging.info(f"✓ Saved threshold optimization summary to {summary_file}")
         
         logging.info(f"✓ Saved peak classification results to {output_dir}")
         return results
         
     except Exception as e:
-        logging.error(f"Error computing peak classification metrics: {e}")
-        return {'error': str(e)}
+        import traceback
+        error_msg = f"Error computing peak classification metrics: {str(e)}"
+        logging.error(error_msg)
+        logging.debug(f"Full traceback: {traceback.format_exc()}")
+        return {'error': str(e), 'traceback': traceback.format_exc()}
+
+
+def generate_threshold_optimization_summary(results: Dict[str, Any], 
+                                          threshold_config: Dict[str, Any]) -> str:
+    """
+    Generate a summary report for threshold optimization results.
+    
+    Args:
+        results: Peak classification results with optimization
+        threshold_config: Threshold optimization configuration
+        
+    Returns:
+        Summary text report
+    """
+    lines = [
+        "=" * 80,
+        "THRESHOLD OPTIMIZATION SUMMARY",
+        "=" * 80,
+        "",
+        f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        ""
+    ]
+    
+    # Configuration summary
+    constraints = threshold_config.get('constraints', {})
+    lines.extend([
+        "CONFIGURATION:",
+        f"  Applied Constraints:",
+        f"    - Min Recall: {constraints.get('min_recall', 'N/A')}",
+        f"    - Min Precision: {constraints.get('min_precision', 'N/A')}",
+        f"    - Min Specificity: {constraints.get('min_specificity', 'N/A')}",
+        ""
+    ])
+    
+    # ROC Analysis Results
+    if 'roc_analysis' in results:
+        roc_data = results['roc_analysis']
+        lines.extend([
+            "ROC ANALYSIS RESULTS:",
+            f"  AUROC: {roc_data.get('auroc', 'N/A'):.4f}",
+        ])
+        
+        if 'constrained_optimization' in roc_data:
+            const_opt = roc_data['constrained_optimization']
+            if const_opt.get('success'):
+                # Use 'recall' key if available, fallback to 'sensitivity' for backward compatibility
+                perf = const_opt['performance']
+                recall_value = perf.get('recall', perf.get('sensitivity', 'N/A'))
+                recall_str = f"{recall_value:.4f}" if isinstance(recall_value, (int, float)) else str(recall_value)
+                
+                lines.extend([
+                    f"  ✓ Constrained Optimization Successful",
+                    f"    - Optimal Threshold: {const_opt['optimal_threshold']:.4f}",
+                    f"    - Sensitivity (Recall): {recall_str}",
+                    f"    - Specificity: {const_opt['performance']['specificity']:.4f}",
+                    f"    - Precision: {const_opt['performance']['precision']:.4f}",
+                    f"    - F1-Score: {const_opt['performance']['f1_score']:.4f}",
+                ])
+            else:
+                lines.extend([
+                    f"  ✗ Constrained Optimization Failed",
+                    f"    - Reason: {const_opt.get('message', 'Unknown')}",
+                ])
+                for rec in const_opt.get('recommendations', []):
+                    lines.append(f"    - Recommendation: {rec}")
+        lines.append("")
+    
+    # Precision-Recall Analysis
+    if 'precision_recall_analysis' in results:
+        pr_data = results['precision_recall_analysis']
+        lines.extend([
+            "PRECISION-RECALL ANALYSIS:",
+            f"  Average Precision: {pr_data.get('average_precision', 'N/A'):.4f}",
+        ])
+        
+        if 'optimal_threshold' in pr_data:
+            opt_thresh = pr_data['optimal_threshold']
+            lines.extend([
+                f"  F1-Optimal Threshold: {opt_thresh.get('threshold', 'N/A'):.4f}",
+                f"  F1-Score: {opt_thresh.get('f1_score', 'N/A'):.4f}",
+            ])
+        lines.append("")
+    
+    # Multi-objective optimization results
+    if 'threshold_optimization' in results and 'multi_objective' in results['threshold_optimization']:
+        multi_obj = results['threshold_optimization']['multi_objective']
+        if 'pareto_optimal_solutions' in multi_obj:
+            lines.extend([
+                "MULTI-OBJECTIVE OPTIMIZATION:",
+                f"  Pareto-optimal solutions found: {len(multi_obj['pareto_optimal_solutions'])}",
+                f"  Top solution threshold: {multi_obj['pareto_optimal_solutions'][0]['threshold']:.4f}" if multi_obj['pareto_optimal_solutions'] else "  No solutions found",
+                ""
+            ])
+    
+    lines.extend([
+        "RECOMMENDATIONS:",
+        "  - Review constraint feasibility if optimization failed",
+        "  - Consider multi-objective solutions for balanced performance", 
+        "  - Validate optimal thresholds on independent test set",
+        "",
+        "=" * 80
+    ])
+    
+    return "\n".join(lines)
 
 
 def log_scalars_to_tensorboard(metrics: List[Dict[str, Any]], mode: str, writer: SummaryWriter, epoch: int = 0):
@@ -1113,9 +1484,11 @@ def main():
     # Load model and checkpoint
     model, checkpoint = load_model_and_checkpoint(cfg, device)
     
-    # Setup diffusion components
-    noise_schedule = prepare_noise_schedule(cfg['evaluation']['generation']['num_steps'], device)
-    sampler = DDIMSampler(model, cfg['evaluation']['generation']['num_steps'], device)
+    # Setup diffusion components — always use training T for the noise schedule
+    # num_steps in eval config controls DDIM sampling steps, NOT the schedule length
+    training_T = cfg.get('diffusion', {}).get('num_train_steps', 1000)
+    noise_schedule = prepare_noise_schedule(training_T, device)
+    sampler = DDIMSampler(model, training_T, device)
     
     # TensorBoard writer
     log_dir = Path(cfg['tensorboard']['log_dir'])

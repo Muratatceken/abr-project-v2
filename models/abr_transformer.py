@@ -137,6 +137,7 @@ class ABRTransformerGenerator(nn.Module):
         cross_attention_heads: int = 4,
         cross_attention_dropout: float = 0.1,
         num_static_tokens: int = 1,
+        hearing_loss_classes: int = 5,
     ):
         super().__init__()
         self.sequence_length = sequence_length
@@ -144,6 +145,7 @@ class ABRTransformerGenerator(nn.Module):
         self.use_timestep_cond = use_timestep_cond
         self.use_static_film = use_static_film
         self.ablation_mode = ablation_mode
+        self.hearing_loss_classes = hearing_loss_classes
         
         # Apply ablation configuration to compute effective flags
         effective_flags = self._compute_effective_flags(
@@ -243,6 +245,9 @@ class ABRTransformerGenerator(nn.Module):
         # Peak classification components
         self.attn_pool = AttentionPooling(d_model, attention_dim=max(1, d_model // 2), dropout=dropout)
         self.peak5_head = nn.Linear(d_model, 1)
+        
+        # Hearing loss classification head
+        self.hearing_loss_head = nn.Linear(d_model, hearing_loss_classes)
 
         # Multi-scale feature fusion
         if self.use_multi_scale_fusion:
@@ -393,6 +398,7 @@ class ABRTransformerGenerator(nn.Module):
             Dictionary containing:
             - "signal": [B, 1, T] - Generated ABR signal
             - "peak_5th_exists": [B] - Binary classification logits for 5th peak detection
+            - "hearing_loss_logits": [B, hearing_loss_classes] - Hearing loss classification logits
             - "static_recon": [B, S] - Static parameter reconstruction (when joint_static_generation=True)
             
             Or tensor [B, 1, T] if return_dict=False
@@ -445,16 +451,26 @@ class ABRTransformerGenerator(nn.Module):
         y = y.transpose(1, 2).contiguous()   # [B, 1, T]
 
         if return_dict:
-            # Compute peak classification only when needed
+            # Compute peak classification and hearing loss classification using pooled features
             pooled_features = self.attn_pool(h_norm, mask=None)  # Keep API compatible for now
             peak_logits = self.peak5_head(pooled_features).squeeze(-1)
+            hearing_loss_logits = self.hearing_loss_head(pooled_features)
             
             # Joint static parameter generation
             if self.joint_static_generation and self.static_recon_head is not None:
                 static_recon = self.static_recon_head(pooled_features)
-                return {"signal": y, "peak_5th_exists": peak_logits, "static_recon": static_recon}
+                return {
+                    "signal": y, 
+                    "peak_5th_exists": peak_logits, 
+                    "hearing_loss_logits": hearing_loss_logits,
+                    "static_recon": static_recon
+                }
             else:
-                return {"signal": y, "peak_5th_exists": peak_logits}
+                return {
+                    "signal": y, 
+                    "peak_5th_exists": peak_logits,
+                    "hearing_loss_logits": hearing_loss_logits
+                }
         return y
 
 
@@ -474,6 +490,7 @@ def create_abr_transformer(
     cross_attention_heads: int = 4,
     cross_attention_dropout: float = 0.1,
     num_static_tokens: int = 1,
+    hearing_loss_classes: int = 5,
     **kwargs
 ) -> ABRTransformerGenerator:
     """
@@ -487,12 +504,14 @@ def create_abr_transformer(
         n_heads: Number of attention heads
         ff_mult: Feed-forward dimension multiplier
         dropout: Dropout rate
+        hearing_loss_classes: Number of hearing loss classes (default 5)
         **kwargs: Additional arguments for advanced features
         
     Returns:
         ABRTransformerGenerator instance with enhanced architecture:
         - Signal generation head for ABR signal reconstruction
         - Peak classification head for 5th peak detection
+        - Hearing loss classification head for hearing loss type prediction
         - Optional cross-attention mechanism for static parameter integration
         - Optional joint static parameter generation
         - Optional learnable positional embeddings
@@ -518,5 +537,6 @@ def create_abr_transformer(
         cross_attention_heads=cross_attention_heads,
         cross_attention_dropout=cross_attention_dropout,
         num_static_tokens=num_static_tokens,
+        hearing_loss_classes=hearing_loss_classes,
         **kwargs
     )

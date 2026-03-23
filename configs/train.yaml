@@ -509,49 +509,31 @@ advanced_optimizer:
     gradient_centralization: false
     gradient_standardization: false
 
-# Knowledge Distillation Configuration
-knowledge_distillation:
-  enabled: false                    # Enable knowledge distillation
-  
+# Knowledge Distillation Configuration (extended)
+# NOTE: The primary knowledge_distillation block is defined above (line ~327).
+# This block merges with / overrides it when both are present.
+# In YAML, duplicate keys cause the last definition to win — consolidated here.
+knowledge_distillation_extended:
   # Multi-task distillation settings
   multi_task:
     enabled: false
-    
-    # Task type definitions (REQUIRED when using multi-task distillation)
-    # Specify 'classification' or 'regression' for each task
     task_types:
-      signal: 'regression'          # Signal generation is regression
-      peak_classification: 'classification'  # Peak detection is classification
-      
-    # Task-specific distillation configs
+      signal: 'regression'
+      peak_classification: 'classification'
     task_configs:
-      # Signal generation (regression) - will be automatically skipped
       signal:
-        temperature: 4.0            # Temperature for softmax (ignored for regression)
-        alpha: 0.7                  # Distillation loss weight
-        loss_fn: 'mse'              # Loss function for task
-        feature_matching: false     # Feature-level distillation
-        
-      # Peak classification (classification) - will use distillation
+        temperature: 4.0
+        alpha: 0.7
+        loss_fn: 'mse'
+        feature_matching: false
       peak_classification:
-        temperature: 4.0            # Temperature for softmax
-        alpha: 0.5                  # Distillation loss weight  
-        loss_fn: 'ce'               # Cross-entropy loss
-        feature_matching: true      # Feature-level distillation
-        feature_weight: 0.1         # Feature matching weight
-        
-    # Global settings
-    global_temperature: 4.0         # Default temperature
-    cross_task_distillation: false # Experimental cross-task knowledge transfer
-    
-  # Teacher model configuration
+        temperature: 4.0
+        alpha: 0.5
+        loss_fn: 'ce'
+        feature_matching: true
+        feature_weight: 0.1
+    global_temperature: 4.0
+    cross_task_distillation: false
   teacher:
-    model_path: ''                  # Path to teacher model checkpoint
-    freeze_teacher: true            # Freeze teacher during training
-    
-  # Example usage in code:
-  # distillation = MultiTaskDistillation(
-  #   task_configs=cfg['knowledge_distillation']['multi_task']['task_configs'],
-  #   task_types=cfg['knowledge_distillation']['multi_task']['task_types'],
-  #   global_temperature=cfg['knowledge_distillation']['multi_task']['global_temperature']
-  # )
+    model_path: ''
+    freeze_teacher: true

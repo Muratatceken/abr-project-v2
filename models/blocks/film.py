@@ -181,17 +181,24 @@ class TokenFiLM(nn.Module):
         self.layer_norm = nn.LayerNorm(d_model)
         self.init_gamma = init_gamma
         self.init_beta = init_beta
-        
+
+        # Learned unconditional embedding for classifier-free guidance
+        if static_dim > 0:
+            self.uncond_embedding = nn.Parameter(torch.zeros(static_dim))
+
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights for stable training."""
+        """Initialize weights for stable training.
+
+        Uses small non-zero weight init to ensure gradients flow from the start.
+        Zero weight init causes the entire FiLM network to have zero gradients initially.
+        """
         if self.embed is not None:
-            # Initialize the final layer specially
             with torch.no_grad():
-                # Initialize gamma to init_gamma and beta to init_beta
                 final_layer = self.embed[-1]
-                nn.init.zeros_(final_layer.weight)
+                # Small non-zero init instead of zeros to allow gradient flow
+                nn.init.normal_(final_layer.weight, std=1e-3)
                 if final_layer.bias is not None:
                     final_layer.bias[:self.d_model].fill_(self.init_gamma)  # gamma
                     final_layer.bias[self.d_model:].fill_(self.init_beta)   # beta
@@ -199,16 +206,20 @@ class TokenFiLM(nn.Module):
     def forward(self, x: torch.Tensor, static_params: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Apply FiLM conditioning to token embeddings.
-        
+
         Args:
             x: Token embeddings [B, T, D]
-            static_params: Static parameters [B, S] or None
-            
+            static_params: Static parameters [B, S] or None (uses learned unconditional embedding)
+
         Returns:
             Modulated embeddings [B, T, D]
         """
-        if static_params is None or self.embed is None:
+        if self.embed is None:
             return x
+
+        # Use learned unconditional embedding when static_params is None (for CFG)
+        if static_params is None:
+            static_params = self.uncond_embedding.expand(x.shape[0], -1)
         
         B, T, D = x.shape
         

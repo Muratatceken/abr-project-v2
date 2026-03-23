@@ -30,10 +30,10 @@ class ABRDataset(Dataset):
     """
     
     def __init__(
-        self, 
+        self,
         data_path: str = "data/processed/ultimate_dataset.pkl",
         transform: Optional[Callable] = None,
-        normalize_signal: bool = True,
+        normalize_signal: bool = False,
         normalize_static: bool = True,
         return_peak_labels: bool = False
     ):
@@ -82,12 +82,14 @@ class ABRDataset(Dataset):
                 self.scaler = dataset_dict.get('scaler', None)
                 self.label_encoder = dataset_dict.get('label_encoder', None)
                 self.metadata = dataset_dict.get('metadata', {})
+                self.signal_stats = dataset_dict.get('signal_stats', None)
             else:
                 # Fallback for direct list format
                 self.data = dataset_dict
                 self.scaler = None
                 self.label_encoder = None
                 self.metadata = {}
+                self.signal_stats = None
                 
             logging.info(f"Loaded {len(self.data)} samples from {self.data_path}")
             
@@ -187,11 +189,11 @@ class ABRDataset(Dataset):
         # Strict length assertion (no resampling allowed)
         assert len(signal) == self.sequence_length, f"Signal length {len(signal)} != {self.sequence_length}. No resampling in dataset."
         
-        # Apply signal normalization if requested
+        # Apply signal normalization if requested (disabled by default since
+        # preprocessing already applies z-score normalization to avoid double-normalization)
         if self.normalize_signal:
-            # Z-score normalization per sample (already done in preprocessing, but ensure)
             signal_std = np.std(signal)
-            if signal_std > 1e-8:  # Avoid division by zero
+            if signal_std > 1e-8:
                 signal = (signal - np.mean(signal)) / signal_std
         
         # Convert to required format for training pipeline
@@ -217,23 +219,23 @@ class ABRDataset(Dataset):
     
     def denormalize_signal(self, x_norm: torch.Tensor) -> torch.Tensor:
         """
-        Denormalize signal for visualization in TensorBoard.
-        
-        Since we apply z-score normalization per sample, we cannot perfectly
-        recover the original signal without storing per-sample statistics.
-        This method provides a reasonable approximation for visualization.
-        
+        Denormalize signal for visualization using global dataset statistics.
+
+        Per-sample z-score cannot be perfectly inverted without per-sample stats.
+        Uses global mean/std from preprocessing as a reasonable approximation.
+
         Args:
-            x_norm: Normalized signal tensor of shape [..., T] 
-            
+            x_norm: Normalized signal tensor of shape [..., T]
+
         Returns:
             Denormalized signal (approximate) in physical units
         """
-        # Since we can't perfectly denormalize per-sample z-score,
-        # we apply a typical ABR amplitude scale for visualization
-        # Typical ABR amplitudes range from -0.5 to +0.5 µV
-        typical_scale = 0.2  # µV
-        return x_norm * typical_scale
+        if self.signal_stats is not None:
+            global_std = self.signal_stats['global_std']
+            global_mean = self.signal_stats['global_mean']
+            return x_norm * global_std + global_mean
+        # Fallback: typical ABR amplitude scale
+        return x_norm * 0.2
     
     def get_sample_info(self) -> Dict[str, Any]:
         """
@@ -486,6 +488,32 @@ def create_stratified_datasets(
     test_dataset = Subset(dataset, test_indices) if test_indices else None
     
     return train_dataset, val_dataset, test_dataset
+
+
+class _AugmentedSubset(Dataset):
+    """Wrapper that applies augmentation to a Subset without affecting the parent dataset.
+
+    This ensures validation/test subsets sharing the same parent dataset remain clean.
+    """
+
+    def __init__(self, subset: Subset, transform: Callable):
+        self.subset = subset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, idx):
+        sample = self.subset[idx]
+        if self.transform is not None:
+            sample = self.transform(sample)
+        return sample
+
+    # Forward attribute access to the underlying subset for compatibility
+    def __getattr__(self, name):
+        if name in ('subset', 'transform'):
+            raise AttributeError(name)
+        return getattr(self.subset, name)
 
 
 def load_ultimate_dataset(

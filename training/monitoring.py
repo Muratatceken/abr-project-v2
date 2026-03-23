@@ -674,7 +674,9 @@ class TrainingMonitor:
         enable_model_health: bool = True,
         enable_alerts: bool = True,
         track_activations: bool = False,
-        dashboard_port: Optional[int] = None
+        dashboard_port: Optional[int] = None,
+        enable_joint_generation_monitoring: bool = False,
+        joint_generation_config: Optional[Dict[str, Any]] = None
     ):
         """
         Initialize comprehensive training monitor.
@@ -686,6 +688,8 @@ class TrainingMonitor:
             enable_alerts: Whether to enable alerting system
             track_activations: Whether to track activation statistics
             dashboard_port: Port for real-time dashboard (if available)
+            enable_joint_generation_monitoring: Whether to enable joint generation monitoring
+            joint_generation_config: Configuration for joint generation monitoring
         """
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
@@ -701,6 +705,17 @@ class TrainingMonitor:
         self.model_health_monitor = None
         if enable_model_health:
             self.model_health_monitor = ModelHealthMonitor(track_activations=track_activations)
+            
+        # Joint generation monitoring
+        self.joint_generation_monitor = None
+        if enable_joint_generation_monitoring:
+            try:
+                from .joint_generation_monitor import JointGenerationMonitor
+                config = joint_generation_config or {}
+                self.joint_generation_monitor = JointGenerationMonitor(**config)
+            except ImportError as e:
+                logger.warning(f"Failed to import JointGenerationMonitor: {e}")
+                logger.warning("Joint generation monitoring will be disabled")
             
         # Alerting system
         self.alerts_enabled = enable_alerts
@@ -746,7 +761,8 @@ class TrainingMonitor:
         epoch: int,
         step: int,
         metrics: Dict[str, float],
-        model: Optional[nn.Module] = None
+        model: Optional[nn.Module] = None,
+        joint_generation_data: Optional[Dict[str, torch.Tensor]] = None
     ):
         """
         Update all monitoring components.
@@ -756,6 +772,8 @@ class TrainingMonitor:
             step: Current step
             metrics: Training/validation metrics
             model: Model for health monitoring (optional)
+            joint_generation_data: Data for joint generation monitoring (optional)
+                Expected keys: 'generated_params', 'target_params', 'hearing_loss_pred', 'hearing_loss_target'
         """
         self.current_epoch = epoch
         self.current_step = step
@@ -770,6 +788,22 @@ class TrainingMonitor:
             self.model_health_monitor.update(model, epoch, step)
             model_metrics = self._extract_model_metrics()
             
+        # Update joint generation monitor
+        joint_generation_metrics = None
+        if self.joint_generation_monitor and joint_generation_data:
+            try:
+                self.joint_generation_monitor.update(
+                    generated_params=joint_generation_data['generated_params'],
+                    target_params=joint_generation_data['target_params'],
+                    hearing_loss_pred=joint_generation_data['hearing_loss_pred'],
+                    hearing_loss_target=joint_generation_data['hearing_loss_target'],
+                    epoch=epoch,
+                    step=step
+                )
+                joint_generation_metrics = self._extract_joint_generation_metrics()
+            except Exception as e:
+                logger.warning(f"Failed to update joint generation monitor: {e}")
+        
         self.metric_tracker.update(
             epoch=epoch,
             step=step,
@@ -778,9 +812,16 @@ class TrainingMonitor:
             model_metrics=model_metrics
         )
         
-        # Check alerts
+        # Check alerts (include joint generation metrics)
         if self.alerts_enabled:
-            self._check_alerts(metrics, system_metrics, model_metrics)
+            all_metrics_for_alerts = {**metrics}
+            if system_metrics:
+                all_metrics_for_alerts.update(system_metrics)
+            if model_metrics:
+                all_metrics_for_alerts.update(model_metrics)
+            if joint_generation_metrics:
+                all_metrics_for_alerts.update(joint_generation_metrics)
+            self._check_alerts(all_metrics_for_alerts, system_metrics, model_metrics)
             
     def _extract_model_metrics(self) -> Dict[str, float]:
         """Extract key model health metrics."""
@@ -804,6 +845,44 @@ class TrainingMonitor:
         model_metrics['dead_neurons_count'] = total_dead
         
         return model_metrics
+    
+    def _extract_joint_generation_metrics(self) -> Dict[str, float]:
+        """Extract key joint generation metrics for alerting and logging."""
+        if not self.joint_generation_monitor:
+            return {}
+            
+        try:
+            summary = self.joint_generation_monitor.get_summary()
+            joint_metrics = {}
+            
+            # Extract overall performance metrics
+            hearing_loss_perf = summary.get('hearing_loss_performance', {})
+            overall_accuracy = hearing_loss_perf.get('overall_accuracy', {})
+            if 'current' in overall_accuracy:
+                joint_metrics['hearing_loss_accuracy'] = overall_accuracy['current']
+                
+            # Extract parameter performance metrics
+            param_performance = summary.get('parameter_performance', {})
+            for param_name, param_metrics in param_performance.items():
+                for metric_type, metric_data in param_metrics.items():
+                    if 'recent_mean' in metric_data:
+                        joint_metrics[f'{param_name}_{metric_type}'] = metric_data['recent_mean']
+                        
+            # Extract consistency metrics
+            consistency_analysis = summary.get('consistency_analysis', {})
+            overall_consistency = consistency_analysis.get('overall_consistency', {})
+            if 'current' in overall_consistency:
+                joint_metrics['parameter_consistency'] = overall_consistency['current']
+                
+            # Extract anomaly counts
+            anomalies = summary.get('anomalies', {})
+            joint_metrics['joint_generation_anomalies'] = len(anomalies.get('recent_anomalies', []))
+            
+            return joint_metrics
+            
+        except Exception as e:
+            logger.debug(f"Failed to extract joint generation metrics: {e}")
+            return {}
         
     def add_alert(
         self,
@@ -892,6 +971,9 @@ class TrainingMonitor:
         if self.model_health_monitor:
             summary['model_health'] = self.model_health_monitor.get_summary()
             
+        if self.joint_generation_monitor:
+            summary['joint_generation'] = self.joint_generation_monitor.get_summary()
+            
         return summary
         
     def _save_monitoring_data(self):
@@ -915,6 +997,9 @@ class TrainingMonitor:
         if self.model_health_monitor:
             detailed_data['gradient_history'] = dict(self.model_health_monitor.gradient_history)
             detailed_data['weight_history'] = dict(self.model_health_monitor.weight_history)
+            
+        if self.joint_generation_monitor:
+            detailed_data['joint_generation_data'] = self.joint_generation_monitor.generate_visualization_data()
             
         detailed_path = self.save_dir / 'monitoring_detailed.json'
         with open(detailed_path, 'w') as f:
@@ -1000,6 +1085,8 @@ class TrainingMonitor:
             self.resource_monitor.reset()
         if self.model_health_monitor:
             self.model_health_monitor.reset()
+        if self.joint_generation_monitor:
+            self.joint_generation_monitor.reset()
         self.alert_history.clear()
         self.training_start_time = None
 
@@ -1077,6 +1164,11 @@ def generate_training_report(monitor: TrainingMonitor, save_path: str):
             <h2>Model Health</h2>
             {_format_model_health_html(summary.get('model_health', {}))}
         </div>
+        
+        <div class="section">
+            <h2>Joint Generation Performance</h2>
+            {_format_joint_generation_html(summary.get('joint_generation', {}))}
+        </div>
     </body>
     </html>
     """
@@ -1148,6 +1240,91 @@ def _format_model_health_html(model_health: Dict[str, Any]) -> str:
     return html
 
 
+def _format_joint_generation_html(joint_generation: Dict[str, Any]) -> str:
+    """Format joint generation performance for HTML report."""
+    if not joint_generation:
+        return "<p>Joint generation monitoring not available</p>"
+        
+    html = ""
+    
+    # Hearing loss performance
+    hearing_loss_perf = joint_generation.get('hearing_loss_performance', {})
+    if hearing_loss_perf:
+        html += "<h3>Hearing Loss Classification</h3>"
+        overall_accuracy = hearing_loss_perf.get('overall_accuracy', {})
+        if overall_accuracy:
+            html += f"<p>Current Accuracy: {overall_accuracy.get('current', 0):.3f}</p>"
+            html += f"<p>Recent Mean: {overall_accuracy.get('recent_mean', 0):.3f}</p>"
+            html += f"<p>Trend: {overall_accuracy.get('trend', 'unknown')}</p>"
+            
+    # Parameter performance
+    param_performance = joint_generation.get('parameter_performance', {})
+    if param_performance:
+        html += "<h3>Parameter Prediction Performance</h3>"
+        html += "<table><tr><th>Parameter</th><th>Metric</th><th>Trend</th><th>Recent Mean</th></tr>"
+        for param_name, param_metrics in param_performance.items():
+            for metric_type, metric_data in param_metrics.items():
+                trend = metric_data.get('current_trend', 'unknown')
+                recent_mean = metric_data.get('recent_mean', 0)
+                html += f"<tr><td>{param_name}</td><td>{metric_type}</td><td>{trend}</td><td>{recent_mean:.4f}</td></tr>"
+        html += "</table>"
+        
+    # Consistency analysis
+    consistency_analysis = joint_generation.get('consistency_analysis', {})
+    if consistency_analysis:
+        html += "<h3>Parameter-Waveform Consistency</h3>"
+        overall_consistency = consistency_analysis.get('overall_consistency', {})
+        if overall_consistency:
+            html += f"<p>Current Consistency: {overall_consistency.get('current', 0):.3f}</p>"
+            html += f"<p>Recent Mean: {overall_consistency.get('recent_mean', 0):.3f}</p>"
+            html += f"<p>Trend: {overall_consistency.get('trend', 'unknown')}</p>"
+            
+    # Anomalies
+    anomalies = joint_generation.get('anomalies', {})
+    if anomalies:
+        html += "<h3>Anomaly Detection</h3>"
+        html += f"<p>Total Detected: {anomalies.get('total_detected', 0)}</p>"
+        html += f"<p>Recent Anomalies: {len(anomalies.get('recent_anomalies', []))}</p>"
+        
+    if not html:
+        html = "<p>No joint generation data available</p>"
+        
+    return html
+
+
+def create_joint_generation_monitor(
+    save_dir: str,
+    parameter_names: List[str] = None,
+    hearing_loss_classes: int = 3,
+    **kwargs
+) -> TrainingMonitor:
+    """
+    Create a TrainingMonitor with joint generation monitoring enabled.
+    
+    Args:
+        save_dir: Directory to save monitoring data
+        parameter_names: Names of static parameters to track
+        hearing_loss_classes: Number of hearing loss classes
+        **kwargs: Additional arguments for TrainingMonitor
+        
+    Returns:
+        TrainingMonitor instance with joint generation monitoring enabled
+    """
+    joint_generation_config = {
+        'parameter_names': parameter_names or ['age', 'intensity', 'stimulus_rate', 'fmp'],
+        'hearing_loss_classes': hearing_loss_classes,
+        'smoothing_window': kwargs.pop('smoothing_window', 10),
+        'enable_anomaly_detection': kwargs.pop('enable_anomaly_detection', True)
+    }
+    
+    return TrainingMonitor(
+        save_dir=save_dir,
+        enable_joint_generation_monitoring=True,
+        joint_generation_config=joint_generation_config,
+        **kwargs
+    )
+
+
 def detect_training_issues(monitor: TrainingMonitor) -> List[Dict[str, Any]]:
     """
     Detect potential training issues from monitoring data.
@@ -1216,5 +1393,54 @@ def detect_training_issues(monitor: TrainingMonitor) -> List[Dict[str, Any]]:
             'description': 'Risk of vanishing gradients detected',
             'severity': 'medium'
         })
+    
+    # Check joint generation issues
+    joint_generation = summary.get('joint_generation', {})
+    if joint_generation:
+        # Check hearing loss classification performance
+        hearing_loss_perf = joint_generation.get('hearing_loss_performance', {})
+        overall_accuracy = hearing_loss_perf.get('overall_accuracy', {})
+        if overall_accuracy.get('current', 1.0) < 0.5:
+            issues.append({
+                'type': 'poor_hearing_loss_classification',
+                'value': overall_accuracy.get('current', 0),
+                'description': 'Hearing loss classification accuracy is below 50%',
+                'severity': 'high'
+            })
+            
+        # Check parameter prediction quality
+        param_performance = joint_generation.get('parameter_performance', {})
+        for param_name, param_metrics in param_performance.items():
+            correlation_data = param_metrics.get('correlation', {})
+            if correlation_data.get('recent_mean', 1.0) < 0.3:
+                issues.append({
+                    'type': 'poor_parameter_prediction',
+                    'parameter': param_name,
+                    'value': correlation_data.get('recent_mean', 0),
+                    'description': f'Parameter {param_name} prediction correlation is below 0.3',
+                    'severity': 'medium'
+                })
+                
+        # Check consistency issues
+        consistency_analysis = joint_generation.get('consistency_analysis', {})
+        overall_consistency = consistency_analysis.get('overall_consistency', {})
+        if overall_consistency.get('current', 1.0) < 0.5:
+            issues.append({
+                'type': 'poor_parameter_consistency',
+                'value': overall_consistency.get('current', 0),
+                'description': 'Parameter-waveform consistency is below 0.5',
+                'severity': 'medium'
+            })
+            
+        # Check for excessive anomalies
+        anomalies = joint_generation.get('anomalies', {})
+        recent_anomalies = len(anomalies.get('recent_anomalies', []))
+        if recent_anomalies > 10:
+            issues.append({
+                'type': 'excessive_joint_generation_anomalies',
+                'value': recent_anomalies,
+                'description': f'High number of joint generation anomalies detected ({recent_anomalies})',
+                'severity': 'medium'
+            })
         
     return issues

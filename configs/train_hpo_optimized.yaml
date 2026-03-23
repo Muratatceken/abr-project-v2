@@ -1,0 +1,550 @@
+# ABR Transformer HPO-Optimized Training Configuration
+# Optimized configuration for efficient hyperparameter optimization with Optuna
+# Based on configs/train.yaml but with HPO-specific optimizations
+
+# Basic experiment settings
+seed: 42
+device: "cuda"  # Will fallback to CPU if CUDA unavailable
+log_dir: "runs/abr_transformer_hpo"
+exp_name: "abr_vpred_hpo_optimized"
+
+# Dataset configuration
+data:
+  # Paths to CSV files used by dataset.py (update these paths)
+  train_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"  # Using pkl for now, adapt as needed
+  val_csv: "data/processed/ultimate_dataset_with_clinical_thresholds.pkl"    # Same file, will be split
+  
+  # Dataset properties (must match ABRTransformerGenerator)
+  sequence_length: 200
+  static_order: ["Age", "Intensity", "Stimulus Rate", "FMP"]
+  
+  # Data splits
+  train_ratio: 0.7
+  val_ratio: 0.15
+  test_ratio: 0.15
+
+# DataLoader configuration - Optimized for HPO
+loader:
+  batch_size: 32  # Will be optimized via HPO
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+  prefetch_factor: 2
+  persistent_workers: false
+  
+  # Peak-balanced sampling for multi-task training - ENABLED for efficiency
+  use_peak_balanced_sampler: true
+  peak_sampling_strategy: 'weighted'  # Options: 'weighted', 'oversample'
+
+# Model architecture - Parameters will be optimized via HPO
+model:
+  # ABRTransformerGenerator parameters
+  input_channels: 1
+  static_dim: 4
+  sequence_length: 200  # Must match data.sequence_length
+  
+  # Transformer architecture - Key HPO targets
+  d_model: 256  # Will be optimized: [128, 256, 512]
+  n_layers: 6   # Will be optimized: [4, 6, 8]
+  n_heads: 8    # Will be optimized: [4, 8, 16]
+  ff_mult: 4
+  dropout: 0.1  # Will be optimized: [0.05, 0.1, 0.15, 0.2]
+  
+  # Conditioning options
+  use_timestep_cond: true
+  use_static_film: true
+  
+  # Advanced architectural features (controlled by ablation config)
+  use_cross_attention: ${ablation.use_cross_attention}
+  joint_static_generation: ${ablation.joint_static_generation}
+  use_learned_pos_emb: ${ablation.use_learned_pos_emb}
+  film_residual: ${ablation.film_residual}
+  use_multi_scale_fusion: ${ablation.use_multi_scale_fusion}
+  use_advanced_blocks: ${ablation.use_advanced_blocks}
+  ablation_mode: ${ablation.ablation_mode}
+
+# Ablation study configuration - Minimal for HPO efficiency
+ablation:
+  # Cross-attention between static params and signal features
+  use_cross_attention: false
+  cross_attention_heads: 4
+  cross_attention_dropout: 0.1
+  
+  # Joint generation of static parameters
+  joint_static_generation: false
+  static_recon_weight: 0.1
+  
+  # Enhanced positional encodings
+  use_learned_pos_emb: false
+  pos_emb_dropout: 0.1
+  
+  # Residual FiLM connections
+  film_residual: false
+  
+  # Multi-scale feature fusion - Disabled for HPO efficiency
+  use_multi_scale_fusion: false
+  fusion_scales: [1, 3, 5, 7]
+  
+  # Enhanced attention mechanisms - Disabled for HPO efficiency
+  use_advanced_blocks: false
+  use_multi_scale_attention: false
+  use_gated_ffn: false
+  attention_dropout: 0.1
+  
+  # Ablation study presets
+  ablation_mode: "none"
+
+# Multi-task learning configuration - Enabled for efficiency
+multi_task:
+  # Enable multi-task training (signal + peak + static reconstruction)
+  enabled: true
+  
+  # Loss weights for different tasks - Will be optimized via HPO
+  loss_weights:
+    signal: 1.0
+    peak_classification: 0.5  # Will be optimized: [0.3, 0.5, 0.7]
+    static_reconstruction: 0.1
+  
+  # Task-specific learning rates
+  task_lr_multipliers:
+    signal: 1.0
+    peak_classification: 0.8
+    static_reconstruction: 1.2
+  
+  # Class weighting method for peak detection
+  class_weighting_method: 'inverse_freq'
+  
+  # Validation metric for best model selection
+  validation_metric: 'combined'
+  validation_weights:
+    signal: 0.7
+    peak_classification: 0.3
+  
+  # Progressive training configuration - Disabled for HPO efficiency
+  progressive_weighting:
+    enabled: false
+    schedule_type: 'linear'
+    peak_classification:
+      start_epoch: 0
+      end_epoch: 10  # Reduced for faster HPO
+      start_weight: 0.0
+      end_weight: 0.5
+    static_reconstruction:
+      start_epoch: 5   # Reduced for faster HPO
+      end_epoch: 15    # Reduced for faster HPO
+      start_weight: 0.0
+      end_weight: 0.1
+  
+  # Advanced optimization features
+  advanced_optimization:
+    per_task_lr: true
+    gradient_clipping_per_task: true
+    ema_per_task: false
+
+# Diffusion configuration
+diffusion:
+  # Training schedule
+  num_train_steps: 1000
+  schedule: "cosine"  # Currently only cosine supported
+  v_prediction: true
+  
+  # Sampling/inference - Reduced for efficiency
+  sample_steps: 30  # Reduced from 60 for faster HPO
+  ddim_eta: 0.0  # Deterministic sampling
+  cfg_scale: 1.0  # Classifier-free guidance scale
+
+# Optimization configuration - Key HPO targets
+optim:
+  lr: 0.0001  # Will be optimized: [1e-5, 1e-4, 5e-4, 1e-3]
+  betas: [0.9, 0.99]
+  weight_decay: 0.00001  # Will be optimized: [1e-6, 1e-5, 1e-4]
+  grad_clip: 1.0
+  
+  # Mixed precision and EMA - ENABLED for efficiency
+  amp: true
+  ema_decay: 0.999
+
+# Loss configuration
+loss:
+  # STFT loss weight - Will be optimized via HPO
+  stft_weight: 0.15  # Will be optimized: [0.0, 0.1, 0.15, 0.2]
+  
+  # STFT parameters
+  stft:
+    n_fft: 64
+    hop_length: 16
+    win_length: 64
+    eps: 0.00000001
+
+# Training loop configuration - OPTIMIZED FOR HPO
+trainer:
+  max_epochs: 30  # REDUCED from 100 for faster HPO trials
+  log_every_steps: 100  # REDUCED logging frequency for performance
+  validate_every_epochs: 1
+  
+  # Sampling and visualization - REDUCED for efficiency
+  sample_every_epochs: 5  # REDUCED from 2
+  num_val_plots: 4       # REDUCED from 8
+  num_sample_plots: 4    # REDUCED from 8
+  
+  # Checkpointing
+  ckpt_dir: "checkpoints/abr_transformer_hpo"
+  save_every_epochs: 10  # REDUCED from 5
+  keep_last_k: 3        # REDUCED from 5
+  resume: ""  # Path to checkpoint to resume from (empty = start fresh)
+  
+  # Early stopping settings controlled by early_stopping section below
+
+# Visualization configuration - MINIMAL for HPO efficiency
+viz:
+  plot_spectrogram: false  # DISABLED for HPO efficiency
+  plot_audio: false
+  audio_sample_rate: 20000
+  
+  # Plot customization - REDUCED
+  max_waveform_plots: 4
+  max_spectrogram_plots: 2
+  figsize: [12, 8]
+
+# Advanced training options
+advanced:
+  # Classifier-free guidance dropout during training
+  cfg_dropout_prob: 0.1
+  
+  # Gradient monitoring - REDUCED for efficiency
+  log_grad_norm: false     # DISABLED for HPO efficiency
+  log_param_norm: false    # DISABLED for HPO efficiency
+  grad_norm_clip: 1.0
+  
+  # Learning rate scheduling
+  lr_scheduler: "cosine"  # Options: cosine, linear, constant
+  lr_warmup_steps: 500   # REDUCED from 1000
+  
+  # Validation options
+  val_sample_cfg_scales: [1.0]  # REDUCED from [1.0, 1.5, 2.0]
+
+# Multi-task logging configuration - MINIMAL for HPO
+logging:
+  # Classification metrics logging
+  log_classification_metrics: true
+  log_confusion_matrix: false     # DISABLED for efficiency
+  log_pr_curves: false           # DISABLED for efficiency
+  
+  # Task-specific monitoring - DISABLED for efficiency
+  log_gradient_norms_per_task: false
+  log_parameter_norms_per_task: false
+  
+  # Advanced visualizations - DISABLED for efficiency
+  log_peak_logits_histograms: false
+  log_precision_recall_curves: false
+  # TensorBoard scalars - MINIMAL
+  log_loss_components: true
+  log_learning_rate: true
+  log_gradient_norm: false
+  log_parameter_histograms: false
+  
+  # Console logging
+  console_log_level: "WARNING"  # REDUCED verbosity
+  
+  # Checkpoint metadata
+  save_config_with_checkpoint: true
+  save_model_summary: false
+
+# Hardware and performance - OPTIMIZED for HPO
+performance:
+  # Memory optimization - ENABLED for efficiency
+  gradient_checkpointing: true  # ENABLED for memory efficiency
+  pin_memory: true
+  non_blocking: true
+  
+  # Multi-GPU (future extension)
+  distributed: false
+  find_unused_parameters: false
+
+# Reproducibility
+reproducibility:
+  deterministic: false  # Set to false for HPO speed
+  benchmark: true      # Use cudNN benchmarking for speed
+
+# Curriculum Learning Configuration - DISABLED to avoid over-regularization in short trials
+curriculum_learning:
+  enabled: false  # DISABLED to prevent over-regularization for 30-epoch trials
+  difficulty_metric: 'combined'
+  scheduler_type: 'linear'
+  start_difficulty: 0.5          # Start with moderate difficulty for HPO
+  end_difficulty: 1.0
+  curriculum_epochs: 20          # REDUCED from 50 for HPO
+  anti_curriculum: false
+  update_frequency: 2            # REDUCED frequency
+  difficulty_weights:
+    snr: 0.4
+    peaks: 0.4
+    hearing_loss: 0.2
+
+# Focal Loss Configuration - Will be optimized via HPO
+focal_loss:
+  enabled: false                 # Will be optimized (true/false)
+  alpha: 0.25                    # Will be optimized: [0.1, 0.25, 0.5, 0.75]
+  gamma: 2.0                     # Will be optimized: [1.0, 2.0, 3.0]
+  reduction: 'mean'
+
+# Advanced Augmentation Configuration - REDUCED for HPO stability 
+advanced_augmentation:
+  enabled: true                  # ENABLED for better generalization
+  mixup_prob: 0.05              # FURTHER REDUCED for HPO stability
+  cutmix_prob: 0.05             # FURTHER REDUCED for HPO stability
+  time_stretch_prob: 0.02       # FURTHER REDUCED from 0.1
+  amplitude_scaling_range: [0.95, 1.05]  # NARROWER range for stability
+  preserve_peaks: true
+  curriculum_aware: false       # DISABLED since curriculum is disabled
+  augmentation_strength: 0.5    # REDUCED to 0.5 for better HPO stability
+  
+  # ABR-specific augmentations
+  abr_specific:
+    peak_jitter_std: 0.03       # REDUCED from 0.05
+    baseline_drift_std: 0.005   # REDUCED from 0.01
+    electrode_noise_std: 0.003  # REDUCED from 0.005
+    stimulus_artifact_prob: 0.05 # REDUCED from 0.1
+
+# Knowledge Distillation Configuration - DISABLED for HPO
+knowledge_distillation:
+  enabled: false  # DISABLED for HPO simplicity
+  teacher_checkpoint: null
+  temperature: 4.0
+  alpha: 0.7
+  feature_distillation: false
+  distillation_layers: []
+  feature_weight: 0.1
+  
+  multi_task:
+    enabled: false
+    task_weights:
+      signal: 0.7
+      peak_classification: 0.3
+    cross_task_distillation: false
+
+# Ensemble Training Configuration - DISABLED for HPO
+ensemble_training:
+  enabled: false  # DISABLED for HPO simplicity
+  snapshot_ensemble: false
+  snapshot_epochs: []
+  ensemble_size: 1
+  diversity_weight: 0.0
+  weighting_strategy: 'equal'
+  uncertainty_estimation: false
+
+# Hyperparameter Optimization Configuration - ENABLED AND OPTIMIZED
+hyperparameter_optimization:
+  enabled: true                 # ENABLED - Main feature!
+  backend: 'optuna'             # Use Optuna backend
+  n_trials: 50                  # OPTIMIZED: 50 trials for efficient search
+  timeout: 1800                 # 30 minutes per trial (1800 seconds)
+  pruning: true                 # ENABLED for efficiency
+  search_space: 'comprehensive' # Use comprehensive search space
+  
+  # Optuna-specific settings - OPTIMIZED
+  optuna:
+    sampler: 'tpe'              # Tree-structured Parzen Estimator
+    pruner: 'median'            # Median pruner for efficient early stopping
+    n_startup_trials: 10        # 10 random trials before TPE
+    n_warmup_steps: 5           # 5 steps before pruning
+    
+  # Multi-objective optimization - ENABLED
+  multi_objective:
+    enabled: true               # ENABLED for accuracy vs efficiency
+    objectives: ['val_combined_score', 'total_training_time']
+    directions: ['maximize', 'minimize']  # Maximize score, minimize time
+
+# Cross-Validation Configuration - ENABLED AND OPTIMIZED
+cross_validation:
+  enabled: true                 # ENABLED for robust evaluation
+  n_folds: 5                    # 5 folds for good statistical power
+  stratified: true              # Use stratified splitting
+  patient_level: true           # CRITICAL: Ensure no patient overlap
+  parallel_training: false      # DISABLED for stability during HPO
+  
+  # CV-specific settings
+  cv_type: 'stratified_patient' # Patient-level stratification
+  min_samples_per_class: 2      # Minimum samples per class per fold
+  
+  # Result aggregation
+  aggregation_method: 'mean'    # Mean aggregation
+  confidence_intervals: true    # Compute confidence intervals
+  statistical_tests: false     # DISABLED for efficiency
+
+# Early Stopping Configuration - AGGRESSIVE for HPO
+early_stopping:
+  enabled: true                 # ENABLED
+  type: 'multi_task'           # Multi-task early stopping
+  patience: 10                 # AGGRESSIVE: 10 epochs (reduced from 20)
+  min_delta: 0.0001           # INCREASED threshold for faster stopping
+  metric: 'val_combined_score' # Monitor combined score
+  mode: 'max'                  # Maximize combined score
+  restore_best_weights: true
+  warmup_epochs: 5             # REDUCED from 10
+  
+  # Multi-task early stopping
+  multi_task:
+    task_configs:
+      signal:
+        patience: 8            # AGGRESSIVE
+        min_delta: 0.001      # INCREASED
+        mode: 'min'
+      peak_classification:
+        patience: 12           # AGGRESSIVE
+        min_delta: 0.01       # INCREASED
+        mode: 'max'
+    combination_strategy: 'weighted_average'
+    task_weights:
+      signal: 0.7
+      peak_classification: 0.3
+      
+  # Adaptive early stopping
+  adaptive:
+    patience_factor: 1.2       # REDUCED from 1.5
+    lr_patience_multiplier: 1.5 # REDUCED from 2.0
+    plateau_threshold: 3       # REDUCED from 5
+
+# Comprehensive Monitoring Configuration - MINIMAL for HPO
+monitoring:
+  enabled: false               # DISABLED for HPO efficiency
+  save_dir: 'monitoring/hpo'
+  
+  # Metric tracking - MINIMAL
+  track_gradients: false       # DISABLED for efficiency
+  track_activations: false
+  track_resources: false       # DISABLED for efficiency
+  smoothing_window: 5          # REDUCED
+  
+  # Resource monitoring - DISABLED
+  resource_monitoring:
+    enabled: false
+    update_interval: 5.0
+    monitor_gpu: false
+    
+  # Model health monitoring - DISABLED
+  model_health:
+    enabled: false
+    dead_neuron_threshold: 1e-6
+    gradient_clip_threshold: 10.0
+    
+  # Alerting system - DISABLED
+  alerts:
+    enabled: false
+    alert_configs: []
+        
+  # Dashboard configuration - DISABLED
+  dashboard:
+    enabled: false
+    port: 8080
+    update_interval: 5.0
+
+# Advanced Loss Configuration - DISABLED for HPO simplicity
+advanced_loss:
+  combined_loss:
+    enabled: false
+    adaptive_weighting: false
+    uncertainty_weighting: false
+    
+  loss_scheduling:
+    enabled: false
+    schedule_type: 'linear'
+
+# Advanced Optimizer Configuration - MINIMAL for HPO
+advanced_optimizer:
+  # Parameter groups - DISABLED for simplicity
+  parameter_groups:
+    enabled: false
+    groups: {}
+        
+  # Advanced scheduling
+  lr_scheduling:
+    scheduler: 'cosine'         # Cosine scheduling
+    warmup_epochs: 3           # REDUCED from 5
+    cosine_restarts: false
+    eta_min: 1e-6
+    
+  # Gradient modifications - DISABLED for simplicity
+  gradient_modifications:
+    gradient_centralization: false
+    gradient_standardization: false
+
+# HPO Search Space Configuration
+# This section defines the hyperparameter search spaces for optimization
+hpo_search_space:
+  # Model architecture parameters
+  model:
+    d_model: [128, 256, 512]           # Transformer dimension
+    n_layers: [4, 6, 8]               # Number of transformer layers
+    n_heads: [4, 8, 16]               # Number of attention heads
+    dropout: [0.05, 0.1, 0.15, 0.2]   # Dropout rate
+    ff_mult: [2, 4, 6]                # Feed-forward multiplier
+  
+  # Optimization parameters
+  optim:
+    lr: [1e-5, 1e-4, 5e-4, 1e-3]     # Learning rate
+    weight_decay: [1e-6, 1e-5, 1e-4]  # Weight decay
+    betas: [[0.9, 0.99], [0.9, 0.999], [0.95, 0.999]]  # Adam betas
+  
+  # Loss configuration
+  loss:
+    stft_weight: [0.0, 0.1, 0.15, 0.2]  # STFT loss weight
+  
+  # Multi-task learning
+  multi_task:
+    peak_classification_weight: [0.3, 0.5, 0.7]  # Peak classification loss weight
+  
+  # DataLoader parameters
+  loader:
+    batch_size: [16, 32, 64]           # Batch size
+  
+  # Focal loss parameters (if enabled)
+  focal_loss:
+    enabled: [true, false]             # Whether to use focal loss
+    alpha: [0.1, 0.25, 0.5, 0.75]     # Focal loss alpha
+    gamma: [1.0, 2.0, 3.0]            # Focal loss gamma
+  
+  # Augmentation parameters
+  advanced_augmentation:
+    mixup_prob: [0.0, 0.05, 0.1]      # Mixup probability (reduced range)
+    cutmix_prob: [0.0, 0.05, 0.1]     # Cutmix probability (reduced range)
+    augmentation_strength: [0.3, 0.5, 0.7]  # Overall augmentation strength (reduced)
+  
+  # Curriculum learning
+  curriculum_learning:
+    enabled: [false, true]             # Whether to use curriculum learning (prefer false first)
+    start_difficulty: [0.3, 0.5, 0.7] # Starting curriculum difficulty
+    curriculum_epochs: [10, 15, 20]   # Epochs to complete curriculum
+
+# HPO-specific training overrides
+# These settings are applied during HPO trials for efficiency
+hpo_overrides:
+  # Reduce expensive operations during HPO
+  viz:
+    plot_spectrogram: false
+    plot_audio: false
+  
+  # Minimal logging for speed
+  logging:
+    log_confusion_matrix: false
+    log_pr_curves: false
+    log_gradient_norms_per_task: false
+    log_parameter_norms_per_task: false
+    log_peak_logits_histograms: false
+    log_precision_recall_curves: false
+    log_gradient_norm: false
+    log_parameter_histograms: false
+    console_log_level: "ERROR"
+  
+  # Aggressive early stopping
+  early_stopping:
+    patience: 8
+    min_delta: 0.001
+    warmup_epochs: 3
+  
+  # Reduced validation frequency for speed
+  trainer:
+    sample_every_epochs: 10
+    num_val_plots: 2
+    num_sample_plots: 2
+    save_every_epochs: 15

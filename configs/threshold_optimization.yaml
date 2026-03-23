@@ -1,0 +1,188 @@
+# Threshold Optimization Configuration
+# This file contains settings for threshold optimization in ABR peak classification
+
+# =============================================================================
+# OPTIMIZATION STRATEGIES
+# =============================================================================
+optimization:
+  # Available optimization methods
+  strategies:
+    f1_optimal: true            # F1-score maximization
+    youden_j: true             # Youden's J statistic (sensitivity + specificity - 1)
+    constrained: true          # Constrained optimization with user-defined constraints
+    multi_objective: true      # Multi-objective Pareto-optimal solutions
+  
+  # Default optimization strategy when multiple are available
+  default_strategy: 'f1_optimal'
+  
+  # Fallback methods when primary strategy fails
+  fallback_strategies: ['youden_j', 'f1_optimal']
+
+# =============================================================================
+# CONSTRAINT CONFIGURATION
+# =============================================================================
+constraints:
+  # Primary constraint targets (user's requirements)
+  # Set to null to disable a constraint
+  min_recall: 0.80        # Minimum required recall/sensitivity (80%)
+  min_precision: 0.90     # Minimum required precision (90%)
+  min_specificity: null   # Minimum required specificity (disabled)
+  
+  # Constraint tolerance levels (for numerical stability)
+  tolerance:
+    recall: 0.01          # Allow 1% tolerance in recall constraint
+    precision: 0.01       # Allow 1% tolerance in precision constraint
+    specificity: 0.01     # Allow 1% tolerance in specificity constraint
+  
+  # Constraint validation settings
+  validation:
+    check_feasibility: true     # Validate constraints before optimization
+    suggest_alternatives: true  # Suggest alternative constraints if infeasible
+    max_relaxation_percent: 10  # Maximum percent to relax constraints
+
+# =============================================================================
+# ANALYSIS PARAMETERS
+# =============================================================================
+analysis:
+  # Threshold search configuration
+  threshold_search:
+    resolution: 200       # Number of threshold points to analyze
+    range: null          # [min, max] range, or null for auto-detection
+    interpolation_method: 'linear'  # Interpolation method for precision threshold mapping
+  
+  # Performance analysis settings
+  performance_analysis:
+    stability_window_size: 20    # Window size for stability analysis (% of total points)
+    pareto_frontier_points: 50   # Maximum Pareto-optimal points to return
+    sensitivity_analysis: true   # Enable threshold sensitivity analysis
+  
+  # Confidence interval settings
+  confidence:
+    level: 0.95           # Confidence level for bootstrap intervals
+    bootstrap_samples: 1000  # Number of bootstrap samples
+    method: 'percentile'  # Bootstrap method ('percentile', 'bca', 'basic')
+
+# =============================================================================
+# OUTPUT CONFIGURATION
+# =============================================================================
+output:
+  # Report generation settings
+  generate_reports: true
+  report_formats: ['json', 'csv', 'html']
+  
+  # Visualization settings
+  create_plots: true
+  plot_formats: ['png', 'pdf']
+  plot_dpi: 300
+  
+  # Results to include in output
+  include_results:
+    roc_curves: true              # ROC curve data and plots
+    pr_curves: true               # Precision-recall curves
+    threshold_analysis: true      # Threshold vs performance plots
+    pareto_frontier: true         # Multi-objective optimization results
+    stability_analysis: true     # Threshold sensitivity analysis
+    constraint_validation: true  # Constraint feasibility analysis
+  
+  # File naming
+  file_prefix: 'threshold_optimization'
+  timestamp_format: '%Y%m%d_%H%M%S'
+
+# =============================================================================
+# INTEGRATION SETTINGS
+# =============================================================================
+integration:
+  # Integration with existing evaluation pipeline
+  eval_pipeline:
+    enable_in_evaluation: true    # Enable in eval.py pipeline
+    apply_optimized_thresholds: false  # Apply optimized thresholds automatically
+    save_optimization_results: true    # Save optimization results alongside eval results
+  
+  # Backward compatibility
+  backward_compatibility: true    # Maintain compatibility with existing configs
+  
+  # Validation and testing
+  validation:
+    run_validation_tests: true   # Run validation tests on optimized thresholds
+    cross_validate_thresholds: false  # Cross-validate threshold performance
+    bootstrap_validation: true   # Use bootstrap for threshold validation
+
+# =============================================================================
+# PERFORMANCE TUNING
+# =============================================================================
+performance:
+  # Optimization algorithm parameters
+  algorithms:
+    convergence_tolerance: 1e-6   # Convergence tolerance for optimization
+    max_iterations: 1000         # Maximum optimization iterations
+    numerical_stability: true    # Enable numerical stability checks
+  
+  # Computational limits
+  limits:
+    max_threshold_points: 1000   # Maximum threshold points to analyze
+    max_bootstrap_samples: 5000  # Maximum bootstrap samples
+    memory_limit_mb: 512         # Memory limit in MB
+  
+  # Parallel processing
+  parallel:
+    enable: false               # Enable parallel processing
+    num_processes: null         # Number of processes (null for auto)
+
+# =============================================================================
+# CLINICAL SETTINGS
+# =============================================================================
+clinical:
+  # Clinical interpretation settings
+  interpretation:
+    provide_clinical_context: true    # Include clinical interpretation in reports
+    risk_assessment: true            # Include risk assessment for threshold choices
+    decision_support: true           # Provide decision support recommendations
+  
+  # Clinical thresholds
+  reference_thresholds:
+    conservative: 0.9    # Conservative threshold (high specificity)
+    balanced: 0.5       # Balanced threshold
+    sensitive: 0.1      # Sensitive threshold (high sensitivity)
+  
+  # Clinical metrics
+  clinical_metrics:
+    likelihood_ratios: true      # Calculate positive/negative likelihood ratios
+    diagnostic_odds_ratio: true  # Calculate diagnostic odds ratio
+    number_needed_to_diagnose: true  # Calculate NND
+    prevalence_adjustment: true  # Apply prevalence adjustments
+
+# =============================================================================
+# LOGGING AND DEBUG
+# =============================================================================
+logging:
+  level: 'INFO'              # Logging level (DEBUG, INFO, WARNING, ERROR)
+  log_optimization_steps: true   # Log detailed optimization steps
+  save_debug_info: false     # Save debug information to files
+  
+debug:
+  save_intermediate_results: false  # Save intermediate optimization results
+  plot_debug_charts: false         # Create debug visualization plots
+  verbose_constraint_analysis: false  # Detailed constraint analysis output
+
+# =============================================================================
+# ADVANCED SETTINGS
+# =============================================================================
+advanced:
+  # Custom objective functions
+  custom_objectives:
+    enable: false               # Enable custom objective functions
+    weight_precision: 1.0       # Weight for precision in combined objectives
+    weight_recall: 1.0          # Weight for recall in combined objectives
+    weight_specificity: 1.0     # Weight for specificity in combined objectives
+  
+  # Threshold sampling
+  sampling:
+    method: 'linear'            # Sampling method ('linear', 'log', 'adaptive')
+    adaptive_refinement: false  # Use adaptive refinement near optimal points
+    min_samples_per_region: 10  # Minimum samples per threshold region
+  
+  # Robustness testing
+  robustness:
+    enable: false               # Enable robustness testing
+    noise_levels: [0.01, 0.05, 0.1]  # Noise levels for robustness testing
+    perturbation_tests: false   # Test threshold stability under perturbations

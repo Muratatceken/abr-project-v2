@@ -86,7 +86,10 @@ def load_config(config_path: str, overrides: Optional[str] = None) -> Dict[str, 
     
     # Resolve placeholders
     config = _resolve_placeholders(config)
-    
+
+    # Convert string booleans/numbers from placeholder resolution
+    config = _coerce_resolved_types(config)
+
     # Validate config for unresolved placeholders
     _validate_config_placeholders(config)
     
@@ -177,6 +180,30 @@ def _resolve_placeholders(config: Any, env_vars: Optional[Dict[str, str]] = None
         return resolve_value(config, config)
 
 
+def _coerce_resolved_types(config: Any) -> Any:
+    """Convert string 'true'/'false'/numbers from placeholder resolution to native types."""
+    if isinstance(config, dict):
+        return {k: _coerce_resolved_types(v) for k, v in config.items()}
+    elif isinstance(config, list):
+        return [_coerce_resolved_types(item) for item in config]
+    elif isinstance(config, str):
+        lower = config.lower().strip()
+        if lower == 'true':
+            return True
+        elif lower == 'false':
+            return False
+        elif lower == 'none' or lower == 'null':
+            return None
+        # Try numeric conversion
+        try:
+            if '.' in config or 'e' in lower:
+                return float(config)
+            return int(config)
+        except ValueError:
+            pass
+    return config
+
+
 def _validate_config_placeholders(config: Any, path: str = ""):
     """
     Validate that all placeholders in config have been resolved.
@@ -239,20 +266,20 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
         )
     
     dataset = ABRDataset(
-        data_path=cfg['data']['train_csv'],  # Using same file for train/val
-        normalize_signal=True,
+        data_path=cfg['data']['train_csv'],
+        normalize_signal=False,  # Already normalized in preprocessing
         normalize_static=True,
         return_peak_labels=return_peak_labels,
-        transform=augmentation_pipeline
+        transform=None  # No augmentation at dataset level — applied only to train split
     )
-    
+
     # Verify dataset properties match config
     assert dataset.sequence_length == cfg['data']['sequence_length'], \
         f"Dataset sequence_length {dataset.sequence_length} != config {cfg['data']['sequence_length']}"
     assert dataset.static_dim == cfg['model']['static_dim'], \
         f"Dataset static_dim {dataset.static_dim} != config {cfg['model']['static_dim']}"
-    
-    # Create stratified splits
+
+    # Create stratified splits FIRST, then apply augmentation only to train
     train_dataset, val_dataset, _ = create_stratified_datasets(
         dataset,
         train_ratio=cfg['data']['train_ratio'],
@@ -260,6 +287,12 @@ def create_datasets_and_loaders(cfg: Dict[str, Any]) -> tuple:
         test_ratio=cfg['data']['test_ratio'],
         random_state=cfg['seed']
     )
+
+    # Apply augmentation only to the training subset (not validation)
+    if augmentation_pipeline is not None and train_dataset is not None:
+        from data.dataset import _AugmentedSubset
+        train_dataset = _AugmentedSubset(train_dataset, augmentation_pipeline)
+        logging.info("✓ Augmentation applied ONLY to training split (validation is clean)")
     
     # Create curriculum learning wrapper if enabled
     curriculum_dataset = None
@@ -414,7 +447,38 @@ def setup_training(model: nn.Module, cfg: Dict[str, Any], device: torch.device, 
             weight_decay=cfg['optim']['weight_decay']
         )
     
-    # AMP scaler
+    # LR Scheduler (warmup + cosine decay)
+    scheduler = None
+    lr_scheduler_type = cfg.get('advanced', {}).get('lr_scheduler', 'constant')
+    warmup_steps = cfg.get('advanced', {}).get('lr_warmup_steps', 0)
+    if lr_scheduler_type == 'cosine' and warmup_steps > 0:
+        from torch.optim.lr_scheduler import LambdaLR
+        import math
+
+        total_steps = cfg['trainer']['max_epochs'] * cfg.get('_estimated_steps_per_epoch', 100)
+
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return step / max(1, warmup_steps)
+            progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+            return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        scheduler = LambdaLR(optimizer, lr_lambda)
+        logging.info(f"✓ Cosine LR scheduler with {warmup_steps} warmup steps")
+    elif lr_scheduler_type == 'cosine':
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=cfg['trainer']['max_epochs'],
+            eta_min=cfg.get('advanced_optimizer', {}).get('lr_scheduling', {}).get('eta_min', 1e-6)
+        )
+        logging.info("✓ Cosine annealing LR scheduler (no warmup)")
+
+    # AMP scaler - Handle CPU fallback
+    if cfg['optim']['amp'] and not torch.cuda.is_available():
+        logging.warning("AMP requested but CUDA not available, disabling AMP for CPU compatibility")
+        cfg['optim']['amp'] = False
+
     scaler = GradScaler() if cfg['optim']['amp'] else None
     
     # EMA
@@ -569,12 +633,12 @@ def setup_training(model: nn.Module, cfg: Dict[str, Any], device: torch.device, 
     logging.info(f"  - EMA decay: {cfg['optim']['ema_decay']}")
     logging.info(f"  - STFT loss weight: {cfg['loss']['stft_weight']}")
     
-    return optimizer, scaler, ema, noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, sampler, advanced_components
+    return optimizer, scaler, ema, noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, sampler, advanced_components, scheduler
 
 
 def train_step(
-    model: nn.Module, 
-    batch: Dict[str, torch.Tensor], 
+    model: nn.Module,
+    batch: Dict[str, torch.Tensor],
     optimizer: optim.Optimizer,
     scaler: Optional[GradScaler],
     ema: Any,
@@ -586,7 +650,8 @@ def train_step(
     device: torch.device,
     epoch: int = 0,
     advanced_components: Optional[Dict[str, Any]] = None,
-    augmentation_pipeline: Optional[Any] = None
+    augmentation_pipeline: Optional[Any] = None,
+    scheduler: Optional[Any] = None
 ) -> Dict[str, float]:
     """Single training step with advanced features."""
     model.train()
@@ -679,12 +744,12 @@ def train_step(
             
             loss_static = mse_time(static_recon, stat_input)
         
-        # Optional STFT loss
+        # Optional STFT loss — computed in float32 since torch.stft does not support float16
         loss_stft = torch.tensor(0.0, device=device)
         if stft_loss is not None and cfg['loss']['stft_weight'] > 0:
-            # Reconstruct x0 from v_pred for STFT loss
             x0_pred = predict_x0_from_v(x_t, v_pred, t, noise_schedule)
-            loss_stft = stft_loss(x0_pred, x0)
+            with torch.cuda.amp.autocast(enabled=False):
+                loss_stft = stft_loss(x0_pred.float(), x0.float())
         
         # Knowledge Distillation Loss
         loss_distillation = torch.tensor(0.0, device=device)
@@ -736,14 +801,19 @@ def train_step(
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg['optim']['grad_clip'])
         optimizer.step()
     
+    # Step LR scheduler (per-step for warmup schedulers)
+    if scheduler is not None:
+        scheduler.step()
+
     # Update EMA
     ema.update(model)
-    
+
     result = {
         'loss_total': loss_total.item(),
         'loss_main_mse_v': loss_main.item(),
         'loss_stft': loss_stft.item(),
-        'loss_distillation': loss_distillation.item()
+        'loss_distillation': loss_distillation.item(),
+        'lr': optimizer.param_groups[0]['lr']
     }
     
     # Add multi-task loss components when available
@@ -799,8 +869,10 @@ def validate(
             v_pred = model_output["signal"]
             peak_logits = model_output.get("peak_5th_exists", None)
             
-            # Signal generation loss
-            signal_loss = mse_time(v_pred, v_target)
+            # Signal generation loss — use x0 reconstruction quality instead of raw v-prediction MSE
+            # v-prediction MSE varies with timestep scale and doesn't reflect actual signal quality
+            x0_pred = predict_x0_from_v(x_t, v_pred, t, noise_schedule)
+            signal_loss = mse_time(x0_pred, x0)
             total_signal_loss += signal_loss.item()
             
             # Peak classification loss and metrics
@@ -1052,7 +1124,7 @@ def main():
     model = create_model(cfg, device)
     
     # Setup training components with advanced features
-    optimizer, scaler, ema, noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, sampler, advanced_components = setup_training(model, cfg, device, dataset)
+    optimizer, scaler, ema, noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, sampler, advanced_components, scheduler = setup_training(model, cfg, device, dataset)
     
     # TensorBoard
     log_dir = Path(cfg['log_dir']) / cfg['exp_name']
@@ -1136,9 +1208,10 @@ def main():
         for batch_idx, batch in enumerate(train_pbar):
             # Training step with advanced features
             losses = train_step(
-                model, batch, optimizer, scaler, ema, 
-                noise_schedule, stft_loss, peak_bce_loss, progressive_schedule, 
-                cfg, device, epoch, advanced_components, augmentation_pipeline
+                model, batch, optimizer, scaler, ema,
+                noise_schedule, stft_loss, peak_bce_loss, progressive_schedule,
+                cfg, device, epoch, advanced_components, augmentation_pipeline,
+                scheduler
             )
             
             epoch_losses.append(losses)
@@ -1275,9 +1348,9 @@ def main():
                 f"val(best) {best_val_loss:.4e} | {epoch_time:.1f}s"
             )
     
-    # Final checkpoint
+    # Final checkpoint — use last completed epoch (max_epochs - 1), not max_epochs
     save_checkpoint(
-        model, optimizer, ema, scaler, cfg['trainer']['max_epochs'], 
+        model, optimizer, ema, scaler, cfg['trainer']['max_epochs'] - 1,
         global_step, best_val_loss, cfg, is_best=False
     )
     

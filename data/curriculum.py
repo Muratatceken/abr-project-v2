@@ -32,7 +32,7 @@ class DifficultyMetrics:
         self.cache_dir = cache_dir
         self.cached_metrics = {}
         
-    def compute_snr_difficulty(self, signal_data: np.ndarray, fs: float = 50000, baseline_window: Optional[int] = None) -> float:
+    def compute_snr_difficulty(self, signal_data: np.ndarray, fs: float = 20000, baseline_window: Optional[int] = None) -> float:
         """
         Compute difficulty based on signal-to-noise ratio.
         

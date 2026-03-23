@@ -28,16 +28,126 @@ from optimization.hyperparameter_optimization import (
 )
 
 
-def setup_logging(level: str = "INFO"):
+def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     """Setup logging for HPO."""
+    handlers = [logging.StreamHandler(sys.stdout)]
+    
+    # Add file handler if log_file path is provided
+    if log_file:
+        handlers.append(logging.FileHandler(log_file))
+    else:
+        # Default to current working directory
+        handlers.append(logging.FileHandler('hpo.log'))
+    
     logging.basicConfig(
         level=getattr(logging, level.upper()),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler('hpo.log')
-        ]
+        handlers=handlers
     )
+
+
+def create_hyperparameter_space_from_config(base_config: Dict[str, Any], search_space_path: Optional[str] = None) -> HyperparameterSpace:
+    """
+    Create hyperparameter space from config or use default.
+    
+    Args:
+        base_config: Base training configuration
+        search_space_path: Optional path to external search space YAML file
+        
+    Returns:
+        HyperparameterSpace object
+    """
+    hyperparameter_space = HyperparameterSpace()
+    
+    # Check if external search space file is provided and exists
+    if search_space_path and os.path.exists(search_space_path):
+        logging.info(f"Loading search space from external file: {search_space_path}")
+        hyperparameter_space.load_from_config(search_space_path)
+        return hyperparameter_space
+    
+    # Check if config has custom search space
+    elif 'hpo_search_space' in base_config:
+        hpo_space = base_config['hpo_search_space']
+        logging.info("Using custom search space from config")
+        
+        # Parse model parameters
+        if 'model' in hpo_space:
+            model_space = hpo_space['model']
+            if 'd_model' in model_space:
+                hyperparameter_space.add_categorical('d_model', model_space['d_model'])
+            if 'n_layers' in model_space:
+                hyperparameter_space.add_categorical('n_layers', model_space['n_layers'])
+            if 'n_heads' in model_space:
+                hyperparameter_space.add_categorical('n_heads', model_space['n_heads'])
+            if 'dropout' in model_space:
+                hyperparameter_space.add_categorical('dropout', model_space['dropout'])
+            if 'ff_mult' in model_space:
+                hyperparameter_space.add_categorical('ff_mult', model_space['ff_mult'])
+        
+        # Parse optimization parameters
+        if 'optim' in hpo_space:
+            optim_space = hpo_space['optim']
+            if 'lr' in optim_space:
+                hyperparameter_space.add_categorical('learning_rate', optim_space['lr'])
+            if 'weight_decay' in optim_space:
+                hyperparameter_space.add_categorical('weight_decay', optim_space['weight_decay'])
+            if 'betas' in optim_space:
+                hyperparameter_space.add_categorical('betas', optim_space['betas'])
+        
+        # Parse loader parameters  
+        if 'loader' in hpo_space:
+            loader_space = hpo_space['loader']
+            if 'batch_size' in loader_space:
+                hyperparameter_space.add_categorical('batch_size', loader_space['batch_size'])
+        
+        # Parse loss parameters
+        if 'loss' in hpo_space:
+            loss_space = hpo_space['loss']
+            if 'stft_weight' in loss_space:
+                hyperparameter_space.add_categorical('stft_weight', loss_space['stft_weight'])
+        
+        # Parse multi-task parameters
+        if 'multi_task' in hpo_space:
+            mt_space = hpo_space['multi_task']
+            if 'peak_classification_weight' in mt_space:
+                hyperparameter_space.add_categorical('peak_classification_weight', mt_space['peak_classification_weight'])
+        
+        # Parse focal loss parameters
+        if 'focal_loss' in hpo_space:
+            focal_space = hpo_space['focal_loss']
+            if 'enabled' in focal_space:
+                hyperparameter_space.add_categorical('use_focal_loss', focal_space['enabled'])
+            if 'alpha' in focal_space:
+                hyperparameter_space.add_categorical('focal_alpha', focal_space['alpha'])
+            if 'gamma' in focal_space:
+                hyperparameter_space.add_categorical('focal_gamma', focal_space['gamma'])
+        
+        # Parse augmentation parameters
+        if 'advanced_augmentation' in hpo_space:
+            aug_space = hpo_space['advanced_augmentation']
+            if 'mixup_prob' in aug_space:
+                hyperparameter_space.add_categorical('mixup_prob', aug_space['mixup_prob'])
+            if 'cutmix_prob' in aug_space:
+                hyperparameter_space.add_categorical('cutmix_prob', aug_space['cutmix_prob'])
+            if 'augmentation_strength' in aug_space:
+                hyperparameter_space.add_categorical('augmentation_strength', aug_space['augmentation_strength'])
+        
+        # Parse curriculum learning parameters
+        if 'curriculum_learning' in hpo_space:
+            curr_space = hpo_space['curriculum_learning']
+            if 'enabled' in curr_space:
+                hyperparameter_space.add_categorical('use_curriculum', curr_space['enabled'])
+            if 'start_difficulty' in curr_space:
+                hyperparameter_space.add_categorical('curriculum_start_difficulty', curr_space['start_difficulty'])
+            if 'curriculum_epochs' in curr_space:
+                hyperparameter_space.add_categorical('curriculum_epochs', curr_space['curriculum_epochs'])
+        
+    else:
+        # Use default search space
+        logging.info("Using default search space")
+        hyperparameter_space.create_default_abr_space()
+    
+    return hyperparameter_space
 
 
 def _extract_from_tensorboard_logs(config: Dict[str, Any]) -> float:
@@ -94,17 +204,23 @@ def _extract_from_tensorboard_logs(config: Dict[str, Any]) -> float:
     return float('inf')
 
 
-def create_hpo_objective(base_config: Dict[str, Any], cv_folds: int = 3) -> HPOObjective:
+def create_hpo_objective(base_config: Dict[str, Any], cv_folds: int = 3, search_space_path: Optional[str] = None) -> HPOObjective:
     """
     Create HPO objective function.
     
     Args:
         base_config: Base training configuration
-        cv_folds: Number of cross-validation folds
+        cv_folds: Number of cross-validation folds (overridden by config if CV is enabled)
+        search_space_path: Optional path to external search space YAML file
         
     Returns:
         HPO objective function
     """
+    
+    # Use CV settings from config if enabled
+    if base_config.get('cross_validation', {}).get('enabled', False):
+        cv_folds = base_config['cross_validation'].get('n_folds', cv_folds)
+        logging.info(f"Using CV settings from config: {cv_folds} folds")
     
     def train_fn(config: Dict[str, Any]):
         """Training function for HPO."""
@@ -175,17 +291,20 @@ def create_hpo_objective(base_config: Dict[str, Any], cv_folds: int = 3) -> HPOO
             # Get final training loss
             final_train_loss = float(train_losses[-1]) if train_losses else float('inf')
             
-            # Return actual metrics
-            val_metrics = {'val_combined_score': best_val_loss}
+            # Return higher-is-better metrics for maximize direction
+            # Convert loss to negative score (lower loss = higher score)
+            val_combined_score = -best_val_loss if best_val_loss != float('inf') else float('-inf')
+            
+            val_metrics = {'val_combined_score': val_combined_score}
             train_metrics = {'train_loss': final_train_loss}
             
-            logging.info(f"HPO Trial Results - Val Loss: {best_val_loss:.6f}, Train Loss: {final_train_loss:.6f}")
+            logging.info(f"HPO Trial Results - Val Loss: {best_val_loss:.6f}, Val Score: {val_combined_score:.6f}, Train Loss: {final_train_loss:.6f}")
             
             return val_metrics, train_metrics
             
         except Exception as e:
             logging.error(f"Training failed: {e}")
-            return {'val_combined_score': float('inf')}, {'train_loss': float('inf')}
+            return {'val_combined_score': float('-inf')}, {'train_loss': float('inf')}
         finally:
             sys.argv = original_argv
             if os.path.exists(temp_config_path):
@@ -196,9 +315,8 @@ def create_hpo_objective(base_config: Dict[str, Any], cv_folds: int = 3) -> HPOO
         # Simplified evaluation - in practice would run proper validation
         return {'val_combined_score': 0.5}
     
-    # Create hyperparameter space
-    hyperparameter_space = HyperparameterSpace()
-    hyperparameter_space.create_default_abr_space()
+    # Create hyperparameter space from config, external file, or default
+    hyperparameter_space = create_hyperparameter_space_from_config(base_config, search_space_path)
     
     return HPOObjective(
         train_fn=train_fn,
@@ -219,23 +337,48 @@ def run_optuna_optimization(
     sampler: str = 'tpe',
     pruner: str = 'median',
     save_dir: str = 'hpo_results',
-    cv_folds: int = 3
+    cv_folds: int = 3,
+    search_space_path: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Run Optuna-based hyperparameter optimization.
     
     Args:
         base_config: Base training configuration
-        n_trials: Number of optimization trials
-        timeout: Timeout in seconds
-        sampler: Sampling algorithm ('tpe', 'random', 'cmaes')
-        pruner: Pruning algorithm ('median', 'hyperband', 'none')
+        n_trials: Number of optimization trials (overridden by config)
+        timeout: Timeout in seconds (overridden by config)
+        sampler: Sampling algorithm (overridden by config)
+        pruner: Pruning algorithm (overridden by config)
         save_dir: Directory to save results
         cv_folds: Number of cross-validation folds
+        search_space_path: Optional path to external search space YAML file
         
     Returns:
         Optimization results
     """
+    # Use HPO settings from config if available
+    hpo_settings = base_config.get('hyperparameter_optimization', {})
+    if hpo_settings.get('enabled', False):
+        n_trials = hpo_settings.get('n_trials', n_trials)
+        timeout = hpo_settings.get('timeout', timeout)
+        
+        # Get Optuna-specific settings
+        optuna_settings = hpo_settings.get('optuna', {})
+        sampler = optuna_settings.get('sampler', sampler)
+        pruner = optuna_settings.get('pruner', pruner)
+        
+        logging.info(f"Using HPO settings from config: n_trials={n_trials}, timeout={timeout}, sampler={sampler}, pruner={pruner}")
+    
+    # Check for multi-objective optimization
+    objectives = ["val_combined_score"]  # Default single objective
+    directions = ["maximize"]  # Maximize score (negative loss)
+    
+    multi_obj_settings = hpo_settings.get('multi_objective', {})
+    if multi_obj_settings.get('enabled', False):
+        objectives = multi_obj_settings.get('objectives', objectives)
+        directions = multi_obj_settings.get('directions', directions)
+        logging.info(f"Using multi-objective optimization: objectives={objectives}, directions={directions}")
+    
     # Create HPO configuration
     hpo_config = HPOConfig(
         study_name="abr_transformer_hpo",
@@ -243,11 +386,12 @@ def run_optuna_optimization(
         timeout=timeout,
         sampler=sampler,
         pruner=pruner,
-        direction="minimize"  # Minimize validation loss
+        direction="maximize",  # Maximize validation combined score
+        objectives=objectives
     )
     
-    # Create objective function
-    objective_fn = create_hpo_objective(base_config, cv_folds)
+    # Create objective function with optional search space path
+    objective_fn = create_hpo_objective(base_config, cv_folds, search_space_path)
     
     # Create and run tuner
     tuner = OptunaTuner(hpo_config, objective_fn, save_dir)
@@ -493,16 +637,17 @@ def main():
                        help="Directory containing HPO results for analysis")
     
     # Search space parameters
-    parser.add_argument("--search_space_path", type=str, default="search_space.yaml",
-                       help="Path for search space configuration file")
+    parser.add_argument("--search_space_path", type=str, default="",
+                       help="Path to external search space YAML configuration file (used for HPO mode)")
     
     # Logging
     parser.add_argument("--log_level", type=str, default="INFO", help="Logging level")
     
     args = parser.parse_args()
     
-    # Setup logging
-    setup_logging(args.log_level)
+    # Setup logging with results directory path
+    log_file_path = os.path.join(args.save_dir, 'hpo.log') if args.save_dir else None
+    setup_logging(args.log_level, log_file_path)
     
     if args.mode == 'create_search_space':
         create_search_space_config(args.search_space_path)
@@ -533,7 +678,8 @@ def main():
                 sampler=args.sampler,
                 pruner=args.pruner,
                 save_dir=args.save_dir,
-                cv_folds=args.cv_folds
+                cv_folds=args.cv_folds,
+                search_space_path=args.search_space_path
             )
             
             logging.info("Hyperparameter optimization completed!")

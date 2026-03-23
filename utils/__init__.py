@@ -8,7 +8,8 @@ from .stft_loss import MultiResSTFTLoss, spectral_convergence_loss, log_stft_mag
 from .metrics import (
     l1_time, mse_time, rmse_time, snr_db, pearson_correlation, compute_basic_metrics,
     stft_l1, pearson_r_batch, dtw_distance, snr_db_batch, 
-    compute_evaluation_metrics, compute_per_sample_metrics
+    compute_evaluation_metrics, compute_per_sample_metrics,
+    compute_robust_snr, validate_snr_inputs
 )
 from .tb import plot_waveforms, plot_spectrogram, plot_comparison, close_figure
 from .plots import overlay_waveforms, error_curve, spectrograms, scatter_xy, metrics_summary_plot
@@ -27,6 +28,7 @@ __all__ = [
     'l1_time', 'mse_time', 'rmse_time', 'snr_db', 'pearson_correlation', 'compute_basic_metrics',
     'stft_l1', 'pearson_r_batch', 'dtw_distance', 'snr_db_batch', 
     'compute_evaluation_metrics', 'compute_per_sample_metrics',
+    'compute_robust_snr', 'validate_snr_inputs',
     
     # TensorBoard plotting
     'plot_waveforms', 'plot_spectrogram', 'plot_comparison', 'close_figure',

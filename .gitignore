@@ -57,6 +57,7 @@ venv.bak/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 *~
@@ -96,6 +97,9 @@ events.out.tfevents.*
 results/
 plots/
 figures/
+evaluation_results/
+training_analysis_results/
+threshold_optimization_analysis/
 *.png
 *.jpg
 *.jpeg
@@ -105,3 +109,6 @@ figures/
 
 # Checkpoints directory
 checkpoints/
+
+# Monitoring output
+monitoring/
