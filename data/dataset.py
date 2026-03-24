@@ -222,23 +222,27 @@ class ABRDataset(Dataset):
     
     def denormalize_signal(self, x_norm: torch.Tensor) -> torch.Tensor:
         """
-        Denormalize signal for visualization using global dataset statistics.
+        Denormalize signal for visualization and metric computation.
 
-        Per-sample z-score cannot be perfectly inverted without per-sample stats.
-        Uses global mean/std from preprocessing as a reasonable approximation.
+        Since data is per-sample z-score normalized (mean=0, std=1), the
+        normalized values ARE the standardized representation. For metrics
+        that need comparable scales (MSE, L1, SNR), we return the signal
+        as-is — metrics on z-scored data are valid and comparable across
+        samples. If global stats are available, apply them.
 
         Args:
             x_norm: Normalized signal tensor of shape [..., T]
 
         Returns:
-            Denormalized signal (approximate) in physical units
+            Signal tensor (unchanged if per-sample z-scored, or denormalized if stats exist)
         """
         if self.signal_stats is not None:
             global_std = self.signal_stats['global_std']
             global_mean = self.signal_stats['global_mean']
             return x_norm * global_std + global_mean
-        # Fallback: typical ABR amplitude scale
-        return x_norm * 0.2
+        # Data is per-sample z-scored: identity is the correct transform.
+        # The old 0.2 multiplier was wrong and caused -60 dB SNR artifacts.
+        return x_norm
     
     def get_sample_info(self) -> Dict[str, Any]:
         """

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Evaluation pipeline for ABR Transformer V2.
+Publication-grade evaluation pipeline for ABR Transformer V2.
 
-Supports reconstruction and conditional generation evaluation with signal quality
-metrics, visualizations, and TensorBoard logging.
+Produces comprehensive metrics, per-class stratified analysis, intensity-binned
+breakdowns, and publication-quality figures (300 DPI, serif fonts, colorblind-safe).
 """
 
 import os
@@ -14,16 +14,21 @@ import argparse
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+from collections import defaultdict
 
 import yaml
 import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # non-interactive backend
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
+from scipy import stats as scipy_stats
 
 # Local imports
 from models import ABRTransformerGenerator
@@ -35,10 +40,18 @@ from utils import (
 )
 from utils.schedules import predict_x0_from_v
 from inference import DDIMSampler
+from evaluation.visualization import set_publication_style, create_colorblind_friendly_palette
+
+# ── Constants ─────────────────────────────────────────────────────────────
+CLASS_NAMES = {0: 'Normal', 1: 'SNIK', 2: 'ITIK', 3: 'Total', 4: 'Neuropathy'}
+CLASS_NAMES_TR = {0: 'NORMAL', 1: 'SNİK', 2: 'İTİK', 3: 'TOTAL', 4: 'NÖROPATİ'}
+METRIC_LABELS = {
+    'mse': 'MSE', 'l1': 'MAE', 'corr': 'Pearson r',
+    'snr_db': 'SNR (dB)', 'stft_l1': 'STFT-L1',
+}
 
 
 def setup_logging(log_level: str = "INFO"):
-    """Setup console logging."""
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         format='%(asctime)s - %(levelname)s - %(message)s',
@@ -47,17 +60,14 @@ def setup_logging(log_level: str = "INFO"):
 
 
 def load_config(config_path: str, overrides: Optional[str] = None) -> Dict[str, Any]:
-    """Load YAML config with optional dot-notation overrides."""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-
     if overrides:
         for override in overrides.split(','):
             if ':' not in override:
                 continue
             key, value = override.split(':', 1)
-            key = key.strip()
-            value = value.strip()
+            key, value = key.strip(), value.strip()
             try:
                 value = yaml.safe_load(value)
             except Exception:
@@ -67,582 +77,776 @@ def load_config(config_path: str, overrides: Optional[str] = None) -> Dict[str, 
             for k in keys[:-1]:
                 d = d.setdefault(k, {})
             d[keys[-1]] = value
-
     return config
 
 
-# ---------------------------------------------------------------------------
-# Dataset
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════
+# Dataset & Model Loading
+# ══════════════════════════════════════════════════════════════════════════
 
 def create_evaluation_dataset(cfg: Dict[str, Any]) -> Tuple[DataLoader, ABRDataset]:
-    """Create evaluation dataset and loader."""
     data_path = cfg['dataset']['data_path']
-    batch_size = cfg['dataset']['batch_size']
-    num_workers = cfg['dataset']['num_workers']
-    pin_memory = cfg['dataset']['pin_memory']
-
     logging.info(f"Loading dataset from: {data_path}")
 
     dataset = ABRDataset(
-        data_path=data_path,
-        normalize_signal=False,   # preprocessing already normalised
-        normalize_static=True,
-        return_peak_labels=False,
-        transform=None,
+        data_path=data_path, normalize_signal=False,
+        normalize_static=True, return_peak_labels=False, transform=None,
     )
+    assert dataset.sequence_length == cfg['model']['sequence_length']
 
-    assert dataset.sequence_length == cfg['model']['sequence_length'], \
-        f"Dataset seq_len {dataset.sequence_length} != config {cfg['model']['sequence_length']}"
-
-    # Use validation split for evaluation
     _, val_dataset, _ = create_stratified_datasets(
-        dataset,
-        train_ratio=0.7, val_ratio=0.15, test_ratio=0.15,
+        dataset, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15,
         random_state=cfg['evaluation']['seed'],
     )
 
-    # Optional sample limit
     max_samples = cfg['evaluation'].get('num_samples')
     if max_samples and len(val_dataset) > max_samples:
         indices = torch.randperm(len(val_dataset))[:max_samples]
         val_dataset = torch.utils.data.Subset(val_dataset, indices)
-        logging.info(f"Limited evaluation to {max_samples} samples")
+        logging.info(f"Limited to {max_samples} samples")
 
-    eval_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        collate_fn=abr_collate_fn,
-        drop_last=False,
+    loader = DataLoader(
+        val_dataset, batch_size=cfg['dataset']['batch_size'], shuffle=False,
+        num_workers=cfg['dataset']['num_workers'], pin_memory=cfg['dataset']['pin_memory'],
+        collate_fn=abr_collate_fn, drop_last=False,
     )
+    logging.info(f"Eval dataset: {len(val_dataset)} samples")
+    return loader, dataset
 
-    logging.info(f"✓ Created evaluation dataset: {len(val_dataset)} samples")
-    return eval_loader, dataset
 
-
-# ---------------------------------------------------------------------------
-# Model Loading
-# ---------------------------------------------------------------------------
-
-def load_model_and_checkpoint(
-    cfg: Dict[str, Any], device: torch.device
-) -> Tuple[nn.Module, Dict[str, Any]]:
-    """Load model and checkpoint, applying EMA weights when available."""
+def load_model_and_checkpoint(cfg, device):
     checkpoint_path = cfg['model']['checkpoint_path']
-    logging.info(f"Loading checkpoint from {checkpoint_path}")
+    logging.info(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    # Prefer config stored in checkpoint, fall back to eval.yaml
     ckpt_cfg = checkpoint.get('config', {}).get('model', {})
-
     model_config = {
-        'input_channels': ckpt_cfg.get('input_channels', cfg['model']['input_channels']),
-        'static_dim': ckpt_cfg.get('static_dim', cfg['model']['static_dim']),
-        'sequence_length': ckpt_cfg.get('sequence_length', cfg['model']['sequence_length']),
-        'd_model': ckpt_cfg.get('d_model', cfg['model']['d_model']),
-        'n_layers': ckpt_cfg.get('n_layers', cfg['model']['n_layers']),
-        'n_heads': ckpt_cfg.get('n_heads', cfg['model']['n_heads']),
-        'ff_mult': ckpt_cfg.get('ff_mult', cfg['model']['ff_mult']),
-        'dropout': ckpt_cfg.get('dropout', cfg['model']['dropout']),
-        'num_classes': ckpt_cfg.get('num_classes', cfg['model'].get('num_classes', 5)),
-        'intensity_emb_dim': ckpt_cfg.get('intensity_emb_dim', cfg['model'].get('intensity_emb_dim', 64)),
-        'aux_static_dim': ckpt_cfg.get('aux_static_dim', cfg['model'].get('aux_static_dim', 3)),
+        k: ckpt_cfg.get(k, cfg['model'].get(k))
+        for k in ['input_channels', 'static_dim', 'sequence_length', 'd_model',
+                   'n_layers', 'n_heads', 'ff_mult', 'dropout', 'num_classes',
+                   'intensity_emb_dim', 'aux_static_dim']
     }
+    model = ABRTransformerGenerator(**model_config).to(device)
 
-    model = ABRTransformerGenerator(**model_config)
-    model = model.to(device)
-
-    # Load weights
     try:
         model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-        logging.info("✓ Loaded checkpoint (strict)")
+        logging.info("Checkpoint loaded (strict)")
     except RuntimeError:
         missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
-        if missing:
-            logging.warning(f"Missing keys: {len(missing)}")
-        if unexpected:
-            logging.warning(f"Unexpected keys: {len(unexpected)}")
-        logging.info("✓ Loaded checkpoint (non-strict)")
+        logging.warning(f"Non-strict load: {len(missing)} missing, {len(unexpected)} unexpected")
 
-    # EMA weights
+    # EMA
     if cfg['model'].get('use_ema', True) and 'ema_state_dict' in checkpoint:
-        ema_state = checkpoint['ema_state_dict']
-        if 'shadow' in ema_state:
-            logging.info("Applying EMA weights")
+        shadow = checkpoint['ema_state_dict'].get('shadow', {})
+        if shadow:
             for name, param in model.named_parameters():
-                if name in ema_state['shadow']:
-                    param.data.copy_(ema_state['shadow'][name])
+                if name in shadow:
+                    param.data.copy_(shadow[name])
+            logging.info("Applied EMA weights")
 
     model.eval()
-    total_params = sum(p.numel() for p in model.parameters())
-    logging.info(f"✓ Model: {total_params:,} parameters")
-
+    logging.info(f"Model: {sum(p.numel() for p in model.parameters()):,} params")
     return model, checkpoint
 
 
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════
 # Helpers
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════
 
-def _unpack_conditioning(batch, device):
-    """Extract conditioning tensors from a batch dict."""
-    intensity = batch['intensity'].to(device)
-    aux_static = batch['aux_static'].to(device)
-    class_label = batch['class_label'].to(device)
-    return intensity, aux_static, class_label
+def _unpack(batch, device):
+    return (batch['intensity'].to(device), batch['aux_static'].to(device),
+            batch['class_label'].to(device))
 
 
-def _validate_signals(signals: torch.Tensor, label: str, batch_idx: int):
-    """NaN/Inf check and repair."""
-    if torch.any(torch.isnan(signals)) or torch.any(torch.isinf(signals)):
-        logging.warning(f"{label} batch {batch_idx}: invalid values — replaced with 0")
-        return torch.nan_to_num(signals, nan=0.0, posinf=0.0, neginf=0.0)
-    return signals
+def _sanitize(t: torch.Tensor) -> torch.Tensor:
+    if torch.any(torch.isnan(t)) or torch.any(torch.isinf(t)):
+        return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+    return t
 
 
-# ---------------------------------------------------------------------------
-# Reconstruction Evaluation
-# ---------------------------------------------------------------------------
+def _bootstrap_ci(values, n_boot=1000, ci=0.95):
+    """Bootstrap confidence interval for mean."""
+    arr = np.array(values)
+    arr = arr[~np.isnan(arr)]
+    if len(arr) < 3:
+        return float(np.mean(arr)), float(np.mean(arr)), float(np.mean(arr))
+    boot_means = [np.mean(np.random.choice(arr, len(arr), replace=True)) for _ in range(n_boot)]
+    alpha = (1 - ci) / 2
+    lo, hi = np.percentile(boot_means, [100 * alpha, 100 * (1 - alpha)])
+    return float(np.mean(arr)), float(lo), float(hi)
 
-def evaluate_reconstruction(
-    model: nn.Module,
-    eval_loader: DataLoader,
-    noise_schedule: Dict[str, torch.Tensor],
-    dataset: ABRDataset,
-    cfg: Dict[str, Any],
-    device: torch.device,
-    training_T: int = 1000,
-) -> Tuple[List[Dict[str, Any]], List[torch.Tensor], List[torch.Tensor]]:
-    """Evaluate reconstruction: denoise x_t → x_0."""
-    logging.info("Starting reconstruction evaluation...")
 
+# ══════════════════════════════════════════════════════════════════════════
+# Core Evaluation Loops
+# ══════════════════════════════════════════════════════════════════════════
+
+def evaluate_reconstruction(model, eval_loader, noise_schedule, dataset, cfg, device, training_T=1000):
+    logging.info("Reconstruction evaluation...")
     model.eval()
-    all_metrics: List[Dict[str, Any]] = []
-    all_ref: List[torch.Tensor] = []
-    all_gen: List[torch.Tensor] = []
+    all_metrics, all_ref, all_gen = [], [], []
 
     use_stft = cfg['metrics']['signal'].get('stft_loss', True)
     use_dtw = cfg['metrics']['signal'].get('dtw', False)
     stft_params = cfg['metrics'].get('stft', {})
-
     recon_cfg = cfg.get('evaluation', {}).get('reconstruction', {})
-    timestep_strategy = recon_cfg.get('timestep_strategy', 'uniform')
+    strategy = recon_cfg.get('timestep_strategy', 'uniform')
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(eval_loader, desc="Reconstruction")):
+        for bi, batch in enumerate(tqdm(eval_loader, desc="Reconstruction")):
             x0 = batch['x0'].to(device)
-            intensity, aux_static, class_label = _unpack_conditioning(batch, device)
-            meta = batch.get('meta', [{}] * x0.shape[0])
+            intensity, aux, cls = _unpack(batch, device)
             B = x0.shape[0]
 
-            # Timesteps — always sampled from [0, training_T)
-            if timestep_strategy == 'fixed':
-                fixed_t = recon_cfg.get('fixed_timestep', 500)
-                t = torch.full((B,), fixed_t, device=device, dtype=torch.long)
-            else:
-                t = torch.randint(0, training_T, (B,), device=device)
+            t = (torch.full((B,), recon_cfg.get('fixed_timestep', 500), device=device, dtype=torch.long)
+                 if strategy == 'fixed'
+                 else torch.randint(0, training_T, (B,), device=device))
 
-            # Forward diffusion
             noise = torch.randn_like(x0)
-            x_t, v_target = q_sample_vpred(x0, t, noise, noise_schedule)
+            x_t, _ = q_sample_vpred(x0, t, noise, noise_schedule)
+            v_pred = model(x_t, intensity=intensity, aux_static=aux, class_label=cls, timesteps=t)['signal']
+            x0_rec = predict_x0_from_v(x_t, v_pred, t, noise_schedule)
 
-            # Model prediction
-            model_output = model(
-                x_t,
-                intensity=intensity,
-                aux_static=aux_static,
-                class_label=class_label,
-                timesteps=t,
-            )
-            v_pred = model_output['signal']
+            x0_d = _sanitize(dataset.denormalize_signal(x0))
+            rec_d = _sanitize(dataset.denormalize_signal(x0_rec))
 
-            # Reconstruct x0
-            x0_recon = predict_x0_from_v(x_t, v_pred, t, noise_schedule)
-
-            # Denormalize
-            x0_denorm = _validate_signals(
-                dataset.denormalize_signal(x0), "target", batch_idx
-            )
-            x0_recon_denorm = _validate_signals(
-                dataset.denormalize_signal(x0_recon), "recon", batch_idx
-            )
-
-            # Per-sample metrics
             try:
-                per_sample = compute_per_sample_metrics(
-                    x0_recon_denorm, x0_denorm, use_stft, use_dtw, stft_params
-                )
+                per = compute_per_sample_metrics(rec_d, x0_d, use_stft, use_dtw, stft_params)
             except Exception as e:
-                logging.error(f"Batch {batch_idx} metrics failed: {e}")
-                per_sample = [{'mse': float('nan'), 'l1': float('nan'),
-                               'corr': float('nan'), 'snr_db': float('nan')}] * B
+                logging.error(f"Batch {bi}: {e}")
+                per = [{'mse': np.nan, 'l1': np.nan, 'corr': np.nan, 'snr_db': np.nan}] * B
 
-            for i, sm in enumerate(per_sample):
-                sm.update({
-                    'mode': 'reconstruction',
-                    'sample_id': meta[i].get('sample_idx', batch_idx * cfg['dataset']['batch_size'] + i)
-                        if isinstance(meta[i], dict) else batch_idx * cfg['dataset']['batch_size'] + i,
-                    'timestep': t[i].item(),
-                    'intensity': intensity[i].item(),
-                    'class_label': class_label[i].item(),
-                })
+            for i, sm in enumerate(per):
+                sm.update({'mode': 'reconstruction', 'timestep': t[i].item(),
+                           'intensity': intensity[i].item(), 'class_label': int(cls[i].item())})
+            all_metrics.extend(per)
+            all_ref.append(x0_d.cpu())
+            all_gen.append(rec_d.cpu())
 
-            all_metrics.extend(per_sample)
-            all_ref.append(x0_denorm.cpu())
-            all_gen.append(x0_recon_denorm.cpu())
-
-    logging.info(f"✓ Reconstruction: {len(all_metrics)} samples")
+    logging.info(f"Reconstruction: {len(all_metrics)} samples")
     return all_metrics, all_ref, all_gen
 
 
-# ---------------------------------------------------------------------------
-# Generation Evaluation
-# ---------------------------------------------------------------------------
-
-def evaluate_generation(
-    model: nn.Module,
-    eval_loader: DataLoader,
-    sampler: DDIMSampler,
-    dataset: ABRDataset,
-    cfg: Dict[str, Any],
-    device: torch.device,
-) -> Tuple[List[Dict[str, Any]], List[torch.Tensor], List[torch.Tensor]]:
-    """Evaluate conditional generation: noise → x_0."""
-    logging.info("Starting generation evaluation...")
-
+def evaluate_generation(model, eval_loader, sampler, dataset, cfg, device):
+    logging.info("Generation evaluation...")
     model.eval()
-    all_metrics: List[Dict[str, Any]] = []
-    all_ref: List[torch.Tensor] = []
-    all_gen: List[torch.Tensor] = []
+    all_metrics, all_ref, all_gen = [], [], []
 
     use_stft = cfg['metrics']['signal'].get('stft_loss', True)
     use_dtw = cfg['metrics']['signal'].get('dtw', False)
     stft_params = cfg['metrics'].get('stft', {})
-
-    diff_cfg = cfg.get('diffusion', {})
+    diff = cfg.get('diffusion', {})
     gen_cfg = cfg.get('evaluation', {}).get('generation', {})
-    sample_steps = gen_cfg.get('num_steps', diff_cfg.get('sample_steps', 50))
-    eta = diff_cfg.get('ddim_eta', 0.0)
-    cfg_scale = diff_cfg.get('cfg_scale', 2.0)
-    class_cfg_scale = diff_cfg.get('class_cfg_scale', 1.5)
+    steps = gen_cfg.get('num_steps', diff.get('sample_steps', 50))
+    eta = diff.get('ddim_eta', 0.0)
+    cfg_s = diff.get('cfg_scale', 2.0)
+    cls_cfg_s = diff.get('class_cfg_scale', 1.5)
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(eval_loader, desc="Generation")):
+        for bi, batch in enumerate(tqdm(eval_loader, desc="Generation")):
             x0 = batch['x0'].to(device)
-            intensity, aux_static, class_label = _unpack_conditioning(batch, device)
-            meta = batch.get('meta', [{}] * x0.shape[0])
+            intensity, aux, cls = _unpack(batch, device)
             B = x0.shape[0]
 
-            # Generate with same conditioning as real data
             x_gen = sampler.sample_conditioned(
-                intensity=intensity,
-                aux_static=aux_static,
-                class_label=class_label,
-                steps=sample_steps,
-                eta=eta,
-                cfg_scale=cfg_scale,
-                class_cfg_scale=class_cfg_scale,
-                progress=False,
+                intensity=intensity, aux_static=aux, class_label=cls,
+                steps=steps, eta=eta, cfg_scale=cfg_s, class_cfg_scale=cls_cfg_s, progress=False,
             )
 
-            # Denormalize
-            x0_denorm = _validate_signals(
-                dataset.denormalize_signal(x0), "target", batch_idx
-            )
-            x_gen_denorm = _validate_signals(
-                dataset.denormalize_signal(x_gen), "generated", batch_idx
-            )
+            x0_d = _sanitize(dataset.denormalize_signal(x0))
+            gen_d = _sanitize(dataset.denormalize_signal(x_gen))
 
-            # Metrics
             try:
-                per_sample = compute_per_sample_metrics(
-                    x_gen_denorm, x0_denorm, use_stft, use_dtw, stft_params
-                )
+                per = compute_per_sample_metrics(gen_d, x0_d, use_stft, use_dtw, stft_params)
             except Exception as e:
-                logging.error(f"Batch {batch_idx} metrics failed: {e}")
-                per_sample = [{'mse': float('nan'), 'l1': float('nan'),
-                               'corr': float('nan'), 'snr_db': float('nan')}] * B
+                logging.error(f"Batch {bi}: {e}")
+                per = [{'mse': np.nan, 'l1': np.nan, 'corr': np.nan, 'snr_db': np.nan}] * B
 
-            for i, sm in enumerate(per_sample):
-                sm.update({
-                    'mode': 'generation',
-                    'sample_id': meta[i].get('sample_idx', batch_idx * cfg['dataset']['batch_size'] + i)
-                        if isinstance(meta[i], dict) else batch_idx * cfg['dataset']['batch_size'] + i,
-                    'cfg_scale': cfg_scale,
-                    'intensity': intensity[i].item(),
-                    'class_label': class_label[i].item(),
-                })
+            for i, sm in enumerate(per):
+                sm.update({'mode': 'generation', 'cfg_scale': cfg_s,
+                           'intensity': intensity[i].item(), 'class_label': int(cls[i].item())})
+            all_metrics.extend(per)
+            all_ref.append(x0_d.cpu())
+            all_gen.append(gen_d.cpu())
 
-            all_metrics.extend(per_sample)
-            all_ref.append(x0_denorm.cpu())
-            all_gen.append(x_gen_denorm.cpu())
-
-    logging.info(f"✓ Generation: {len(all_metrics)} samples")
+    logging.info(f"Generation: {len(all_metrics)} samples")
     return all_metrics, all_ref, all_gen
 
 
-# ---------------------------------------------------------------------------
-# Visualisation
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════
+# Publication-Quality Figures
+# ══════════════════════════════════════════════════════════════════════════
 
-def create_visualizations(
-    ref_signals: List[torch.Tensor],
-    gen_signals: List[torch.Tensor],
-    metrics: List[Dict[str, Any]],
-    mode: str,
-    cfg: Dict[str, Any],
-    writer: SummaryWriter,
-    epoch: int = 0,
-):
-    """Create and log visualisations to TensorBoard."""
-    if not cfg['tensorboard']['log_plots']:
+def _pub_style():
+    """Apply publication style globally."""
+    set_publication_style()
+    plt.rcParams.update({'figure.facecolor': 'white', 'axes.facecolor': 'white',
+                         'savefig.facecolor': 'white'})
+
+
+def _savefig(fig, path, dpi=300):
+    fig.savefig(path, dpi=dpi, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    logging.info(f"  Saved: {path}")
+
+
+def fig_waveform_gallery(ref, gen, metrics_list, mode, out_dir):
+    """Best/worst waveform comparison — Fig. 1 in paper."""
+    _pub_style()
+    colors = create_colorblind_friendly_palette()
+
+    mse_vals = np.array([m.get('mse', np.nan) for m in metrics_list])
+    valid = ~np.isnan(mse_vals)
+    sorted_idx = np.argsort(mse_vals)
+    n = min(5, len(sorted_idx) // 2)
+    best_idx = sorted_idx[:n]
+    worst_idx = sorted_idx[-n:]
+
+    fig, axes = plt.subplots(2, n, figsize=(3.5 * n, 6), sharey=True)
+    if n == 1:
+        axes = axes.reshape(2, 1)
+    t_ms = np.linspace(0, 10, ref.shape[-1])
+
+    for col, idx in enumerate(best_idx):
+        ax = axes[0, col]
+        ax.plot(t_ms, ref[idx, 0].numpy(), color=colors[0], lw=1.2, label='Reference')
+        ax.plot(t_ms, gen[idx, 0].numpy(), color=colors[1], lw=1.2, ls='--', label='Generated')
+        ax.set_title(f'Best #{col+1}\nMSE={mse_vals[idx]:.5f}', fontsize=9)
+        if col == 0:
+            ax.set_ylabel('Amplitude')
+            ax.legend(fontsize=7, loc='upper right')
+
+    for col, idx in enumerate(worst_idx):
+        ax = axes[1, col]
+        ax.plot(t_ms, ref[idx, 0].numpy(), color=colors[0], lw=1.2)
+        ax.plot(t_ms, gen[idx, 0].numpy(), color=colors[1], lw=1.2, ls='--')
+        ax.set_title(f'Worst #{col+1}\nMSE={mse_vals[idx]:.5f}', fontsize=9)
+        ax.set_xlabel('Time (ms)')
+        if col == 0:
+            ax.set_ylabel('Amplitude')
+
+    fig.suptitle(f'Waveform Comparison — {mode.title()}', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    _savefig(fig, out_dir / f'{mode}_waveform_gallery.png')
+
+
+def fig_metrics_boxplot(df, mode, out_dir):
+    """Per-class box plots for all metrics — Fig. 2."""
+    _pub_style()
+    import seaborn as sns
+
+    metric_cols = [c for c in ['mse', 'l1', 'corr', 'snr_db', 'stft_l1'] if c in df.columns]
+    n = len(metric_cols)
+    fig, axes = plt.subplots(1, n, figsize=(3.5 * n, 5))
+    if n == 1:
+        axes = [axes]
+    colors = create_colorblind_friendly_palette(5)
+
+    df['class_name'] = df['class_label'].map(CLASS_NAMES)
+
+    for i, col in enumerate(metric_cols):
+        ax = axes[i]
+        valid_df = df.dropna(subset=[col])
+        # Filter extreme outliers for better visualization
+        q99 = valid_df[col].quantile(0.99)
+        q01 = valid_df[col].quantile(0.01)
+        plot_df = valid_df[(valid_df[col] >= q01) & (valid_df[col] <= q99)]
+        sns.boxplot(data=plot_df, x='class_name', y=col, ax=ax, palette=colors[:5],
+                    width=0.6, fliersize=2, linewidth=1.2)
+        ax.set_title(METRIC_LABELS.get(col, col), fontsize=11, fontweight='bold')
+        ax.set_xlabel('')
+        ax.set_ylabel(METRIC_LABELS.get(col, col))
+        ax.tick_params(axis='x', rotation=30)
+
+    fig.suptitle(f'Per-Class Metric Distributions — {mode.title()}', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    _savefig(fig, out_dir / f'{mode}_metrics_boxplot.png')
+
+
+def fig_intensity_analysis(df, mode, out_dir):
+    """Metrics vs intensity level — Fig. 3."""
+    _pub_style()
+    colors = create_colorblind_friendly_palette()
+
+    # Bin intensity into groups
+    df = df.copy()
+    df['intensity_bin'] = pd.cut(df['intensity'], bins=5, labels=['Very Low', 'Low', 'Medium', 'High', 'Very High'])
+
+    metric_cols = [c for c in ['mse', 'corr', 'snr_db'] if c in df.columns]
+    fig, axes = plt.subplots(1, len(metric_cols), figsize=(5 * len(metric_cols), 5))
+    if len(metric_cols) == 1:
+        axes = [axes]
+
+    for i, col in enumerate(metric_cols):
+        ax = axes[i]
+        grouped = df.groupby('intensity_bin', observed=True)[col].agg(['mean', 'std', 'count'])
+        grouped = grouped.dropna()
+        x = range(len(grouped))
+        ax.bar(x, grouped['mean'], yerr=grouped['std'], color=colors[i],
+               alpha=0.8, capsize=4, edgecolor='black', linewidth=0.5)
+        ax.set_xticks(x)
+        ax.set_xticklabels(grouped.index, rotation=20, fontsize=9)
+        ax.set_ylabel(METRIC_LABELS.get(col, col))
+        ax.set_title(f'{METRIC_LABELS.get(col, col)} vs Intensity', fontsize=11, fontweight='bold')
+        # Add count labels
+        for j, (_, row) in enumerate(grouped.iterrows()):
+            ax.text(j, row['mean'] + row['std'] * 0.1, f'n={int(row["count"])}',
+                    ha='center', va='bottom', fontsize=7, color='gray')
+
+    fig.suptitle(f'Intensity-Stratified Analysis — {mode.title()}', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    _savefig(fig, out_dir / f'{mode}_intensity_analysis.png')
+
+
+def fig_error_heatmap(ref, gen, mode, out_dir, n_samples=50):
+    """Error heatmap across time — Fig. 4."""
+    _pub_style()
+
+    N = min(n_samples, ref.shape[0])
+    errors = (ref[:N, 0] - gen[:N, 0]).abs().numpy()
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    im = ax.imshow(errors, aspect='auto', cmap='hot', interpolation='nearest',
+                   extent=[0, 10, N, 0])
+    ax.set_xlabel('Time (ms)')
+    ax.set_ylabel('Sample Index')
+    ax.set_title(f'Absolute Error Heatmap — {mode.title()}', fontsize=13, fontweight='bold')
+    cb = fig.colorbar(im, ax=ax, shrink=0.8)
+    cb.set_label('|Reference - Generated|')
+    fig.tight_layout()
+    _savefig(fig, out_dir / f'{mode}_error_heatmap.png')
+
+
+def fig_mean_waveform_by_class(ref, gen, metrics_list, mode, out_dir):
+    """Mean waveform ± std per class — Fig. 5."""
+    _pub_style()
+    colors = create_colorblind_friendly_palette(5)
+    t_ms = np.linspace(0, 10, ref.shape[-1])
+
+    class_labels = np.array([m['class_label'] for m in metrics_list])
+    unique_classes = sorted(set(class_labels))
+    n_cls = len(unique_classes)
+
+    fig, axes = plt.subplots(2, n_cls, figsize=(4 * n_cls, 7), sharey='row')
+    if n_cls == 1:
+        axes = axes.reshape(2, 1)
+
+    for col, cid in enumerate(unique_classes):
+        mask = class_labels == cid
+        ref_cls = ref[mask, 0].numpy()
+        gen_cls = gen[mask, 0].numpy()
+        name = CLASS_NAMES.get(cid, str(cid))
+        n = mask.sum()
+
+        for row, (data, label) in enumerate([(ref_cls, 'Reference'), (gen_cls, 'Generated')]):
+            ax = axes[row, col]
+            mean = data.mean(axis=0)
+            std = data.std(axis=0)
+            ax.plot(t_ms, mean, color=colors[col], lw=1.5)
+            ax.fill_between(t_ms, mean - std, mean + std, color=colors[col], alpha=0.2)
+            ax.set_title(f'{name} — {label} (n={n})', fontsize=9, fontweight='bold')
+            ax.set_xlabel('Time (ms)')
+            if col == 0:
+                ax.set_ylabel('Amplitude')
+
+    fig.suptitle(f'Mean Waveform by Class — {mode.title()}', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    _savefig(fig, out_dir / f'{mode}_mean_waveform_by_class.png')
+
+
+def fig_psd_comparison(ref, gen, mode, out_dir, n_samples=200):
+    """Power Spectral Density comparison — Fig. 6."""
+    _pub_style()
+    colors = create_colorblind_friendly_palette()
+
+    N = min(n_samples, ref.shape[0])
+    fs = 20000  # 200 samples / 10ms = 20kHz
+
+    ref_np = ref[:N, 0].numpy()
+    gen_np = gen[:N, 0].numpy()
+
+    from scipy.signal import welch
+    freqs_r, psd_r = welch(ref_np, fs=fs, nperseg=min(64, ref_np.shape[-1]), axis=-1)
+    freqs_g, psd_g = welch(gen_np, fs=fs, nperseg=min(64, gen_np.shape[-1]), axis=-1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Mean PSD
+    ax = axes[0]
+    ax.semilogy(freqs_r, psd_r.mean(axis=0), color=colors[0], lw=1.5, label='Reference')
+    ax.fill_between(freqs_r, psd_r.mean(0) - psd_r.std(0), psd_r.mean(0) + psd_r.std(0),
+                    color=colors[0], alpha=0.15)
+    ax.semilogy(freqs_g, psd_g.mean(axis=0), color=colors[1], lw=1.5, label='Generated')
+    ax.fill_between(freqs_g, psd_g.mean(0) - psd_g.std(0), psd_g.mean(0) + psd_g.std(0),
+                    color=colors[1], alpha=0.15)
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('PSD')
+    ax.set_title('Power Spectral Density', fontweight='bold')
+    ax.legend()
+
+    # PSD ratio
+    ax = axes[1]
+    eps = 1e-10
+    ratio = (psd_g.mean(0) + eps) / (psd_r.mean(0) + eps)
+    ax.plot(freqs_r, ratio, color=colors[3], lw=1.5)
+    ax.axhline(1.0, color='gray', ls='--', lw=1)
+    ax.set_xlabel('Frequency (Hz)')
+    ax.set_ylabel('PSD Ratio (Gen / Ref)')
+    ax.set_title('Spectral Fidelity Ratio', fontweight='bold')
+    ax.set_ylim(0, 3)
+
+    fig.suptitle(f'Spectral Analysis — {mode.title()}', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    _savefig(fig, out_dir / f'{mode}_psd_comparison.png')
+
+
+def fig_scatter_matrix(df, mode, out_dir):
+    """Pairwise metric scatter — Fig. 7."""
+    _pub_style()
+    cols = [c for c in ['mse', 'corr', 'snr_db', 'stft_l1'] if c in df.columns]
+    if len(cols) < 2:
         return
 
-    logging.info(f"Creating visualisations for {mode}...")
+    n = len(cols)
+    fig, axes = plt.subplots(n, n, figsize=(3 * n, 3 * n))
 
-    all_ref = torch.cat(ref_signals, dim=0)
-    all_gen = torch.cat(gen_signals, dim=0)
+    colors_by_class = create_colorblind_friendly_palette(5)
+    for i in range(n):
+        for j in range(n):
+            ax = axes[i, j]
+            if i == j:
+                # Histogram
+                for cid in sorted(df['class_label'].unique()):
+                    vals = df[df['class_label'] == cid][cols[i]].dropna()
+                    ax.hist(vals, bins=30, alpha=0.5, color=colors_by_class[int(cid)],
+                            label=CLASS_NAMES.get(int(cid), ''))
+                if i == 0:
+                    ax.legend(fontsize=5)
+            else:
+                for cid in sorted(df['class_label'].unique()):
+                    sub = df[df['class_label'] == cid]
+                    ax.scatter(sub[cols[j]], sub[cols[i]], s=5, alpha=0.3,
+                               color=colors_by_class[int(cid)])
 
-    mse_values = [m['mse'] for m in metrics]
-    sorted_idx = np.argsort(mse_values)
+            if j == 0:
+                ax.set_ylabel(METRIC_LABELS.get(cols[i], cols[i]), fontsize=8)
+            if i == n - 1:
+                ax.set_xlabel(METRIC_LABELS.get(cols[j], cols[j]), fontsize=8)
+            ax.tick_params(labelsize=6)
 
-    topk = cfg['report'].get('save_topk_examples', 10)
-    best = sorted_idx[:topk // 2]
-    worst = sorted_idx[-topk // 2:]
-
-    try:
-        # Best overlay
-        fig = overlay_waveforms(
-            all_ref[best], all_gen[best],
-            [f"Best #{i+1} (MSE:{mse_values[idx]:.4f})" for i, idx in enumerate(best)],
-        )
-        writer.add_figure(f'eval/{mode}/overlay_best', fig, epoch)
-        close_figure(fig)
-
-        # Worst overlay
-        fig = overlay_waveforms(
-            all_ref[worst], all_gen[worst],
-            [f"Worst #{i+1} (MSE:{mse_values[idx]:.4f})" for i, idx in enumerate(worst)],
-        )
-        writer.add_figure(f'eval/{mode}/overlay_worst', fig, epoch)
-        close_figure(fig)
-
-        # Error curves
-        fig = error_curve(all_ref[best[:4]], all_gen[best[:4]])
-        writer.add_figure(f'eval/{mode}/error_curves', fig, epoch)
-        close_figure(fig)
-
-        # Spectrograms
-        if cfg['report'].get('save_spectrograms', False):
-            spec_params = cfg.get('visualization', {}).get('spectrogram_params', {})
-            fig = spectrograms(all_ref[best[:4]], **spec_params)
-            writer.add_figure(f'eval/{mode}/spectrogram_ref', fig, epoch)
-            close_figure(fig)
-            fig = spectrograms(all_gen[best[:4]], **spec_params)
-            writer.add_figure(f'eval/{mode}/spectrogram_gen', fig, epoch)
-            close_figure(fig)
-
-        # Scatter: MSE vs correlation
-        if len(metrics) > 1:
-            mse_arr = np.array([m.get('mse', 0) for m in metrics])
-            corr_arr = np.array([m.get('corr', 0) for m in metrics])
-            fig = scatter_xy(mse_arr, corr_arr, 'MSE', 'Correlation',
-                             f'{mode.title()} MSE vs Correlation')
-            writer.add_figure(f'eval/{mode}/metrics_correlation', fig, epoch)
-            close_figure(fig)
-
-        # Summary bar chart
-        if metrics:
-            summary = {}
-            for key in ['mse', 'l1', 'corr', 'snr_db', 'stft_l1']:
-                vals = [m.get(key, 0) for m in metrics if key in m]
-                if vals:
-                    summary[key] = (np.mean(vals), np.std(vals))
-            if summary:
-                fig = metrics_summary_plot(summary, mode)
-                writer.add_figure(f'eval/{mode}/metrics_summary', fig, epoch)
-                close_figure(fig)
-
-    except Exception as e:
-        logging.warning(f"Visualisation error: {e}")
+    fig.suptitle(f'Metric Correlation Matrix — {mode.title()}', fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    _savefig(fig, out_dir / f'{mode}_scatter_matrix.png')
 
 
-# ---------------------------------------------------------------------------
-# Results I/O
-# ---------------------------------------------------------------------------
+def fig_summary_table(summary_recon, summary_gen, out_dir):
+    """Summary comparison table as figure — Table 1."""
+    _pub_style()
 
-def log_scalars_to_tensorboard(
-    metrics: List[Dict[str, Any]], mode: str, writer: SummaryWriter, epoch: int = 0
-):
-    """Log scalar metrics to TensorBoard."""
-    for col in ['mse', 'l1', 'corr', 'snr_db', 'stft_l1', 'dtw']:
-        vals = [m[col] for m in metrics if col in m and not np.isnan(m.get(col, np.nan))]
-        if vals:
-            writer.add_scalar(f'eval/{mode}/{col}_mean', np.mean(vals), epoch)
-            writer.add_scalar(f'eval/{mode}/{col}_std', np.std(vals), epoch)
+    metrics = ['mse', 'l1', 'corr', 'snr_db', 'stft_l1']
+    rows = []
+    for m in metrics:
+        r_mean = summary_recon.get(f'{m}_mean', np.nan)
+        r_std = summary_recon.get(f'{m}_std', np.nan)
+        g_mean = summary_gen.get(f'{m}_mean', np.nan) if summary_gen else np.nan
+        g_std = summary_gen.get(f'{m}_std', np.nan) if summary_gen else np.nan
+        rows.append([METRIC_LABELS.get(m, m),
+                      f'{r_mean:.4f} ± {r_std:.4f}',
+                      f'{g_mean:.4f} ± {g_std:.4f}'])
+
+    fig, ax = plt.subplots(figsize=(10, 3))
+    ax.axis('off')
+    table = ax.table(
+        cellText=rows,
+        colLabels=['Metric', 'Reconstruction', 'Generation'],
+        cellLoc='center', loc='center',
+        colColours=['#e6e6e6'] * 3,
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(11)
+    table.scale(1, 1.8)
+
+    # Bold header
+    for (r, c), cell in table.get_celld().items():
+        if r == 0:
+            cell.set_text_props(fontweight='bold')
+        cell.set_edgecolor('#cccccc')
+
+    fig.suptitle('Evaluation Summary (Mean ± Std)', fontsize=14, fontweight='bold', y=0.95)
+    fig.tight_layout()
+    _savefig(fig, out_dir / 'summary_table.png')
 
 
-def save_results(
-    metrics: List[Dict[str, Any]], mode: str, cfg: Dict[str, Any],
-    checkpoint: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Save evaluation results and compute summary statistics."""
-    output_dir = Path(cfg['output']['save_dir']) / mode
-    output_dir.mkdir(parents=True, exist_ok=True)
+def fig_class_comparison_bars(summary, mode, out_dir):
+    """Per-class MSE bar chart with CI — Fig. 8."""
+    _pub_style()
+    colors = create_colorblind_friendly_palette(5)
+
+    classes = []
+    means = []
+    for cid, name in CLASS_NAMES.items():
+        key = f'mse_{name}_mean'
+        if key in summary:
+            classes.append(f'{name}\n(n={summary.get(f"mse_{name}_n", "?")})')
+            means.append(summary[key])
+
+    if not classes:
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = range(len(classes))
+    bars = ax.bar(x, means, color=colors[:len(classes)], edgecolor='black', linewidth=0.5, alpha=0.85)
+    ax.set_xticks(x)
+    ax.set_xticklabels(classes)
+    ax.set_ylabel('MSE')
+    ax.set_title(f'Per-Class MSE — {mode.title()}', fontsize=13, fontweight='bold')
+
+    for bar, val in zip(bars, means):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                f'{val:.4f}', ha='center', va='bottom', fontsize=9)
+
+    fig.tight_layout()
+    _savefig(fig, out_dir / f'{mode}_class_mse_bars.png')
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Results & LaTeX Table
+# ══════════════════════════════════════════════════════════════════════════
+
+def save_results(metrics, mode, cfg, checkpoint):
+    out_dir = Path(cfg['output']['save_dir']) / mode
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.DataFrame(metrics)
+    df.to_csv(out_dir / f'{mode}_all_samples.csv', index=False)
 
-    if cfg['output'].get('save_samples', False):
-        fmt = cfg['output'].get('save_format', 'json')
-        path = output_dir / f"{mode}_detailed.{fmt}"
-        if fmt == 'json':
-            df.to_json(path, orient='records', indent=2)
-        else:
-            df.to_pickle(path)
-
-    # Summary
-    summary: Dict[str, Any] = {
-        'mode': mode,
-        'num_samples': len(metrics),
-        'checkpoint_epoch': checkpoint.get('epoch', 'unknown'),
-    }
+    summary = {'mode': mode, 'num_samples': len(metrics),
+               'checkpoint_epoch': checkpoint.get('epoch', 'unknown')}
 
     for col in ['mse', 'l1', 'corr', 'snr_db', 'stft_l1', 'dtw']:
-        vals = [m[col] for m in metrics if col in m and not np.isnan(m.get(col, np.nan))]
-        if vals:
-            summary[f'{col}_mean'] = float(np.mean(vals))
+        vals = df[col].dropna().values if col in df.columns else []
+        if len(vals):
+            mean, lo, hi = _bootstrap_ci(vals)
+            summary[f'{col}_mean'] = mean
             summary[f'{col}_std'] = float(np.std(vals))
+            summary[f'{col}_ci_lo'] = lo
+            summary[f'{col}_ci_hi'] = hi
             summary[f'{col}_min'] = float(np.min(vals))
             summary[f'{col}_max'] = float(np.max(vals))
+            summary[f'{col}_median'] = float(np.median(vals))
 
-    # Per-class breakdown
-    class_ids = set(m.get('class_label') for m in metrics if 'class_label' in m)
-    if class_ids:
-        class_names = {0: 'NORMAL', 1: 'SNIK', 2: 'ITIK', 3: 'TOTAL', 4: 'NOROPATI'}
-        for cid in sorted(class_ids):
-            cls_metrics = [m for m in metrics if m.get('class_label') == cid]
-            if cls_metrics:
-                vals = [m['mse'] for m in cls_metrics if not np.isnan(m.get('mse', np.nan))]
-                if vals:
-                    name = class_names.get(int(cid), str(cid))
-                    summary[f'mse_{name}_mean'] = float(np.mean(vals))
-                    summary[f'mse_{name}_n'] = len(vals)
+    # Per-class
+    if 'class_label' in df.columns:
+        for cid, name in CLASS_NAMES.items():
+            sub = df[df['class_label'] == cid]
+            if len(sub):
+                for col in ['mse', 'corr', 'snr_db']:
+                    vals = sub[col].dropna().values if col in sub.columns else []
+                    if len(vals):
+                        summary[f'{col}_{name}_mean'] = float(np.mean(vals))
+                        summary[f'{col}_{name}_std'] = float(np.std(vals))
+                        summary[f'{col}_{name}_n'] = len(vals)
 
-    summary_file = output_dir / f"{mode}_summary.json"
-    with open(summary_file, 'w') as f:
+    # Save JSON
+    with open(out_dir / f'{mode}_summary.json', 'w') as f:
         json.dump(summary, f, indent=2)
 
-    logging.info(f"✓ Saved {mode} results to {output_dir}")
+    # LaTeX table
+    _save_latex_table(summary, mode, out_dir)
+
+    logging.info(f"Saved {mode} results to {out_dir}")
     return summary
 
 
-def save_evaluation_summary(all_results: Dict[str, Any], cfg: Dict[str, Any]):
-    """Save unified evaluation summary."""
-    output_dir = Path(cfg['output']['save_dir'])
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    evaluation_summary = {
-        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-        'metrics': {},
-    }
-
-    for mode, results in all_results.items():
-        if not isinstance(results, dict):
+def _save_latex_table(summary, mode, out_dir):
+    """Generate a LaTeX-ready table."""
+    lines = [
+        r'\begin{table}[h]',
+        r'\centering',
+        f'\\caption{{{mode.title()} Evaluation Results (N={summary["num_samples"]})}}',
+        r'\begin{tabular}{lcccc}',
+        r'\toprule',
+        r'Metric & Mean & Std & 95\% CI & Median \\',
+        r'\midrule',
+    ]
+    for col in ['mse', 'l1', 'corr', 'snr_db', 'stft_l1']:
+        if f'{col}_mean' not in summary:
             continue
-        for key, val in results.items():
-            if isinstance(val, (int, float)):
-                evaluation_summary['metrics'][f'{mode}.{key}'] = val
+        name = METRIC_LABELS.get(col, col)
+        mean = summary[f'{col}_mean']
+        std = summary.get(f'{col}_std', 0)
+        lo = summary.get(f'{col}_ci_lo', mean)
+        hi = summary.get(f'{col}_ci_hi', mean)
+        med = summary.get(f'{col}_median', mean)
+        lines.append(f'  {name} & {mean:.4f} & {std:.4f} & [{lo:.4f}, {hi:.4f}] & {med:.4f} \\\\')
 
-    path = output_dir / "evaluation_summary.json"
-    with open(path, 'w') as f:
-        json.dump(evaluation_summary, f, indent=2, default=str)
-    logging.info(f"✓ Summary: {path}")
+    lines.extend([r'\bottomrule', r'\end{tabular}', r'\end{table}'])
+    with open(out_dir / f'{mode}_table.tex', 'w') as f:
+        f.write('\n'.join(lines))
 
 
-# ---------------------------------------------------------------------------
+def save_evaluation_summary(all_results, cfg):
+    out_dir = Path(cfg['output']['save_dir'])
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = {'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'), 'metrics': {}}
+    for mode, results in all_results.items():
+        if isinstance(results, dict):
+            for k, v in results.items():
+                if isinstance(v, (int, float)):
+                    summary['metrics'][f'{mode}.{k}'] = v
+
+    with open(out_dir / 'evaluation_summary.json', 'w') as f:
+        json.dump(summary, f, indent=2, default=str)
+    logging.info(f"Summary: {out_dir / 'evaluation_summary.json'}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# TensorBoard
+# ══════════════════════════════════════════════════════════════════════════
+
+def log_to_tensorboard(metrics, ref, gen, mode, cfg, writer):
+    if not writer:
+        return
+
+    # Scalars
+    for col in ['mse', 'l1', 'corr', 'snr_db', 'stft_l1']:
+        vals = [m[col] for m in metrics if col in m and not np.isnan(m.get(col, np.nan))]
+        if vals:
+            writer.add_scalar(f'eval/{mode}/{col}_mean', np.mean(vals), 0)
+
+    # Overlay figures
+    try:
+        all_ref = torch.cat(ref, dim=0)
+        all_gen = torch.cat(gen, dim=0)
+        mse_vals = [m.get('mse', np.nan) for m in metrics]
+        sorted_idx = np.argsort(mse_vals)
+        best = sorted_idx[:5]
+
+        fig = overlay_waveforms(all_ref[best], all_gen[best],
+                                [f"MSE={mse_vals[i]:.4f}" for i in best])
+        writer.add_figure(f'eval/{mode}/best_overlay', fig, 0)
+        close_figure(fig)
+    except Exception as e:
+        logging.warning(f"TensorBoard figure error: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Main
-# ---------------------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════
 
 def main():
-    """Main evaluation entry point."""
-    parser = argparse.ArgumentParser(description="Evaluate ABR Transformer V2")
+    parser = argparse.ArgumentParser(description="ABR Transformer V2 — Paper-Grade Evaluation")
     parser.add_argument("--config", default="configs/eval.yaml")
     parser.add_argument("--override", default="")
     args = parser.parse_args()
 
     cfg = load_config(args.config, args.override)
     setup_logging(cfg.get('logging', {}).get('console_level', 'INFO'))
-
     torch.manual_seed(cfg['evaluation']['seed'])
     np.random.seed(cfg['evaluation']['seed'])
 
     device = torch.device(cfg['model']['device'] if torch.cuda.is_available() else 'cpu')
     logging.info(f"Device: {device}")
 
-    # Data
     eval_loader, dataset = create_evaluation_dataset(cfg)
-
-    # Model
     model, checkpoint = load_model_and_checkpoint(cfg, device)
 
-    # Diffusion — always use training T for noise schedule
     training_T = cfg.get('diffusion', {}).get('num_train_steps', 1000)
     noise_schedule = prepare_noise_schedule(training_T, device)
     sampler = DDIMSampler(model, training_T, device)
 
-    # TensorBoard
     writer = None
     if cfg.get('tensorboard', {}).get('enabled', True):
-        log_dir = Path(cfg['tensorboard']['log_dir'])
-        writer = SummaryWriter(log_dir)
-        config_text = yaml.dump(cfg, default_flow_style=False)
-        writer.add_text('config', f"```yaml\n{config_text}\n```", 0)
+        writer = SummaryWriter(Path(cfg['tensorboard']['log_dir']))
 
-    logging.info("=" * 60)
-    logging.info("STARTING EVALUATION")
-    logging.info("=" * 60)
+    out_dir = Path(cfg['output']['save_dir'])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir = out_dir / 'figures'
+    figures_dir.mkdir(exist_ok=True)
 
-    all_results: Dict[str, Any] = {}
+    logging.info("=" * 70)
+    logging.info("  ABR TRANSFORMER V2 — PAPER-GRADE EVALUATION")
+    logging.info("=" * 70)
+
+    all_results = {}
     eval_mode = cfg['evaluation'].get('mode', 'both')
 
-    # --- Reconstruction ---
+    summary_recon = None
+    summary_gen = None
+
+    # ── Reconstruction ──
     if eval_mode in ('reconstruction', 'both'):
-        recon_metrics, recon_ref, recon_gen = evaluate_reconstruction(
-            model, eval_loader, noise_schedule, dataset, cfg, device, training_T
-        )
-        summary = save_results(recon_metrics, 'reconstruction', cfg, checkpoint)
-        all_results['reconstruction'] = summary
+        recon_m, recon_ref, recon_gen = evaluate_reconstruction(
+            model, eval_loader, noise_schedule, dataset, cfg, device, training_T)
 
-        if writer:
-            log_scalars_to_tensorboard(recon_metrics, 'reconstruction', writer)
-            create_visualizations(recon_ref, recon_gen, recon_metrics,
-                                  'reconstruction', cfg, writer)
+        summary_recon = save_results(recon_m, 'reconstruction', cfg, checkpoint)
+        all_results['reconstruction'] = summary_recon
 
-    # --- Generation ---
+        all_ref = torch.cat(recon_ref, dim=0)
+        all_gen = torch.cat(recon_gen, dim=0)
+        df_recon = pd.DataFrame(recon_m)
+
+        logging.info("Generating reconstruction figures...")
+        fig_waveform_gallery(all_ref, all_gen, recon_m, 'reconstruction', figures_dir)
+        fig_metrics_boxplot(df_recon, 'reconstruction', figures_dir)
+        fig_intensity_analysis(df_recon, 'reconstruction', figures_dir)
+        fig_error_heatmap(all_ref, all_gen, 'reconstruction', figures_dir)
+        fig_mean_waveform_by_class(all_ref, all_gen, recon_m, 'reconstruction', figures_dir)
+        fig_psd_comparison(all_ref, all_gen, 'reconstruction', figures_dir)
+        fig_scatter_matrix(df_recon, 'reconstruction', figures_dir)
+        fig_class_comparison_bars(summary_recon, 'reconstruction', figures_dir)
+
+        log_to_tensorboard(recon_m, recon_ref, recon_gen, 'reconstruction', cfg, writer)
+
+    # ── Generation ──
     if eval_mode in ('generation', 'both'):
-        gen_metrics, gen_ref, gen_gen = evaluate_generation(
-            model, eval_loader, sampler, dataset, cfg, device
-        )
-        summary = save_results(gen_metrics, 'generation', cfg, checkpoint)
-        all_results['generation'] = summary
+        gen_m, gen_ref, gen_gen = evaluate_generation(
+            model, eval_loader, sampler, dataset, cfg, device)
 
-        if writer:
-            log_scalars_to_tensorboard(gen_metrics, 'generation', writer)
-            create_visualizations(gen_ref, gen_gen, gen_metrics,
-                                  'generation', cfg, writer)
+        summary_gen = save_results(gen_m, 'generation', cfg, checkpoint)
+        all_results['generation'] = summary_gen
+
+        all_ref = torch.cat(gen_ref, dim=0)
+        all_gen = torch.cat(gen_gen, dim=0)
+        df_gen = pd.DataFrame(gen_m)
+
+        logging.info("Generating generation figures...")
+        fig_waveform_gallery(all_ref, all_gen, gen_m, 'generation', figures_dir)
+        fig_metrics_boxplot(df_gen, 'generation', figures_dir)
+        fig_intensity_analysis(df_gen, 'generation', figures_dir)
+        fig_error_heatmap(all_ref, all_gen, 'generation', figures_dir)
+        fig_mean_waveform_by_class(all_ref, all_gen, gen_m, 'generation', figures_dir)
+        fig_psd_comparison(all_ref, all_gen, 'generation', figures_dir)
+        fig_scatter_matrix(df_gen, 'generation', figures_dir)
+        fig_class_comparison_bars(summary_gen, 'generation', figures_dir)
+
+        log_to_tensorboard(gen_m, gen_ref, gen_gen, 'generation', cfg, writer)
+
+    # ── Cross-mode summary ──
+    if summary_recon and summary_gen:
+        fig_summary_table(summary_recon, summary_gen, figures_dir)
 
     if writer:
         writer.close()
 
     save_evaluation_summary(all_results, cfg)
 
-    logging.info("=" * 60)
-    logging.info("EVALUATION COMPLETED")
-    logging.info("=" * 60)
-    logging.info(f"Results: {cfg['output']['save_dir']}")
+    # Print final summary
+    logging.info("")
+    logging.info("=" * 70)
+    logging.info("  RESULTS SUMMARY")
+    logging.info("=" * 70)
+    for mode, s in all_results.items():
+        logging.info(f"\n  {mode.upper()} (n={s['num_samples']}):")
+        for col in ['mse', 'corr', 'snr_db']:
+            if f'{col}_mean' in s:
+                logging.info(f"    {METRIC_LABELS.get(col, col):>12s}: "
+                             f"{s[f'{col}_mean']:.4f} ± {s.get(f'{col}_std', 0):.4f}  "
+                             f"[{s.get(f'{col}_ci_lo', 0):.4f}, {s.get(f'{col}_ci_hi', 0):.4f}]")
+
+    logging.info(f"\nFigures:  {figures_dir}")
+    logging.info(f"Results:  {out_dir}")
+    logging.info("=" * 70)
 
     return all_results
 

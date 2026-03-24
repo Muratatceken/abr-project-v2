@@ -82,37 +82,49 @@ class TimestepAdapter(nn.Module):
 
 
 class IntensityEmbedding(nn.Module):
-    """Dedicated sinusoidal + MLP embedding for stimulus intensity (0–1 normalized)."""
+    """Dedicated sinusoidal + MLP embedding for stimulus intensity, with learned unconditional."""
 
     def __init__(self, d_model: int, emb_dim: int = 64):
         super().__init__()
         self.emb_dim = emb_dim
+        self.d_model = d_model
         self.mlp = nn.Sequential(
             nn.Linear(emb_dim, d_model),
             nn.SiLU(),
             nn.Linear(d_model, d_model),
         )
+        # Learned unconditional embedding for CFG
+        self.uncond_emb = nn.Parameter(torch.zeros(d_model))
+        nn.init.normal_(self.uncond_emb, std=0.02)
 
-    def forward(self, intensity: torch.Tensor) -> torch.Tensor:
-        """intensity: [B] scalar in [0, 1] -> [B, d_model]"""
-        emb = sinusoidal_embedding(intensity * 1000.0, self.emb_dim)  # scale for richer frequencies
+    def forward(self, intensity: Optional[torch.Tensor], batch_size: int = 1) -> torch.Tensor:
+        """intensity: [B] scalar in [0, 1] or None -> [B, d_model]"""
+        if intensity is None:
+            return self.uncond_emb.unsqueeze(0).expand(batch_size, -1)
+        emb = sinusoidal_embedding(intensity * 1000.0, self.emb_dim)
         return self.mlp(emb)
 
 
 class AuxStaticEmbedding(nn.Module):
-    """MLP embedding for auxiliary static parameters [Age, StimRate, FMP]."""
+    """MLP embedding for auxiliary static parameters, with learned unconditional."""
 
     def __init__(self, input_dim: int, d_model: int, hidden: int = 64):
         super().__init__()
+        self.d_model = d_model
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden),
             nn.SiLU(),
             nn.LayerNorm(hidden),
             nn.Linear(hidden, d_model),
         )
+        # Learned unconditional embedding for CFG
+        self.uncond_emb = nn.Parameter(torch.zeros(d_model))
+        nn.init.normal_(self.uncond_emb, std=0.02)
 
-    def forward(self, aux: torch.Tensor) -> torch.Tensor:
-        """aux: [B, input_dim] -> [B, d_model]"""
+    def forward(self, aux: Optional[torch.Tensor], batch_size: int = 1) -> torch.Tensor:
+        """aux: [B, input_dim] or None -> [B, d_model]"""
+        if aux is None:
+            return self.uncond_emb.unsqueeze(0).expand(batch_size, -1)
         return self.mlp(aux)
 
 
@@ -258,34 +270,25 @@ class ABRTransformerGenerator(nn.Module):
         class_label: Optional[torch.Tensor],
         B: int,
     ):
-        """Compute conditioning embeddings.
+        """Compute conditioning embeddings using learned unconditional where needed.
 
         Returns:
-            pre_cond: [B, D] for pre-transformer FiLM (intensity + aux)
-            post_cond: [B, D] for post-transformer FiLM (intensity + class)
+            pre_cond: [B, D] or None for pre-transformer FiLM (intensity + aux)
+            post_cond: [B, D] or None for post-transformer FiLM (intensity + class)
             class_emb: [B, D] for additive class injection
         """
-        device = next(self.parameters()).device
+        # Each embedding module handles None internally with learned uncond
+        i_emb = self.intensity_emb(intensity, batch_size=B)   # [B, D]
+        a_emb = self.aux_static_emb(aux_static, batch_size=B) # [B, D]
+        c_emb = self.class_emb(class_label, batch_size=B)     # [B, D]
 
-        # Intensity embedding
-        if intensity is not None:
-            i_emb = self.intensity_emb(intensity)  # [B, D]
-        else:
-            i_emb = self.intensity_emb.mlp[0].bias.new_zeros(B, self.d_model)
+        # Check if all conditioning is dropped (full unconditional)
+        all_dropped = (intensity is None and aux_static is None and class_label is None)
 
-        # Aux static embedding
-        if aux_static is not None:
-            a_emb = self.aux_static_emb(aux_static)  # [B, D]
-        else:
-            a_emb = torch.zeros_like(i_emb)
-
-        # Class embedding
-        c_emb = self.class_emb(class_label, batch_size=B)  # [B, D]
-
-        # Pre-FiLM: intensity dominant + scaled aux
-        pre_cond = i_emb + self.aux_scale * a_emb
+        # Pre-FiLM: intensity + scaled aux
+        pre_cond = None if all_dropped else (i_emb + self.aux_scale * a_emb)
         # Post-FiLM: intensity + class
-        post_cond = i_emb + c_emb
+        post_cond = None if all_dropped else (i_emb + c_emb)
 
         return pre_cond, post_cond, c_emb
 

@@ -40,10 +40,11 @@ model:
   static_dim: 4
 
 # ── Conditioning ─────────────────────────────────────────────────────
+# Higher dropout rates improve CFG quality for generation
 conditioning:
-  cfg_dropout_prob: 0.10          # drop intensity + aux_static
-  class_cfg_dropout_prob: 0.15    # drop class label only
-  both_cfg_dropout_prob: 0.05     # drop everything (fully unconditional)
+  cfg_dropout_prob: 0.15          # drop intensity + aux_static (was 0.10)
+  class_cfg_dropout_prob: 0.20    # drop class label only (was 0.15)
+  both_cfg_dropout_prob: 0.10     # drop everything — fully unconditional (was 0.05)
   intensity_normalization: "unit_range"
   fmp_clip_percentile: 99
 
@@ -54,8 +55,8 @@ diffusion:
   v_prediction: true
   sample_steps: 50
   ddim_eta: 0.0
-  cfg_scale: 2.0
-  class_cfg_scale: 1.5
+  cfg_scale: 3.0              # increased for stronger generation guidance
+  class_cfg_scale: 2.0         # increased for better class-conditional generation
 
 # ── Optimizer ────────────────────────────────────────────────────────
 optim:
@@ -77,7 +78,7 @@ loss:
 
 # ── Trainer ──────────────────────────────────────────────────────────
 trainer:
-  max_epochs: 200
+  max_epochs: 300
   log_every_steps: 50
   validate_every_epochs: 1
   sample_every_epochs: 5
@@ -90,9 +91,8 @@ trainer:
 
 # ── LR Scheduler ────────────────────────────────────────────────────
 advanced:
-  cfg_dropout_prob: 0.1
   lr_scheduler: "cosine"
-  lr_warmup_steps: 500
+  lr_warmup_steps: 1000
 
 # ── Visualization ───────────────────────────────────────────────────
 viz:
@@ -116,7 +116,7 @@ advanced_augmentation:
 early_stopping:
   enabled: true
   type: 'basic'
-  patience: 30
+  patience: 50
   min_delta: 0.000001
   metric: 'val_signal_mse'
   mode: 'min'

@@ -1014,69 +1014,123 @@ class TrainingMonitor:
         logger.info(f"Dashboard would start on port {self.dashboard_port}")
         
     def plot_training_progress(self, save_path: Optional[str] = None):
-        """Plot training progress visualization."""
+        """Plot comprehensive training progress (3x2 grid)."""
         try:
-            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-            
-            # Plot 1: Training metrics
-            ax1 = axes[0, 0]
-            for metric_name in ['train_loss', 'val_loss']:
-                if metric_name in self.metric_tracker.metrics_history:
-                    values = self.metric_tracker.metrics_history[metric_name]
-                    ax1.plot(values, label=metric_name)
-            ax1.set_title('Training Progress')
-            ax1.set_xlabel('Steps')
-            ax1.set_ylabel('Loss')
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-            
-            # Plot 2: Resource usage
-            ax2 = axes[0, 1]
-            if self.resource_monitor:
-                for resource_name in ['cpu_percent', 'memory_percent']:
-                    if resource_name in self.resource_monitor.resource_history:
-                        history = self.resource_monitor.resource_history[resource_name]
-                        timestamps, values = zip(*history)
-                        ax2.plot(values, label=resource_name)
-                ax2.set_title('Resource Usage')
-                ax2.set_xlabel('Time')
-                ax2.set_ylabel('Percentage')
-                ax2.legend()
-                ax2.grid(True, alpha=0.3)
-                
-            # Plot 3: Model health
-            ax3 = axes[1, 0]
+            fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+            history = self.metric_tracker.metrics_history
+
+            # ── Plot 1: Train losses ──
+            ax = axes[0, 0]
+            for key in sorted(history.keys()):
+                if key.startswith('train_') or key.startswith('loss'):
+                    vals = history[key]
+                    if len(vals) > 0:
+                        ax.plot(vals, label=key, linewidth=0.8, alpha=0.8)
+            ax.set_title('Training Losses', fontweight='bold')
+            ax.set_xlabel('Steps')
+            ax.set_ylabel('Loss')
+            ax.legend(fontsize=7, loc='upper right')
+            ax.grid(True, alpha=0.3)
+            ax.set_yscale('log')
+
+            # ── Plot 2: Validation loss ──
+            ax = axes[0, 1]
+            for key in sorted(history.keys()):
+                if 'val' in key:
+                    vals = history[key]
+                    if len(vals) > 0:
+                        ax.plot(vals, label=key, linewidth=1.2, marker='o', markersize=2)
+            ax.set_title('Validation Metrics', fontweight='bold')
+            ax.set_xlabel('Epoch')
+            ax.set_ylabel('Value')
+            ax.legend(fontsize=7)
+            ax.grid(True, alpha=0.3)
+
+            # ── Plot 3: Gradient norm ──
+            ax = axes[1, 0]
             if self.model_health_monitor and 'total_norm' in self.model_health_monitor.gradient_history:
-                history = self.model_health_monitor.gradient_history['total_norm']
-                epochs, steps, norms = zip(*history)
-                ax3.plot(norms, label='Gradient Norm')
-                ax3.set_title('Model Health')
-                ax3.set_xlabel('Updates')
-                ax3.set_ylabel('Gradient Norm')
-                ax3.legend()
-                ax3.grid(True, alpha=0.3)
-                
-            # Plot 4: Alerts over time
-            ax4 = axes[1, 1]
-            if self.alert_history:
-                alert_times = [alert['timestamp'] for alert in self.alert_history]
-                alert_counts = list(range(1, len(alert_times) + 1))
-                ax4.plot(alert_counts, label='Cumulative Alerts')
-                ax4.set_title('Alert History')
-                ax4.set_xlabel('Time')
-                ax4.set_ylabel('Cumulative Alert Count')
-                ax4.legend()
-                ax4.grid(True, alpha=0.3)
-                
-            plt.tight_layout()
-            
+                gh = self.model_health_monitor.gradient_history['total_norm']
+                if gh:
+                    _, _, norms = zip(*gh)
+                    norms = list(norms)
+                    ax.plot(norms, linewidth=0.5, alpha=0.5, color='steelblue')
+                    # Rolling mean
+                    if len(norms) > 50:
+                        window = min(100, len(norms) // 5)
+                        rolling = [np.mean(norms[max(0, i - window):i + 1]) for i in range(len(norms))]
+                        ax.plot(rolling, linewidth=1.5, color='darkblue', label=f'Rolling mean (w={window})')
+                    ax.axhline(y=1.0, color='green', ls='--', alpha=0.5, label='Ideal ≈ 1.0')
+                    ax.axhline(y=10.0, color='red', ls='--', alpha=0.5, label='Explosion threshold')
+                    ax.legend(fontsize=7)
+            ax.set_title('Gradient Norm', fontweight='bold')
+            ax.set_xlabel('Steps')
+            ax.set_ylabel('L2 Norm')
+            ax.grid(True, alpha=0.3)
+
+            # ── Plot 4: Learning rate ──
+            ax = axes[1, 1]
+            if 'lr' in history and history['lr']:
+                ax.plot(history['lr'], linewidth=1.0, color='orange')
+            ax.set_title('Learning Rate Schedule', fontweight='bold')
+            ax.set_xlabel('Steps')
+            ax.set_ylabel('LR')
+            ax.grid(True, alpha=0.3)
+
+            # ── Plot 5: Resource usage ──
+            ax = axes[2, 0]
+            if self.resource_monitor:
+                for rname, color in [('cpu_percent', 'tab:blue'), ('memory_percent', 'tab:red')]:
+                    if rname in self.resource_monitor.resource_history:
+                        rh = self.resource_monitor.resource_history[rname]
+                        if rh:
+                            _, vals = zip(*rh)
+                            ax.plot(vals, label=rname.replace('_', ' '), color=color, linewidth=0.8)
+                # GPU memory
+                for rname in sorted(self.resource_monitor.resource_history.keys()):
+                    if 'gpu' in rname and 'allocated' in rname:
+                        rh = self.resource_monitor.resource_history[rname]
+                        if rh:
+                            _, vals = zip(*rh)
+                            ax.plot(vals, label=rname, linewidth=0.8, ls='--')
+                ax.legend(fontsize=7)
+            ax.set_title('Resource Usage', fontweight='bold')
+            ax.set_xlabel('Time')
+            ax.set_ylabel('% / GB')
+            ax.grid(True, alpha=0.3)
+
+            # ── Plot 6: Per-layer gradient norm heatmap ──
+            ax = axes[2, 1]
+            if self.model_health_monitor:
+                layer_norms = {}
+                for key, vals in self.model_health_monitor.gradient_history.items():
+                    if key != 'total_norm' and vals:
+                        _, _, norms = zip(*vals)
+                        layer_norms[key] = list(norms)
+                if layer_norms:
+                    # Take last N steps
+                    N = min(200, min(len(v) for v in layer_norms.values()))
+                    names = sorted(layer_norms.keys())[:20]  # top 20 layers
+                    data = np.array([layer_norms[n][-N:] for n in names])
+                    im = ax.imshow(np.log10(data + 1e-10), aspect='auto', cmap='viridis',
+                                   interpolation='nearest')
+                    ax.set_yticks(range(len(names)))
+                    ax.set_yticklabels([n[:25] for n in names], fontsize=6)
+                    ax.set_xlabel('Steps (last N)')
+                    fig.colorbar(im, ax=ax, shrink=0.8, label='log10(grad norm)')
+            ax.set_title('Per-Layer Gradient Norms', fontweight='bold')
+
+            fig.suptitle('Training Progress Dashboard', fontsize=14, fontweight='bold')
+            fig.tight_layout(rect=[0, 0, 1, 0.97])
+
             if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                fig.savefig(save_path, dpi=300, bbox_inches='tight')
+                plt.close(fig)
+                logger.info(f"Training progress plot saved to {save_path}")
             else:
                 plt.show()
-                
-        except ImportError:
-            logger.warning("matplotlib not available for plotting")
+
+        except Exception as e:
+            logger.warning(f"Failed to create training progress plot: {e}")
             
     def reset_all(self):
         """Reset all monitoring components."""

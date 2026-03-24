@@ -758,6 +758,69 @@ def load_checkpoint(
     return start_epoch, global_step, best_val_loss
 
 
+def _log_generation_quality(model, ema, sampler, val_loader, writer, epoch, cfg, device):
+    """Measure generation quality by comparing generated vs real signals."""
+    try:
+        from utils import mse_time, pearson_correlation
+        ema.apply_shadow(model)
+        model.eval()
+
+        val_batch = next(iter(val_loader))
+        n = min(16, val_batch['x0'].shape[0])
+        x0 = val_batch['x0'][:n].to(device)
+        intensity = val_batch['intensity'][:n].to(device)
+        aux = val_batch['aux_static'][:n].to(device)
+        cls = val_batch['class_label'][:n].to(device)
+
+        with torch.no_grad():
+            gen = sampler.sample_conditioned(
+                intensity=intensity, aux_static=aux, class_label=cls,
+                steps=cfg['diffusion']['sample_steps'],
+                cfg_scale=cfg['diffusion'].get('cfg_scale', 3.0),
+                class_cfg_scale=cfg['diffusion'].get('class_cfg_scale', 2.0),
+                progress=False,
+            )
+            gen_mse = mse_time(gen, x0).item()
+            gen_corr = pearson_correlation(gen, x0).item()
+
+        writer.add_scalar('gen_quality/mse', gen_mse, epoch)
+        writer.add_scalar('gen_quality/correlation', gen_corr, epoch)
+        logging.info(f"  Gen quality: MSE={gen_mse:.4f}, Corr={gen_corr:.4f}")
+
+        ema.restore(model)
+    except Exception as e:
+        logging.warning(f"Gen quality check failed: {e}")
+        try:
+            ema.restore(model)
+        except Exception:
+            pass
+
+
+def _log_uncond_health(model, writer, epoch):
+    """Log unconditional embedding norms and gradients for CFG health monitoring."""
+    try:
+        uncond_info = {}
+        for name, param in model.named_parameters():
+            if 'uncond_emb' in name:
+                norm = param.data.norm().item()
+                grad_norm = param.grad.norm().item() if param.grad is not None else 0.0
+                short_name = name.replace('module.', '')
+                uncond_info[short_name] = {'norm': norm, 'grad_norm': grad_norm}
+                writer.add_scalar(f'uncond/{short_name}/norm', norm, epoch)
+                writer.add_scalar(f'uncond/{short_name}/grad_norm', grad_norm, epoch)
+
+        # Log summary
+        if uncond_info:
+            total_norm = sum(v['norm'] for v in uncond_info.values())
+            total_grad = sum(v['grad_norm'] for v in uncond_info.values())
+            writer.add_scalar('uncond/total_norm', total_norm, epoch)
+            writer.add_scalar('uncond/total_grad_norm', total_grad, epoch)
+            if total_grad < 1e-7:
+                logging.warning(f"  Uncond embeddings have near-zero gradients ({total_grad:.2e}) — CFG may not work")
+    except Exception as e:
+        logging.warning(f"Uncond health check failed: {e}")
+
+
 def main():
     """Main training function."""
     parser = argparse.ArgumentParser(description="Train ABR Transformer")
@@ -940,12 +1003,16 @@ def main():
         if ensemble and ensemble.should_take_snapshot(epoch):
             ensemble.take_snapshot(model, epoch, {'val_loss': val_loss} if 'val_loss' in locals() else None)
         
-        # Periodic sampling
+        # Periodic sampling + generation quality metrics
         if epoch % cfg['trainer']['sample_every_epochs'] == 0:
             periodic_sampling(
-                model, ema, sampler, val_loader, dataset, 
+                model, ema, sampler, val_loader, dataset,
                 writer, epoch, cfg, device
             )
+            # Log generation quality metrics
+            _log_generation_quality(model, ema, sampler, val_loader, writer, epoch, cfg, device)
+            # Log unconditional embedding norms (CFG health check)
+            _log_uncond_health(model, writer, epoch)
         
         # Checkpointing
         if epoch % cfg['trainer']['save_every_epochs'] == 0 or is_best:
