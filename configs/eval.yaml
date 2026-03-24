@@ -10,7 +10,7 @@ dataset:
 
 # Model architecture (must match training config)
 model:
-  checkpoint_path: "checkpoints/abr_v2_best.pt"
+  checkpoint_path: "checkpoints/abr_transformer/abr_intensity_cond_v2_best.pt"
   device: "cuda"
   precision: "float32"
   input_channels: 1

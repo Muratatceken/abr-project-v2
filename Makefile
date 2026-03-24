@@ -26,7 +26,7 @@ PYTHON ?= python3
 TRAIN_CONFIG   ?= configs/train.yaml
 EVAL_CONFIG    ?= configs/eval.yaml
 HPO_CONFIG     ?= configs/hpo_search_space.yaml
-CHECKPOINT     ?= checkpoints/abr_transformer/abr_vpred_base_best.pt
+CHECKPOINT     ?= checkpoints/abr_transformer/abr_intensity_cond_v2_best.pt
 DATA_PATH      ?= data/processed/ultimate_dataset_with_clinical_thresholds.pkl
 OVERRIDE       ?=
 
