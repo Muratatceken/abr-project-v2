@@ -762,7 +762,9 @@ def _log_generation_quality(model, ema, sampler, val_loader, writer, epoch, cfg,
     """Measure generation quality by comparing generated vs real signals."""
     try:
         from utils import mse_time, pearson_correlation
-        ema.apply_shadow(model)
+
+        # Apply EMA weights temporarily (apply_to returns original params for restore)
+        original_params = ema.apply_to(model)
         model.eval()
 
         val_batch = next(iter(val_loader))
@@ -787,36 +789,24 @@ def _log_generation_quality(model, ema, sampler, val_loader, writer, epoch, cfg,
         writer.add_scalar('gen_quality/correlation', gen_corr, epoch)
         logging.info(f"  Gen quality: MSE={gen_mse:.4f}, Corr={gen_corr:.4f}")
 
-        ema.restore(model)
+        # Restore original training weights
+        ema.restore(model, original_params)
     except Exception as e:
         logging.warning(f"Gen quality check failed: {e}")
-        try:
-            ema.restore(model)
-        except Exception:
-            pass
 
 
 def _log_uncond_health(model, writer, epoch):
-    """Log unconditional embedding norms and gradients for CFG health monitoring."""
+    """Log unconditional embedding norms for CFG health monitoring.
+
+    Note: Gradients are zeroed after optimizer.step(), so we track param norms.
+    Growing norms indicate the uncond embeddings are learning.
+    """
     try:
-        uncond_info = {}
         for name, param in model.named_parameters():
             if 'uncond_emb' in name:
                 norm = param.data.norm().item()
-                grad_norm = param.grad.norm().item() if param.grad is not None else 0.0
                 short_name = name.replace('module.', '')
-                uncond_info[short_name] = {'norm': norm, 'grad_norm': grad_norm}
-                writer.add_scalar(f'uncond/{short_name}/norm', norm, epoch)
-                writer.add_scalar(f'uncond/{short_name}/grad_norm', grad_norm, epoch)
-
-        # Log summary
-        if uncond_info:
-            total_norm = sum(v['norm'] for v in uncond_info.values())
-            total_grad = sum(v['grad_norm'] for v in uncond_info.values())
-            writer.add_scalar('uncond/total_norm', total_norm, epoch)
-            writer.add_scalar('uncond/total_grad_norm', total_grad, epoch)
-            if total_grad < 1e-7:
-                logging.warning(f"  Uncond embeddings have near-zero gradients ({total_grad:.2e}) — CFG may not work")
+                writer.add_scalar(f'uncond/{short_name}_norm', norm, epoch)
     except Exception as e:
         logging.warning(f"Uncond health check failed: {e}")
 
